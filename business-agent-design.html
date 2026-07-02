@@ -1,0 +1,1170 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Vela · 织帆 — 业务智能体设计说明 SDD-BA v1.0</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;600;700;900&family=Noto+Sans+SC:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;500;600&display=swap');
+:root{
+  --bg:#faf8f4;--bg2:#f3f0e8;--bg3:#ede9de;
+  --ink:#1a1714;--ink2:#3a342e;--ink3:#6b6158;--ink4:#9e9590;
+  --card:#ffffff;--border:#ddd8ce;--border2:#c8c2b4;
+  --vb:#1a5fff;--vc:#0099cc;--vg:#1a6fff;
+  --vb-bg:#eef3ff;--vc-bg:#e6f7ff;
+  --red:#b5341c;--red-bg:#fdf0ec;
+  --amber:#8a5e00;--amber-bg:#fdf6e0;
+  --green:#1a5c32;--green-bg:#eaf5ed;
+  --purple:#5c2080;--purple-bg:#f3eafa;
+  --teal:#0a5050;--teal-bg:#e6f5f5;
+  --serif:"Noto Serif SC",serif;
+  --sans:"Noto Sans SC",sans-serif;
+  --mono:"JetBrains Mono",monospace;
+  --sw:272px; --r:6px; --rl:10px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth;font-size:14px}
+body{font-family:var(--sans);background:var(--bg);color:var(--ink);line-height:1.75;overflow-x:hidden}
+
+/* SIDEBAR */
+.sb{position:fixed;left:0;top:0;width:var(--sw);height:100vh;background:var(--ink);color:#b0a898;overflow-y:auto;z-index:200;display:flex;flex-direction:column;transition:transform .3s;scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.1) transparent}
+.sb::-webkit-scrollbar{width:3px}.sb::-webkit-scrollbar-thumb{background:rgba(255,255,255,.1)}
+.sb-brand{padding:20px 18px 14px;border-bottom:1px solid rgba(255,255,255,.07)}
+.sb-chip{display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:9px;letter-spacing:.14em;color:rgba(255,255,255,.3);text-transform:uppercase;margin-bottom:8px}
+.sb-chip-dot{width:6px;height:6px;border-radius:50%;background:var(--vc)}
+.sb-title{font-family:var(--serif);font-size:13px;font-weight:700;color:#fff;line-height:1.4}
+.sb-meta{font-family:var(--mono);font-size:10px;color:rgba(255,255,255,.25);margin-top:4px}
+.sb-pg{padding:10px 18px 12px;border-bottom:1px solid rgba(255,255,255,.06)}
+.sb-pg-row{display:flex;justify-content:space-between;align-items:center;font-family:var(--mono);font-size:9px;color:rgba(255,255,255,.28);margin-bottom:5px}
+.sb-pg-bar{height:2px;background:rgba(255,255,255,.08);border-radius:1px;overflow:hidden}
+.sb-pg-fill{height:100%;background:linear-gradient(90deg,var(--vb),var(--vc));width:0%;transition:width .3s}
+.ng{padding:8px 0}
+.ng-title{font-family:var(--mono);font-size:9px;letter-spacing:.14em;color:rgba(255,255,255,.22);padding:5px 18px 3px;text-transform:uppercase}
+.ni{display:flex;align-items:flex-start;gap:7px;padding:5px 18px;font-size:12px;color:rgba(255,255,255,.45);text-decoration:none;cursor:pointer;border-left:2px solid transparent;transition:all .15s;line-height:1.4}
+.ni:hover{color:rgba(255,255,255,.82);background:rgba(255,255,255,.04)}
+.ni.on{color:#fff;border-left-color:var(--vc);background:rgba(0,153,204,.12)}
+.ni.sub{padding-left:30px;font-size:11px}
+.ni .nid{font-family:var(--mono);font-size:9px;color:rgba(255,255,255,.2);min-width:20px;margin-top:2px;flex-shrink:0}
+.ndiv{height:1px;background:rgba(255,255,255,.06);margin:5px 0}
+
+/* TOPBAR */
+.topbar{background:var(--ink2);border-bottom:1px solid rgba(255,255,255,.06);padding:9px 44px;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;position:sticky;top:0;z-index:100}
+.tb-bc{font-family:var(--mono);font-size:11px;color:rgba(255,255,255,.5);display:flex;align-items:center;gap:6px}
+.tb-bc a{color:rgba(100,160,255,.8);text-decoration:none}
+.tb-bc span{color:rgba(255,255,255,.25)}
+.print-btn{background:var(--vb);color:#fff;border:none;padding:5px 14px;border-radius:var(--r);font-size:11px;cursor:pointer;font-family:var(--mono);transition:opacity .2s;flex-shrink:0}
+.print-btn:hover{opacity:.85}
+
+/* MAIN */
+.main{margin-left:var(--sw);min-height:100vh}
+
+/* COVER */
+.cover{background:var(--ink);min-height:440px;padding:64px 52px 52px;position:relative;overflow:hidden}
+.cov-grid{position:absolute;inset:0;background-image:linear-gradient(rgba(255,255,255,.02) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.02) 1px,transparent 1px);background-size:40px 40px}
+.cov-g1{position:absolute;top:-60px;right:-60px;width:400px;height:400px;background:radial-gradient(circle,rgba(26,111,255,.18) 0%,transparent 65%);pointer-events:none}
+.cov-g2{position:absolute;bottom:-40px;left:40px;width:300px;height:300px;background:radial-gradient(circle,rgba(0,153,204,.1) 0%,transparent 65%);pointer-events:none}
+.cov-inner{position:relative;z-index:1}
+.cov-badge{display:inline-flex;align-items:center;gap:7px;border:1px solid rgba(0,153,204,.35);background:rgba(0,153,204,.07);padding:4px 14px;border-radius:20px;font-family:var(--mono);font-size:10px;letter-spacing:.1em;color:rgba(0,196,255,.8);margin-bottom:20px}
+.cov-badge::before{content:"▲";font-size:8px}
+.cov-h1{font-family:var(--serif);font-size:clamp(22px,3.5vw,42px);font-weight:900;color:#fff;line-height:1.2;margin-bottom:8px}
+.cov-h1 em{font-style:normal;color:#5bc0f0}
+.cov-sub{font-size:14px;color:rgba(255,255,255,.42);margin-bottom:32px;line-height:1.6;max-width:580px}
+.cov-hr{border:none;border-top:1px solid rgba(255,255,255,.08);margin:24px 0}
+.cov-meta{display:flex;flex-wrap:wrap;gap:28px}
+.cm-item .cl{font-family:var(--mono);font-size:9px;letter-spacing:.1em;color:rgba(255,255,255,.28);text-transform:uppercase;margin-bottom:3px}
+.cm-item .cv{font-size:12px;color:rgba(255,255,255,.7)}
+.cov-tags{display:flex;flex-wrap:wrap;gap:6px;margin-top:20px}
+.ctag{font-family:var(--mono);font-size:9px;padding:2px 9px;border-radius:20px;border:1px solid rgba(255,255,255,.12);color:rgba(255,255,255,.4)}
+.ctag.hi{border-color:rgba(91,192,240,.35);color:rgba(91,192,240,.75);background:rgba(91,192,240,.07)}
+
+/* SECTIONS */
+.sec{padding:52px;border-bottom:1px solid var(--border)}
+.sec:nth-child(even){background:linear-gradient(180deg,var(--bg2) 0%,var(--bg) 100%)}
+.sec-hd{margin-bottom:28px}
+.sec-eye{display:flex;align-items:center;gap:9px;margin-bottom:9px}
+.etag{font-family:var(--mono);font-size:10px;letter-spacing:.1em;padding:2px 9px;border-radius:3px;color:#fff}
+.etag.blue{background:var(--vb)}.etag.teal{background:var(--teal)}.etag.red{background:var(--red)}
+.etag.amber{background:var(--amber)}.etag.green{background:var(--green)}.etag.purple{background:var(--purple)}
+.esub{font-family:var(--mono);font-size:10px;color:var(--ink4);border:1px solid var(--border2);padding:2px 7px;border-radius:3px}
+h2.st{font-family:var(--serif);font-size:clamp(18px,2.2vw,26px);font-weight:700;color:var(--ink);line-height:1.3}
+.sd{font-size:13px;color:var(--ink3);margin-top:6px;line-height:1.7;max-width:720px}
+h3.sh{font-family:var(--serif);font-size:16px;font-weight:700;color:var(--ink);margin:24px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+h4.sh2{font-family:var(--sans);font-weight:600;font-size:12px;color:var(--ink3);margin:14px 0 8px;text-transform:uppercase;letter-spacing:.06em}
+
+/* GRID */
+.g2{display:grid;grid-template-columns:repeat(2,1fr);gap:16px}
+.g3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+.g4{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+
+/* CARD */
+.card{background:var(--card);border:1px solid var(--border);border-radius:var(--rl);padding:18px;transition:box-shadow .2s}
+.card:hover{box-shadow:0 4px 20px rgba(26,23,20,.07)}
+.card-ic{font-size:22px;margin-bottom:8px;display:block}
+.card-tag{font-family:var(--mono);font-size:9px;letter-spacing:.1em;color:var(--ink4);margin-bottom:5px}
+.card h3{font-family:var(--serif);font-size:14px;font-weight:700;color:var(--ink);margin-bottom:7px}
+.card p{font-size:13px;color:var(--ink3);line-height:1.65}
+.card ul{list-style:none;margin-top:8px}
+.card ul li{font-size:12px;color:var(--ink3);padding:2px 0;display:flex;gap:5px;align-items:flex-start;line-height:1.5}
+.card ul li::before{content:"▸";color:var(--vb);font-size:10px;flex-shrink:0;margin-top:3px}
+
+/* TABLE */
+.tw{overflow-x:auto;border:1px solid var(--border);border-radius:var(--rl);margin:12px 0;box-shadow:0 1px 4px rgba(26,23,20,.05)}
+table.tbl{width:100%;border-collapse:collapse;font-size:12px}
+.tbl thead{background:var(--ink)}
+.tbl th{padding:9px 12px;text-align:left;color:rgba(255,255,255,.82);font-weight:600;font-size:11px;white-space:nowrap}
+.tbl td{padding:8px 12px;border-bottom:1px solid var(--border);color:var(--ink3);vertical-align:top;line-height:1.55}
+.tbl tr:last-child td{border-bottom:none}
+.tbl tr:hover td{background:var(--vb-bg)}
+.tbl td:first-child{color:var(--ink);font-weight:500}
+.tbl.sm th,.tbl.sm td{padding:6px 10px;font-size:11px}
+
+/* CALLOUT */
+.callout{border-left:3px solid var(--vb);background:var(--vb-bg);padding:13px 16px;border-radius:0 var(--r) var(--r) 0;margin:12px 0}
+.callout.teal{border-color:var(--teal);background:var(--teal-bg)}
+.callout.amber{border-color:var(--amber);background:var(--amber-bg)}
+.callout.green{border-color:var(--green);background:var(--green-bg)}
+.callout.red{border-color:var(--red);background:var(--red-bg)}
+.callout p{font-size:13px;color:var(--ink3);line-height:1.7}
+.callout strong{color:var(--ink)}
+
+/* BADGE */
+.badge{display:inline-block;font-family:var(--mono);font-size:10px;padding:1px 7px;border-radius:3px}
+.b-blue{background:var(--vb-bg);color:var(--vb);border:1px solid #b8ccff}
+.b-teal{background:var(--teal-bg);color:var(--teal);border:1px solid #a0cccc}
+.b-red{background:var(--red-bg);color:var(--red);border:1px solid #f5c0b0}
+.b-amber{background:var(--amber-bg);color:var(--amber);border:1px solid #f0d888}
+.b-green{background:var(--green-bg);color:var(--green);border:1px solid #a0d0b0}
+.b-purple{background:var(--purple-bg);color:var(--purple);border:1px solid #d0b0f0}
+.b-gray{background:var(--bg2);color:var(--ink3);border:1px solid var(--border2)}
+
+/* CODE */
+.cw{background:var(--ink);border-radius:var(--rl);overflow:hidden;margin:12px 0}
+.ch{display:flex;align-items:center;justify-content:space-between;padding:8px 14px;background:rgba(255,255,255,.04);border-bottom:1px solid rgba(255,255,255,.06)}
+.cl-lang{font-family:var(--mono);font-size:9px;color:rgba(255,255,255,.3);letter-spacing:.1em;text-transform:uppercase}
+.cl-title{font-family:var(--mono);font-size:11px;color:rgba(255,255,255,.5)}
+pre.code{padding:16px;font-family:var(--mono);font-size:11.5px;line-height:1.8;color:rgba(255,255,255,.82);overflow-x:auto;white-space:pre}
+.k{color:#f97316}.s{color:#86efac}.c{color:#6e7a8a;font-style:italic}.n{color:#7dd3fc}.v{color:#fbbf24}.t{color:#a78bfa}.p{color:rgba(255,255,255,.82)}.m{color:#fde68a}
+
+/* ASCII DIAGRAM */
+.asc{background:var(--ink);border-radius:var(--rl);padding:18px 22px;font-family:var(--mono);font-size:11.5px;line-height:1.7;color:rgba(255,255,255,.78);overflow-x:auto;margin:12px 0;white-space:pre}
+.aa{color:#5bc0f0}.ab{color:#7dd3fc}.ac{color:#86efac}.ad{color:#fbbf24}.ae{color:#f97316}
+
+/* ARCH BOX */
+.arch-layer{margin-bottom:8px}
+.arch-row{display:flex;flex-wrap:wrap;gap:8px;margin-top:6px}
+.abox{padding:7px 14px;border-radius:var(--r);font-size:11px;font-weight:500;border:1px solid;white-space:nowrap;cursor:default;transition:transform .15s}
+.abox:hover{transform:translateY(-2px)}
+.ax-blue{background:var(--vb-bg);border-color:var(--vb);color:var(--vb)}
+.ax-teal{background:var(--teal-bg);border-color:var(--teal);color:var(--teal)}
+.ax-amber{background:var(--amber-bg);border-color:var(--amber);color:var(--amber)}
+.ax-green{background:var(--green-bg);border-color:var(--green);color:var(--green)}
+.ax-red{background:var(--red-bg);border-color:var(--red);color:var(--red)}
+.ax-purple{background:var(--purple-bg);border-color:var(--purple);color:var(--purple)}
+.ax-dark{background:var(--bg2);border-color:var(--border2);color:var(--ink3)}
+.arch-label{font-family:var(--mono);font-size:10px;color:var(--ink4);letter-spacing:.08em;margin-bottom:3px}
+.arch-arrow{text-align:center;color:var(--border2);font-size:14px;margin:3px 0}
+
+/* FLOW STEP */
+.flow{display:flex;flex-direction:column;gap:0;border-left:2px solid var(--border);margin-left:18px}
+.fs{position:relative;padding:14px 0 14px 28px}
+.fs::before{content:'';position:absolute;left:-9px;top:20px;width:14px;height:14px;border-radius:50%;background:#fff;border:2px solid var(--vb)}
+.fs-num{font-family:var(--mono);font-size:9px;color:var(--vb);letter-spacing:.08em;margin-bottom:3px}
+.fs h4{font-family:var(--sans);font-weight:600;font-size:13px;color:var(--ink);margin-bottom:4px}
+.fs p{font-size:12px;color:var(--ink3);line-height:1.6}
+
+/* MODULE CARD */
+.mc{border:1px solid var(--border);border-radius:var(--rl);overflow:hidden;margin-bottom:24px}
+.mc-hd{padding:14px 20px;display:flex;align-items:center;gap:12px}
+.mc-hd h3{font-family:var(--serif);font-size:16px;font-weight:700;color:#fff}
+.mc-hd .mcid{font-family:var(--mono);font-size:10px;color:rgba(255,255,255,.45)}
+.mc-hd .mcpri{font-family:var(--mono);font-size:9px;border:1px solid rgba(255,255,255,.22);color:rgba(255,255,255,.6);padding:1px 8px;border-radius:20px;margin-left:auto}
+.mc-body{padding:20px;background:var(--card);border-top:1px solid var(--border)}
+
+/* MOBILE */
+.mob-btn{display:none;position:fixed;top:12px;left:12px;z-index:300;width:36px;height:36px;background:var(--ink);border:1px solid rgba(255,255,255,.1);color:#fff;border-radius:var(--r);font-size:15px;cursor:pointer;align-items:center;justify-content:center}
+.overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:190}
+
+/* SESSION DIAGRAM */
+.session-box{border:1px solid var(--border);border-radius:var(--rl);padding:14px 18px;background:var(--card);margin-bottom:10px}
+.session-box .sb-label{font-family:var(--mono);font-size:9px;letter-spacing:.1em;color:var(--ink4);margin-bottom:6px;text-transform:uppercase}
+.session-box .sb-id{font-family:var(--mono);font-size:11px;color:var(--vb);font-weight:600}
+.session-status{display:inline-flex;align-items:center;gap:4px;font-family:var(--mono);font-size:10px;padding:2px 8px;border-radius:20px;border:1px solid}
+.ss-active{background:var(--green-bg);color:var(--green);border-color:#a0d0b0}
+.ss-pending{background:var(--amber-bg);color:var(--amber);border-color:#f0d888}
+.ss-idle{background:var(--bg2);color:var(--ink4);border-color:var(--border2)}
+.ss-dot{width:5px;height:5px;border-radius:50%;background:currentColor}
+
+/* SHARED RESOURCE BAR */
+.res-bar{background:var(--bg2);border-radius:var(--rl);padding:12px 16px;display:flex;align-items:center;gap:16px;margin-bottom:8px;border:1px solid var(--border)}
+.res-ic{font-size:16px;flex-shrink:0}
+.res-label{font-size:12px;font-weight:600;color:var(--ink);flex:1}
+.res-desc{font-size:11px;color:var(--ink4)}
+.res-badge{font-family:var(--mono);font-size:10px;padding:2px 9px;border-radius:20px;background:var(--vb-bg);color:var(--vb);border:1px solid #b8ccff;white-space:nowrap}
+
+@media(max-width:1024px){
+  .sb{transform:translateX(-100%)}.sb.open{transform:translateX(0)}
+  .overlay.open{display:block}.main{margin-left:0}.mob-btn{display:flex}
+  .topbar{padding:9px 20px}.sec{padding:36px 20px}.cover{padding:56px 20px 40px}
+  .g2,.g3,.g4{grid-template-columns:1fr}.cov-meta{gap:16px}
+}
+@media print{.sb,.mob-btn,.topbar{display:none!important}.main{margin-left:0}.sec{page-break-inside:avoid}}
+.reveal{opacity:0;transform:translateY(14px);transition:opacity .45s,transform .45s}
+.reveal.vis{opacity:1;transform:none}
+</style>
+</head>
+<body>
+<button class="mob-btn" onclick="toggleSb()" title="菜单">☰</button>
+<div class="overlay" id="ov" onclick="closeSb()"></div>
+
+<nav class="sb" id="sb">
+  <div class="sb-brand">
+    <div class="sb-chip"><span class="sb-chip-dot"></span>DETAILED DESIGN · SDD</div>
+    <div class="sb-title">Vela · 织帆<br>业务智能体设计说明</div>
+    <div class="sb-meta">SDD-BA-VELA-2026-001 · v1.0</div>
+  </div>
+  <div class="sb-pg">
+    <div class="sb-pg-row"><span>阅读进度</span><span id="pct">0%</span></div>
+    <div class="sb-pg-bar"><div class="sb-pg-fill" id="pf"></div></div>
+  </div>
+  <div id="nav-root">
+    <div class="ng"><div class="ng-title">文档总览</div>
+      <a class="ni on" href="#cover" onclick="cm()"><span class="nid">—</span>封面与引言</a>
+    </div>
+    <div class="ndiv"></div>
+    <div class="ng"><div class="ng-title">第一部分 · 概念定义</div>
+      <a class="ni" href="#s1" onclick="cm()"><span class="nid">01</span>业务智能体定义</a>
+      <a class="ni sub" href="#s1-1" onclick="cm()"><span class="nid">↳</span>核心概念与定位</a>
+      <a class="ni sub" href="#s1-2" onclick="cm()"><span class="nid">↳</span>与平台层关系</a>
+      <a class="ni" href="#s2" onclick="cm()"><span class="nid">02</span>会话模型设计</a>
+      <a class="ni sub" href="#s2-1" onclick="cm()"><span class="nid">↳</span>会话建立与隔离</a>
+      <a class="ni sub" href="#s2-2" onclick="cm()"><span class="nid">↳</span>会话上下文参考</a>
+      <a class="ni sub" href="#s2-3" onclick="cm()"><span class="nid">↳</span>并发会话控制</a>
+    </div>
+    <div class="ndiv"></div>
+    <div class="ng"><div class="ng-title">第二部分 · 共享资源</div>
+      <a class="ni" href="#s3" onclick="cm()"><span class="nid">03</span>共享能力层设计</a>
+      <a class="ni sub" href="#s3-1" onclick="cm()"><span class="nid">↳</span>Skill 技能体系</a>
+      <a class="ni sub" href="#s3-2" onclick="cm()"><span class="nid">↳</span>知识与经验</a>
+      <a class="ni sub" href="#s3-3" onclick="cm()"><span class="nid">↳</span>中长期记忆</a>
+      <a class="ni" href="#s4" onclick="cm()"><span class="nid">04</span>配额与并发管理</a>
+    </div>
+    <div class="ndiv"></div>
+    <div class="ng"><div class="ng-title">第三部分 · 业务单位差异</div>
+      <a class="ni" href="#s5" onclick="cm()"><span class="nid">05</span>多业务单位实例化</a>
+      <a class="ni sub" href="#s5-1" onclick="cm()"><span class="nid">↳</span>差异化配置</a>
+      <a class="ni sub" href="#s5-2" onclick="cm()"><span class="nid">↳</span>知识与数据隔离</a>
+      <a class="ni" href="#s6" onclick="cm()"><span class="nid">06</span>跨实例协作</a>
+    </div>
+    <div class="ndiv"></div>
+    <div class="ng"><div class="ng-title">第四部分 · 数据模型与接口</div>
+      <a class="ni" href="#s7" onclick="cm()"><span class="nid">07</span>核心数据模型</a>
+      <a class="ni" href="#s8" onclick="cm()"><span class="nid">08</span>接口规范</a>
+      <a class="ni" href="#s9" onclick="cm()"><span class="nid">09</span>状态机与生命周期</a>
+    </div>
+  </div>
+</nav>
+
+<div class="main">
+<div class="topbar">
+  <div class="tb-bc">
+    <a href="#">Vela</a><span>/</span>
+    <a href="#">设计文档</a><span>/</span>
+    <span>业务智能体设计说明</span>
+  </div>
+  <button class="print-btn" onclick="window.print()">打印 / 导出</button>
+</div>
+
+<!-- ═══ COVER ═══ -->
+<div class="cover" id="cover">
+  <div class="cov-grid"></div>
+  <div class="cov-g1"></div>
+  <div class="cov-g2"></div>
+  <div class="cov-inner">
+    <div class="cov-badge">SDD · BUSINESS AGENT</div>
+    <h1 class="cov-h1">业务智能体<br><em>设计说明</em></h1>
+    <p class="cov-sub">覆盖业务智能体的会话模型、共享能力层（Skill / 知识 / 经验 / 记忆）、并发配额管理、多业务单位差异化实例化及跨实例协作机制的完整详细设计。</p>
+    <hr class="cov-hr">
+    <div class="cov-meta">
+      <div class="cm-item"><div class="cl">文档编号</div><div class="cv">SDD-BA-VELA-2026-001</div></div>
+      <div class="cm-item"><div class="cl">版本</div><div class="cv">v1.0.0</div></div>
+      <div class="cm-item"><div class="cl">日期</div><div class="cv">2026-06-15</div></div>
+      <div class="cm-item"><div class="cl">所属系统</div><div class="cv">Vela · 织帆</div></div>
+      <div class="cm-item"><div class="cl">上游文档</div><div class="cv">HLD-VELA-2026-001</div></div>
+    </div>
+    <div class="cov-tags">
+      <span class="ctag hi">会话隔离</span>
+      <span class="ctag hi">共享能力</span>
+      <span class="ctag hi">多实例</span>
+      <span class="ctag hi">业务差异化</span>
+      <span class="ctag">并发配额</span>
+      <span class="ctag">跨实例协作</span>
+      <span class="ctag">记忆共享</span>
+      <span class="ctag">A2A协议</span>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ §1 业务智能体定义 ═══ -->
+<section class="sec reveal" id="s1">
+  <div class="sec-hd">
+    <div class="sec-eye"><span class="etag blue">第1章</span><span class="esub">DEFINITION & POSITIONING</span></div>
+    <h2 class="st">业务智能体定义与定位</h2>
+    <p class="sd">业务智能体（Business Agent）是 Vela 平台中面向具体业务场景的智能执行单元，能够独立接受、处理来自人类员工或其他智能体的会话请求，并在限定资源配额下并发服务多个会话。</p>
+  </div>
+
+  <div id="s1-1">
+    <h3 class="sh">1.1 核心概念与定位</h3>
+    <div class="g3">
+      <div class="card" style="border-top:2px solid var(--vb)">
+        <div class="card-tag">IDENTITY</div>
+        <h3>什么是业务智能体</h3>
+        <p>业务智能体是一个<strong>有状态的、具备特定业务专长的 AI 执行体</strong>。它不是单次函数调用，而是一个可被"雇用"的持续在线服务——拥有自己的技能包、知识库、经验沉淀和中长期记忆。</p>
+        <ul>
+          <li>可被员工或其他 Agent 发起会话请求</li>
+          <li>在一次会话中维持完整的上下文状态</li>
+          <li>可同时处理多个独立会话（受配额约束）</li>
+        </ul>
+      </div>
+      <div class="card" style="border-top:2px solid var(--teal)">
+        <div class="card-tag">SCOPE</div>
+        <h3>业务智能体 vs 通用智能体</h3>
+        <p>业务智能体是<strong>通用智能体框架的业务专化实例</strong>。同类业务智能体共享相同的能力基础，但因所属业务单位不同而在技能细节、知识范围、业务数据接入上存在差异。</p>
+        <ul>
+          <li>同类型 Agent 在不同业务单位有独立实例</li>
+          <li>能力（Skill）大部分共享，部分业务专化</li>
+          <li>知识库与业务数据完全按业务单位隔离</li>
+        </ul>
+      </div>
+      <div class="card" style="border-top:2px solid var(--purple)">
+        <div class="card-tag">VALUE</div>
+        <h3>核心价值主张</h3>
+        <p>业务智能体通过<strong>能力共享 + 数据隔离</strong>的架构，实现了"一套框架服务全企业"的规模效益，同时保证各业务单位的专业深度和数据安全。</p>
+        <ul>
+          <li>降低 Agent 开发与维护成本</li>
+          <li>各业务单位知识和数据严格隔离</li>
+          <li>技能迭代一处升级、全部受益</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="callout teal" style="margin-top:16px">
+      <p><strong>设计原则：</strong>一个业务智能体的 <em>Skill（技能）、知识、经验、中长期记忆</em> 在其所有并发会话之间<strong>共享</strong>；不同业务单位的同类业务智能体之间，技能大体相同（可能有微差），但<strong>知识库与业务数据完全独立</strong>。</p>
+    </div>
+  </div>
+
+  <div id="s1-2" style="margin-top:28px">
+    <h3 class="sh">1.2 与 Vela 平台层的关系</h3>
+    <div class="asc"><span class="aa">┌─────────────────────────────────────────────────────────────────────┐</span>
+<span class="aa">│                        Vela 平台基础设施                             │</span>
+<span class="aa">│   M1网关 │ M4推理引擎 │ M6技能工具 │ M7记忆 │ M8协作 │ M9审计      │</span>
+<span class="aa">└──────────────────────────────┬──────────────────────────────────────┘</span>
+                               <span class="ab">│ 实例化</span>
+              <span class="ab">┌────────────────┼─────────────────┐</span>
+              <span class="ab">▼</span>                <span class="ab">▼</span>                 <span class="ab">▼</span>
+  <span class="ac">┌────────────────┐  ┌─────────────────┐  ┌─────────────────┐</span>
+  <span class="ac">│ 审计部业务Agent  │  │ 财务部业务Agent  │  │ 采购部业务Agent  │</span>
+  <span class="ac">│ AGENT-AUD-xx   │  │ AGENT-FIN-xx    │  │ AGENT-PRO-xx    │</span>
+  <span class="ac">│                │  │                 │  │                 │</span>
+  <span class="ac">│ 共享: Skill     │  │ 共享: Skill      │  │ 共享: Skill      │</span>
+  <span class="ac">│ 共享: 记忆框架   │  │ 共享: 记忆框架    │  │ 共享: 记忆框架    │</span>
+  <span class="ac">│ 独有: 审计知识库  │  │ 独有: 财务知识库  │  │ 独有: 采购知识库  │</span>
+  <span class="ac">│ 独有: 审计数据   │  │ 独有: 财务数据    │  │ 独有: 供应商数据  │</span>
+  <span class="ac">└────────┬───────┘  └────────┬────────┘  └────────┬────────┘</span>
+           <span class="ad">│                   │                    │</span>
+           <span class="ad">└───── 同类型可通过 A2A 协议协作 ────────────┘</span></div>
+  </div>
+</section>
+
+<!-- ═══ §2 会话模型设计 ═══ -->
+<section class="sec reveal" id="s2">
+  <div class="sec-hd">
+    <div class="sec-eye"><span class="etag teal">第2章</span><span class="esub">SESSION MODEL</span></div>
+    <h2 class="st">会话模型设计</h2>
+    <p class="sd">业务智能体采用多会话并发模型：同一个 Agent 实例可以同时承载多个来源不同的会话；每个会话是独立的执行上下文，同时可以以受控方式引用其他会话的历史信息。</p>
+  </div>
+
+  <div id="s2-1">
+    <h3 class="sh">2.1 会话建立与隔离</h3>
+    <div class="g2">
+      <div>
+        <h4 class="sh2">会话发起方类型</h4>
+        <div class="tw">
+          <table class="tbl sm">
+            <thead><tr><th>发起方类型</th><th>标识</th><th>协议</th><th>典型场景</th></tr></thead>
+            <tbody>
+              <tr><td>内部员工</td><td>user_id (JWT)</td><td>WebSocket / HTTP</td><td>员工在 Chat UI 向 Agent 提问</td></tr>
+              <tr><td>其他业务智能体</td><td>agent_id (A2A)</td><td>A2A /tasks</td><td>审计 Agent 委派财务 Agent 分析数据</td></tr>
+              <tr><td>外部系统（API）</td><td>client_id (API Key)</td><td>REST</td><td>ERP 系统触发自动化分析任务</td></tr>
+              <tr><td>平台调度器</td><td>scheduler_id</td><td>内部 gRPC</td><td>定时任务、批量报告生成</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h4 class="sh2" style="margin-top:14px">会话建立流程</h4>
+        <div class="flow">
+          <div class="fs"><div class="fs-num">STEP 1</div><h4>身份验证</h4><p>网关 M1 完成 JWT / API Key / Agent Card 认证，提取 caller 身份和权限</p></div>
+          <div class="fs"><div class="fs-num">STEP 2</div><h4>配额预检</h4><p>检查 Agent 当前并发会话数是否达到配额上限；若已满，返回 503 并附带 retry_after 提示</p></div>
+          <div class="fs"><div class="fs-num">STEP 3</div><h4>会话分配</h4><p>Agent 管理模块 M3 分配 session_id（UUID v7，含时间戳），写入 PostgreSQL sessions 表，并在 Redis 创建热缓存条目</p></div>
+          <div class="fs"><div class="fs-num">STEP 4</div><h4>上下文初始化</h4><p>记忆模块 M7 按会话作用域加载：企业级记忆（全局）、部门级记忆（该 Agent 所属部门）、个人级记忆（若 caller 是员工）</p></div>
+          <div class="fs"><div class="fs-num">STEP 5</div><h4>推理引擎就绪</h4><p>M4 推理执行引擎为该会话初始化 ReAct 状态机，注入 system_prompt + 上下文记忆，建立 WebSocket 流或 HTTP 长轮询通道</p></div>
+        </div>
+      </div>
+      <div>
+        <h4 class="sh2">会话隔离保证</h4>
+        <div class="callout">
+          <p><strong>会话级隔离：</strong>每个会话拥有独立的 <code>session_id</code>、独立的消息历史（messages 表）、独立的任务执行状态（tasks 表）。不同会话的推理过程互不感知，不会相互干扰。</p>
+        </div>
+        <div class="callout teal" style="margin-top:8px">
+          <p><strong>资源隔离：</strong>每个会话有独立的 Token Budget（来自 AgentConfig.token_budget）；单次推理超预算会触发降级而非影响其他会话。会话级 TraceID 确保全链路可观测，互不混淆。</p>
+        </div>
+
+        <h4 class="sh2" style="margin-top:14px">会话状态可视化示例</h4>
+        <div class="session-box">
+          <div class="sb-label">Session #1 — 来自员工张三</div>
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+            <span class="sb-id">sess_01J2XKAB3…</span>
+            <span class="session-status ss-active"><span class="ss-dot"></span>Active</span>
+          </div>
+          <div style="font-size:11px;color:var(--ink3)">任务：分析Q2采购异常 · 已执行 12 步 · Token 消耗 4,230</div>
+        </div>
+        <div class="session-box">
+          <div class="sb-label">Session #2 — 来自审计Agent (A2A)</div>
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+            <span class="sb-id">sess_01J2XKCD7…</span>
+            <span class="session-status ss-pending"><span class="ss-dot"></span>HITL Wait</span>
+          </div>
+          <div style="font-size:11px;color:var(--ink3)">任务：验证供应商关联关系 · 等待管理员审批 · Token 消耗 1,850</div>
+        </div>
+        <div class="session-box">
+          <div class="sb-label">Session #3 — 来自 ERP 系统 (API)</div>
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+            <span class="sb-id">sess_01J2XKEF2…</span>
+            <span class="session-status ss-idle"><span class="ss-dot"></span>Idle</span>
+          </div>
+          <div style="font-size:11px;color:var(--ink3)">任务：月度对账报告生成 · 已完成 · TTL 剩余 28min</div>
+        </div>
+
+        <h4 class="sh2" style="margin-top:10px">会话数据结构</h4>
+        <div class="cw">
+          <div class="ch"><span class="cl-lang">Python</span><span class="cl-title">Session 核心字段</span></div>
+          <pre class="code"><span class="k">class</span> <span class="n">Session</span><span class="p">(</span><span class="n">BaseModel</span><span class="p">):</span>
+    <span class="v">session_id</span><span class="p">:</span> <span class="n">UUID</span>           <span class="c"># UUID v7，有序</span>
+    <span class="v">agent_id</span><span class="p">:</span> <span class="n">str</span>
+    <span class="v">caller_type</span><span class="p">:</span> <span class="n">CallerType</span>    <span class="c"># USER|AGENT|API|SCHEDULER</span>
+    <span class="v">caller_id</span><span class="p">:</span> <span class="n">str</span>
+    <span class="v">status</span><span class="p">:</span> <span class="n">SessionStatus</span>      <span class="c"># ACTIVE|HITL_WAIT|IDLE|CLOSED</span>
+    <span class="v">context_snapshot</span><span class="p">:</span> <span class="n">dict</span>   <span class="c"># 当前推理上下文快照</span>
+    <span class="v">token_used</span><span class="p">:</span> <span class="n">int</span>
+    <span class="v">token_budget</span><span class="p">:</span> <span class="n">int</span>
+    <span class="v">trace_id</span><span class="p">:</span> <span class="n">str</span>              <span class="c"># OpenTelemetry TraceID</span>
+    <span class="v">created_at</span><span class="p">:</span> <span class="n">datetime</span>
+    <span class="v">last_active_at</span><span class="p">:</span> <span class="n">datetime</span>
+    <span class="v">ttl_seconds</span><span class="p">:</span> <span class="n">int</span>           <span class="c"># 空闲超时，默认 1800s</span></pre>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="s2-2" style="margin-top:28px">
+    <h3 class="sh">2.2 会话上下文的跨会话参考机制</h3>
+    <div class="callout amber">
+      <p><strong>设计约束：</strong>不同会话的当前执行上下文（消息流、任务状态）互相隔离，<strong>不可直接读写</strong>。但经过提炼的历史经验与记忆（已写入记忆模块 M7）可被同一 Agent 的所有会话<strong>参考</strong>，实现跨会话知识积累。</p>
+    </div>
+
+    <div class="g2" style="margin-top:16px">
+      <div>
+        <h4 class="sh2">可参考的跨会话信息</h4>
+        <div class="tw">
+          <table class="tbl sm">
+            <thead><tr><th>信息类型</th><th>存储位置</th><th>参考粒度</th><th>访问控制</th></tr></thead>
+            <tbody>
+              <tr><td>企业级知识沉淀</td><td>M7 企业级记忆</td><td>全部会话可读</td><td>全员只读</td></tr>
+              <tr><td>部门经验总结</td><td>M7 部门级记忆</td><td>同部门会话可读</td><td>部门只读，审批写</td></tr>
+              <tr><td>员工个人偏好</td><td>M7 个人级记忆</td><td>同 caller 的会话</td><td>本人读写</td></tr>
+              <tr><td>已完成任务摘要</td><td>PG tasks 表</td><td>显式查询引用</td><td>按权限</td></tr>
+              <tr><td>当前会话实时状态</td><td>Redis session 上下文</td><td><strong>不可跨会话</strong></td><td>严格隔离</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div>
+        <h4 class="sh2">跨会话参考调用示意</h4>
+        <div class="cw">
+          <div class="ch"><span class="cl-lang">设计</span><span class="cl-title">记忆检索 — 跨会话积累</span></div>
+          <pre class="code"><span class="c"># 会话 A 结束时，Mem0 自动提炼经验</span>
+<span class="k">async def</span> <span class="n">on_session_close</span><span class="p">(</span><span class="v">session</span><span class="p">:</span> <span class="n">Session</span><span class="p">):</span>
+    <span class="v">insights</span> <span class="p">=</span> <span class="k">await</span> <span class="n">mem0.extract</span><span class="p">(</span>
+        <span class="v">messages</span><span class="p">=</span><span class="n">session.messages</span><span class="p">,</span>
+        <span class="v">min_importance</span><span class="p">=</span><span class="m">0.7</span>
+    <span class="p">)</span>
+    <span class="c"># 写入个人级记忆，供未来会话参考</span>
+    <span class="k">await</span> <span class="n">memory_store.save</span><span class="p">(</span><span class="v">insights</span><span class="p">,</span>
+        <span class="v">scope</span><span class="p">=</span><span class="s">"personal"</span><span class="p">,</span>
+        <span class="v">caller_id</span><span class="p">=</span><span class="n">session.caller_id</span>
+    <span class="p">)</span>
+
+<span class="c"># 会话 B 启动时，加载历史积累</span>
+<span class="k">async def</span> <span class="n">on_session_init</span><span class="p">(</span><span class="v">session</span><span class="p">:</span> <span class="n">Session</span><span class="p">):</span>
+    <span class="v">memories</span> <span class="p">=</span> <span class="k">await</span> <span class="n">memory_store.retrieve</span><span class="p">(</span>
+        <span class="v">agent_id</span><span class="p">=</span><span class="n">session.agent_id</span><span class="p">,</span>
+        <span class="v">caller_id</span><span class="p">=</span><span class="n">session.caller_id</span><span class="p">,</span>
+        <span class="v">scopes</span><span class="p">=[</span><span class="s">"enterprise"</span><span class="p">,</span><span class="s">"dept"</span><span class="p">,</span><span class="s">"personal"</span><span class="p">]</span>
+    <span class="p">)</span>
+    <span class="c"># 注入到会话上下文，供推理参考</span>
+    <span class="n">session.context_snapshot</span><span class="p">[</span><span class="s">"memories"</span><span class="p">]</span> <span class="p">=</span> <span class="v">memories</span></pre>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="s2-3" style="margin-top:28px">
+    <h3 class="sh">2.3 并发会话数控制</h3>
+    <div class="g2">
+      <div>
+        <p style="font-size:13px;color:var(--ink3);line-height:1.7;margin-bottom:12px">业务智能体能同时处理的会话数量，由其<strong>可使用资源配额</strong>决定。配额从两个维度约束：计算资源（CPU/内存/GPU Token 消耗速率）和逻辑并发上限（max_concurrent_sessions）。两者均满足时，新会话才被接受。</p>
+        <div class="tw">
+          <table class="tbl sm">
+            <thead><tr><th>配额维度</th><th>约束方式</th><th>超限行为</th></tr></thead>
+            <tbody>
+              <tr><td>max_concurrent_sessions</td><td>Redis 原子计数器</td><td>503 + retry_after</td></tr>
+              <tr><td>token_rate_limit</td><td>滑动窗口 (tokens/min)</td><td>排队等待 or 降级</td></tr>
+              <tr><td>dept_token_monthly</td><td>Redis 月度累计</td><td>降级到小模型</td></tr>
+              <tr><td>single_session_budget</td><td>per-session 计数</td><td>会话内降级/截断</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout green" style="margin-top:12px">
+          <p><strong>弹性设计：</strong>max_concurrent_sessions 是软上限，可由平台管理员通过 M10 系统管理模块动态调整，无需重启 Agent 实例。当资源扩容后，上限自动生效。</p>
+        </div>
+      </div>
+      <div>
+        <h4 class="sh2">并发控制实现</h4>
+        <div class="cw">
+          <div class="ch"><span class="cl-lang">Python</span><span class="cl-title">会话准入控制 — Redis 原子操作</span></div>
+          <pre class="code"><span class="k">async def</span> <span class="n">try_acquire_session_slot</span><span class="p">(</span>
+    <span class="v">agent_id</span><span class="p">:</span> <span class="n">str</span><span class="p">,</span>
+    <span class="v">session_id</span><span class="p">:</span> <span class="n">str</span>
+<span class="p">) -></span> <span class="n">bool</span><span class="p">:</span>
+    <span class="v">key</span> <span class="p">=</span> <span class="s">f"agent:sessions:{agent_id}"</span>
+    <span class="v">quota</span> <span class="p">=</span> <span class="k">await</span> <span class="n">get_quota</span><span class="p">(</span><span class="v">agent_id</span><span class="p">)</span>
+    
+    <span class="c"># Lua 脚本原子操作，避免竞态</span>
+    <span class="v">result</span> <span class="p">=</span> <span class="k">await</span> <span class="n">redis.eval</span><span class="p">(</span><span class="s">"""
+      local cur = redis.call('SCARD', KEYS[1])
+      if cur >= tonumber(ARGV[1]) then
+        return 0
+      end
+      redis.call('SADD', KEYS[1], ARGV[2])
+      return 1
+    """</span><span class="p">,</span>
+        <span class="v">keys</span><span class="p">=[</span><span class="v">key</span><span class="p">],</span>
+        <span class="v">args</span><span class="p">=[</span><span class="v">quota.max_concurrent</span><span class="p">,</span> <span class="v">session_id</span><span class="p">]</span>
+    <span class="p">)</span>
+    <span class="k">return</span> <span class="n">bool</span><span class="p">(</span><span class="v">result</span><span class="p">)</span></pre>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ §3 共享能力层 ═══ -->
+<section class="sec reveal" id="s3">
+  <div class="sec-hd">
+    <div class="sec-eye"><span class="etag green">第3章</span><span class="esub">SHARED CAPABILITY LAYER</span></div>
+    <h2 class="st">共享能力层设计</h2>
+    <p class="sd">同一业务智能体的 Skill（技能）、知识、经验与中长期记忆，在该 Agent 的所有并发会话之间共享，但各自有不同的读写权限和更新机制。</p>
+  </div>
+
+  <div class="g2" style="margin-bottom:0">
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <div class="res-bar">
+        <span class="res-ic">⚡</span>
+        <div><div class="res-label">Skill · 技能包</div><div class="res-desc">MCP 工具调用能力、ReAct 推理策略、业务方法论</div></div>
+        <span class="res-badge">全会话只读共享</span>
+      </div>
+      <div class="res-bar">
+        <span class="res-ic">📚</span>
+        <div><div class="res-label">Knowledge · 知识库</div><div class="res-desc">向量化文档、知识图谱、FAQ 库</div></div>
+        <span class="res-badge">全会话只读共享</span>
+      </div>
+      <div class="res-bar">
+        <span class="res-ic">🧪</span>
+        <div><div class="res-label">Experience · 经验库</div><div class="res-desc">历史案例、成功模式、失败教训（部门级记忆沉淀）</div></div>
+        <span class="res-badge">全会话读 / 审批写</span>
+      </div>
+      <div class="res-bar">
+        <span class="res-ic">🧠</span>
+        <div><div class="res-label">Long-term Memory · 中长期记忆</div><div class="res-desc">三层记忆（企业/部门/个人），Mem0 自动提炼</div></div>
+        <span class="res-badge">分层读写控制</span>
+      </div>
+    </div>
+    <div>
+      <div class="callout" style="margin-top:0">
+        <p><strong>关键设计原则：</strong>共享并不意味着所有会话能同时写入。Skill 和知识库是<strong>只读引用</strong>（版本化管理，更新走发布流程）；经验和记忆的更新走<strong>异步提炼 + 审批沉淀</strong>路径，保证读时一致性，写时无争用。</p>
+      </div>
+      <div class="asc" style="font-size:11px;margin-top:10px">业务智能体实例 (AGENT-AUD-01)
+├── [只读共享] Skill 包 v2.3.1
+│     ├── 审计查证方法生成
+│     ├── 统计异常检测
+│     └── MCP: ERP查询 / 文档生成
+│
+├── [只读共享] 知识库 (审计部)
+│     ├── Milvus: kb_aud_* collections
+│     └── Neo4j: audit_* graph
+│
+├── [会话完成后异步写] 经验沉淀
+│     └── M7 部门级记忆 ← Mem0 提炼
+│
+└── [各会话持有] 个人级记忆
+      └── 随会话 caller_id 载入</div>
+    </div>
+  </div>
+
+  <div id="s3-1" style="margin-top:24px">
+    <h3 class="sh">3.1 Skill 技能体系（共享 + 版本化）</h3>
+    <div class="g2">
+      <div>
+        <p style="font-size:13px;color:var(--ink3);line-height:1.7;margin-bottom:12px">Skill 是业务智能体的<strong>能力合集</strong>，以版本化的 SkillPack 形式存储于 M6 技能与工具模块，通过 MCP 协议调用。一个 SkillPack 可绑定多个 Agent，所有绑定 Agent 的全部会话共同调用同一版本的 Skill 实现。</p>
+        <div class="tw">
+          <table class="tbl sm">
+            <thead><tr><th>Skill 分类</th><th>共享范围</th><th>更新机制</th></tr></thead>
+            <tbody>
+              <tr><td>平台通用 Skill</td><td>所有 Agent 共享</td><td>平台统一发布</td></tr>
+              <tr><td>业务类型 Skill</td><td>同类 Agent 共享</td><td>业务线审核发布</td></tr>
+              <tr><td>业务单位专化 Skill</td><td>单部门 Agent</td><td>部门开发者发布</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="cw" style="margin-top:10px">
+          <div class="ch"><span class="cl-lang">JSON</span><span class="cl-title">SkillPack 绑定配置（AgentConfig 节选）</span></div>
+          <pre class="code"><span class="p">{</span>
+  <span class="s">"skill_packs"</span><span class="p">: [</span>
+    <span class="p">{</span>
+      <span class="s">"id"</span><span class="p">:</span> <span class="s">"sp-common-v2.3"</span><span class="p">,</span>
+      <span class="s">"scope"</span><span class="p">:</span> <span class="s">"platform"</span>
+    <span class="p">},</span>
+    <span class="p">{</span>
+      <span class="s">"id"</span><span class="p">:</span> <span class="s">"sp-audit-v1.8"</span><span class="p">,</span>
+      <span class="s">"scope"</span><span class="p">:</span> <span class="s">"business_type"</span>
+    <span class="p">},</span>
+    <span class="p">{</span>
+      <span class="s">"id"</span><span class="p">:</span> <span class="s">"sp-dept-aud-ext-v0.3"</span><span class="p">,</span>
+      <span class="s">"scope"</span><span class="p">:</span> <span class="s">"dept_specialized"</span>
+    <span class="p">}</span>
+  <span class="p">],</span>
+  <span class="s">"tool_permissions"</span><span class="p">: {</span>
+    <span class="s">"erp_query"</span><span class="p">:</span> <span class="s">"allowed"</span><span class="p">,</span>
+    <span class="s">"code_execute"</span><span class="p">:</span> <span class="s">"sandboxed"</span><span class="p">,</span>
+    <span class="s">"hr_data_access"</span><span class="p">:</span> <span class="s">"denied"</span>
+  <span class="p">}</span>
+<span class="p">}</span></pre>
+        </div>
+      </div>
+      <div>
+        <h4 class="sh2">Skill 调用隔离机制</h4>
+        <p style="font-size:12px;color:var(--ink3);line-height:1.65;margin-bottom:8px">虽然 Skill 实现共享，但每次调用是独立的无状态请求。MCP Server 的沙箱容器为每次 tool_call 独立启动，天然隔离不同会话的代码执行上下文。</p>
+        <div class="asc" style="font-size:10.5px;padding:14px">会话A: tool_call → 技能路由器
+会话B: tool_call → 技能路由器
+会话C: tool_call → 技能路由器
+              ↓
+     [共享] 同一 MCP Server 端点
+              ↓
+   每次调用独立 Docker 容器实例
+   (network=none, memory=256MB, timeout=30s)
+              ↓
+   结果返回各自会话，互不可见</div>
+        <div class="callout green" style="margin-top:8px">
+          <p><strong>无状态工具原则：</strong>所有 MCP 工具严格设计为无状态，工具执行结果完全由输入参数决定，不依赖任何会话外部状态，从而保证多会话并发调用的正确性。</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="s3-2" style="margin-top:24px">
+    <h3 class="sh">3.2 知识与经验共享</h3>
+    <div class="g2">
+      <div>
+        <h4 class="sh2">知识库（Knowledge）— 静态共享</h4>
+        <p style="font-size:12px;color:var(--ink3);line-height:1.65;margin-bottom:8px">知识库是 Agent 的专业背景知识，通过 M5 知识库管理模块向量化存储，所有会话通过 RAG 检索共享同一知识库版本。知识库更新走独立的摄取流水线，不影响正在进行的会话。</p>
+        <div class="tw">
+          <table class="tbl sm">
+            <thead><tr><th>属性</th><th>设计决策</th></tr></thead>
+            <tbody>
+              <tr><td>读并发</td><td>无限制，Milvus HNSW 索引支持高并发读</td></tr>
+              <tr><td>写更新</td><td>走摄取流水线，新版本灰度切换，不中断会话</td></tr>
+              <tr><td>一致性</td><td>会话内读同一快照版本；跨会话可能读到不同版本</td></tr>
+              <tr><td>隔离</td><td>按 dept_id 分 Milvus Collection，物理隔离</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div>
+        <h4 class="sh2">经验库（Experience）— 动态沉淀</h4>
+        <p style="font-size:12px;color:var(--ink3);line-height:1.65;margin-bottom:8px">经验是从已完成会话中提炼的高价值知识，写入 M7 部门级记忆，供该 Agent 未来所有会话参考。更新需通过 Mem0 提炼 + 审批的两阶段流程，确保质量。</p>
+        <div class="flow">
+          <div class="fs"><div class="fs-num">T+0</div><h4>会话完成</h4><p>会话关闭时发布 session.closed 事件到 Kafka</p></div>
+          <div class="fs"><div class="fs-num">T+30s</div><h4>Mem0 提炼</h4><p>异步从消息历史中提取重要性 ≥ 0.7 的洞察</p></div>
+          <div class="fs"><div class="fs-num">T+1min</div><h4>个人记忆写入</h4><p>自动写入 caller 的个人级记忆，立即对其下次会话生效</p></div>
+          <div class="fs"><div class="fs-num">申请</div><h4>经验上沉申请</h4><p>员工或 Agent 可申请将个人经验上沉为部门级，全部门共享</p></div>
+          <div class="fs"><div class="fs-num">审批</div><h4>部门管理员审核</h4><p>48h 内审批；通过后复制到部门级记忆，所有后续会话可读</p></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="s3-3" style="margin-top:24px">
+    <h3 class="sh">3.3 中长期记忆（共享层次模型）</h3>
+    <div class="tw">
+      <table class="tbl">
+        <thead><tr><th>记忆层</th><th>共享范围</th><th>存储</th><th>TTL</th><th>写入条件</th><th>更新频率</th></tr></thead>
+        <tbody>
+          <tr><td><span class="badge b-red">企业级记忆</span></td><td>该 Agent 所有会话</td><td>Redis + PostgreSQL</td><td>永久</td><td>平台管理员操作</td><td>极低（战略级信息）</td></tr>
+          <tr><td><span class="badge b-blue">部门级记忆</span></td><td>同部门 Agent 的所有会话</td><td>Milvus + PostgreSQL</td><td>1 年+</td><td>部门管理员审批</td><td>低（月度沉淀）</td></tr>
+          <tr><td><span class="badge b-green">个人级记忆</span></td><td>同一 caller 发起的所有会话</td><td>Milvus + PostgreSQL</td><td>1 年</td><td>Mem0 自动提炼</td><td>高（每次会话后）</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="callout" style="margin-top:12px">
+      <p><strong>记忆读取时机：</strong>会话初始化时，M7 记忆模块按三层<strong>并行检索</strong>，将相关记忆注入到会话的 context_snapshot 中。推理过程中如需召回新记忆，通过 <code>memory_search</code> 工具显式调用，结果仅对当前会话可见。</p>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ §4 配额管理 ═══ -->
+<section class="sec reveal" id="s4">
+  <div class="sec-hd">
+    <div class="sec-eye"><span class="etag amber">第4章</span><span class="esub">QUOTA & CONCURRENCY</span></div>
+    <h2 class="st">配额与并发管理</h2>
+    <p class="sd">业务智能体能同时支持的会话数量，由多层配额体系共同决定。配额从平台 → 部门 → Agent → 会话逐层约束，确保资源公平分配。</p>
+  </div>
+
+  <div class="g2">
+    <div>
+      <h4 class="sh2">四层配额体系</h4>
+      <div class="tw">
+        <table class="tbl sm">
+          <thead><tr><th>层级</th><th>配额项</th><th>控制方</th><th>实现</th></tr></thead>
+          <tbody>
+            <tr><td>平台级</td><td>总并发会话上限、全局 Token/min</td><td>平台管理员</td><td>Redis 全局计数</td></tr>
+            <tr><td>部门级</td><td>月度 Token 预算、部门并发上限</td><td>部门管理员</td><td>Redis 月度滑窗</td></tr>
+            <tr><td>Agent 级</td><td>max_concurrent_sessions、token_rate</td><td>Agent 配置</td><td>Redis SADD 集合</td></tr>
+            <tr><td>会话级</td><td>token_budget（单次任务上限）</td><td>AgentConfig</td><td>per-session 计数</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h4 class="sh2" style="margin-top:14px">配额决定并发能力</h4>
+      <div class="asc" style="font-size:11px;padding:14px">资源配额 → 最大并发会话数 的映射示例：
+
+ 资源配置     token_rate    max_concurrent
+─────────────────────────────────────────
+ 轻量型       2k tokens/min    3 sessions
+ 标准型       8k tokens/min   10 sessions
+ 增强型      20k tokens/min   25 sessions
+ 专享型      50k tokens/min   60 sessions
+
+注：token_rate 为软限制，超出时排队而非立即拒绝
+    max_concurrent 为硬限制，达到后立即返回 503</div>
+    </div>
+    <div>
+      <h4 class="sh2">配额超限处理策略</h4>
+      <div class="tw">
+        <table class="tbl sm">
+          <thead><tr><th>超限类型</th><th>处理方式</th><th>用户侧感知</th></tr></thead>
+          <tbody>
+            <tr><td>并发会话已满</td><td>拒绝新会话，返回 503 + retry_after</td><td>提示"Agent 繁忙，请稍后重试"</td></tr>
+            <tr><td>Token 速率超限</td><td>会话内请求排队，最长等待 30s</td><td>进度条短暂停顿</td></tr>
+            <tr><td>月度 Token 80%</td><td>发预警邮件，继续服务</td><td>管理员收到预警</td></tr>
+            <tr><td>月度 Token 100%</td><td>降级至小模型，不停服</td><td>响应质量轻微下降</td></tr>
+            <tr><td>会话级 Budget 耗尽</td><td>完成当前步骤后停止，输出摘要</td><td>提示"本次任务已达Token上限"</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout green" style="margin-top:12px">
+        <p><strong>弹性扩容：</strong>当业务需求增长时，管理员只需在 M10 系统管理模块中调整 Agent 的 <code>max_concurrent_sessions</code> 和部门 <code>token_monthly_budget</code>，无需重新部署 Agent。新配额在下一次会话准入检查时立即生效。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ §5 多业务单位实例化 ═══ -->
+<section class="sec reveal" id="s5">
+  <div class="sec-hd">
+    <div class="sec-eye"><span class="etag purple">第5章</span><span class="esub">MULTI-BU INSTANTIATION</span></div>
+    <h2 class="st">多业务单位实例化设计</h2>
+    <p class="sd">不同业务单位（部门）的同类业务智能体，是同一 Agent 类型的不同实例。它们共享相同的 Skill 框架，但在技能细节上可能存在微差，知识库与业务数据则完全独立。</p>
+  </div>
+
+  <div id="s5-1">
+    <h3 class="sh">5.1 差异化配置矩阵</h3>
+    <div class="tw">
+      <table class="tbl">
+        <thead><tr><th>配置项</th><th>审计部 Agent (AGENT-AUD)</th><th>财务部 Agent (AGENT-FIN)</th><th>采购部 Agent (AGENT-PRO)</th><th>差异程度</th></tr></thead>
+        <tbody>
+          <tr><td>Skill 框架版本</td><td>sp-common-v2.3</td><td>sp-common-v2.3</td><td>sp-common-v2.3</td><td><span class="badge b-green">完全相同</span></td></tr>
+          <tr><td>业务类型 Skill</td><td>sp-audit-v1.8</td><td>sp-finance-v2.1</td><td>sp-procurement-v1.5</td><td><span class="badge b-red">完全不同</span></td></tr>
+          <tr><td>专化扩展 Skill</td><td>ERG查证、合规条款匹配</td><td>发票OCR、异常检测</td><td>供应商图谱、招标分析</td><td><span class="badge b-amber">业务专化</span></td></tr>
+          <tr><td>知识库</td><td>审计准则、内控规范</td><td>会计准则、税务法规</td><td>采购政策、供应商评估标准</td><td><span class="badge b-red">完全不同</span></td></tr>
+          <tr><td>业务数据接入</td><td>审计底稿库、ERP审计视图</td><td>账务系统、资金系统</td><td>采购系统、供应商库</td><td><span class="badge b-red">完全不同</span></td></tr>
+          <tr><td>MCP 工具权限</td><td>ERP只读、文档生成</td><td>账务系统读写、报表生成</td><td>采购系统读写、供应商查询</td><td><span class="badge b-amber">权限各异</span></td></tr>
+          <tr><td>自主度等级</td><td>Level 1（高风险需 HITL）</td><td>Level 2</td><td>Level 1</td><td><span class="badge b-amber">按风险配置</span></td></tr>
+          <tr><td>记忆框架</td><td>三层 Mem0 架构</td><td>三层 Mem0 架构</td><td>三层 Mem0 架构</td><td><span class="badge b-green">完全相同</span></td></tr>
+          <tr><td>部门记忆数据</td><td>审计经验、案例库</td><td>财务分析经验</td><td>谈判经验、供应商评价</td><td><span class="badge b-red">完全不同</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div id="s5-2" style="margin-top:24px">
+    <h3 class="sh">5.2 知识与业务数据隔离</h3>
+    <div class="g2">
+      <div>
+        <h4 class="sh2">存储级隔离方案</h4>
+        <div class="tw">
+          <table class="tbl sm">
+            <thead><tr><th>存储系统</th><th>隔离粒度</th><th>实现方式</th></tr></thead>
+            <tbody>
+              <tr><td>Milvus（向量库）</td><td>Collection 级</td><td>每个知识库独立 Collection，命名为 <code>kb_{dept_id}_{kb_id}</code></td></tr>
+              <tr><td>Neo4j（图库）</td><td>Label 前缀级</td><td>所有节点/关系标记 <code>dept:{dept_id}</code>，查询强制过滤</td></tr>
+              <tr><td>PostgreSQL</td><td>行级安全（RLS）</td><td>knowledge_bases.dept_id = 当前 Agent 的 dept_id</td></tr>
+              <tr><td>MCP 业务数据</td><td>连接串隔离</td><td>每个 dept 使用独立的只读数据库用户 + Schema</td></tr>
+              <tr><td>M7 记忆模块</td><td>Collection + scope 双重</td><td>dept_id + scope 联合过滤</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout red" style="margin-top:12px">
+          <p><strong>访问越界防护：</strong>推理引擎 M4 在调用知识库检索和工具调用时，强制注入 <code>dept_id</code> 过滤条件，即使 prompt 中包含跨部门访问的指令，也会被技能路由器的权限检查阻断。越界访问尝试写入安全告警日志。</p>
+        </div>
+      </div>
+      <div>
+        <h4 class="sh2">多业务单位 Agent 实例化流程</h4>
+        <div class="flow">
+          <div class="fs"><div class="fs-num">定义</div><h4>业务 Agent 类型注册</h4><p>平台开发者定义 Agent 类型（如"审计Agent"），指定基础 Skill 包和配置 Schema，发布到 Agent 类型库</p></div>
+          <div class="fs"><div class="fs-num">配置</div><h4>部门实例化</h4><p>审计部/财务部/采购部的 Agent 开发者各自创建 YAML 配置，指定本部门知识库 ID、业务数据 MCP 连接、专化 Skill 包、权限策略</p></div>
+          <div class="fs"><div class="fs-num">验证</div><h4>Schema 校验 + 沙盒测试</h4><p>M3 Agent 管理模块自动校验配置合规性，并在沙盒中运行标准测试用例，确认知识库访问和工具权限正确</p></div>
+          <div class="fs"><div class="fs-num">审核</div><h4>部门管理员审核</h4><p>审核 Agent 权限申请，特别核查数据访问范围是否符合最小权限原则</p></div>
+          <div class="fs"><div class="fs-num">发布</div><h4>上线运行</h4><p>Agent 状态置为 PUBLISHED，开始接受会话请求。各部门 Agent 独立运行，互不干扰</p></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ §6 跨实例协作 ═══ -->
+<section class="sec reveal" id="s6">
+  <div class="sec-hd">
+    <div class="sec-eye"><span class="etag red">第6章</span><span class="esub">CROSS-INSTANCE COLLABORATION</span></div>
+    <h2 class="st">跨实例协作设计</h2>
+    <p class="sd">不同业务单位的业务智能体可以通过 A2A 协议互相发起会话、委派任务，实现跨部门协作。协作时，数据隔离原则仍然严格执行：被调用方只返回结果，不暴露原始数据。</p>
+  </div>
+
+  <div class="g2">
+    <div>
+      <h4 class="sh2">A2A 跨实例协作模式</h4>
+      <div class="tw">
+        <table class="tbl sm">
+          <thead><tr><th>协作模式</th><th>发起方</th><th>被调用方</th><th>典型场景</th></tr></thead>
+          <tbody>
+            <tr><td>编排（Orchestrator）</td><td>审计 Agent</td><td>财务Agent + 采购Agent</td><td>年度综合审计报告</td></tr>
+            <tr><td>流水线（Pipeline）</td><td>采购 Agent</td><td>合规 Agent → 法务 Agent</td><td>合同审查全流程</td></tr>
+            <tr><td>协商（Consensus）</td><td>风控 Agent</td><td>财务Agent + 审计Agent</td><td>重大风险集体研判</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h4 class="sh2" style="margin-top:14px">跨实例会话的权限管控</h4>
+      <div class="callout amber">
+        <p><strong>协作时数据隔离：</strong>当审计 Agent（AGENT-AUD）通过 A2A 调用财务 Agent（AGENT-FIN）时，财务 Agent 以<strong>服务调用方式</strong>响应，仅返回分析结论或摘要，<strong>不允许</strong>审计 Agent 直接访问财务 Agent 的知识库或业务数据。</p>
+      </div>
+      <div class="cw" style="margin-top:10px">
+        <div class="ch"><span class="cl-lang">设计</span><span class="cl-title">A2A 跨实例会话建立</span></div>
+        <pre class="code"><span class="c"># 审计 Agent 委派任务给财务 Agent</span>
+<span class="k">POST</span> <span class="n">/a2a/AGENT-FIN-01/tasks</span>
+<span class="p">{</span>
+  <span class="s">"caller_agent_id"</span><span class="p">:</span> <span class="s">"AGENT-AUD-02"</span><span class="p">,</span>
+  <span class="s">"task_type"</span><span class="p">:</span> <span class="s">"analyze_expense"</span><span class="p">,</span>
+  <span class="s">"input"</span><span class="p">:</span> <span class="p">{</span>
+    <span class="s">"period"</span><span class="p">:</span> <span class="s">"2026-Q1"</span><span class="p">,</span>
+    <span class="s">"dept_scope"</span><span class="p">:</span> <span class="s">"ALL"</span><span class="p">,</span>
+    <span class="s">"anomaly_threshold"</span><span class="p">:</span> <span class="m">2.5</span>
+  <span class="p">},</span>
+  <span class="c">// 财务Agent据此决定返回哪些字段</span>
+  <span class="s">"output_schema"</span><span class="p">:</span> <span class="s">"anomaly_summary"</span><span class="p">,</span>
+  <span class="s">"auth_token"</span><span class="p">:</span> <span class="s">"&lt;A2A_JWT_SIGNED_BY_AUD&gt;"</span>
+<span class="p">}</span>
+<span class="c"># 财务Agent在独立会话内处理，返回摘要
+# 不返回原始账务数据 — 数据不出境</span></pre>
+      </div>
+    </div>
+    <div>
+      <h4 class="sh2">跨实例调用链路</h4>
+      <div class="asc" style="font-size:11px;padding:14px">员工发起 ──→ 审计Agent(会话A)
+                        │
+           [A2A 委派, 建立新会话]
+                        │
+              ┌─────────┴─────────┐
+              ▼                   ▼
+  财务Agent(会话B)      采购Agent(会话C)
+  [独立执行，访问       [独立执行，访问
+   财务知识库+数据]      采购知识库+数据]
+              │                   │
+              └─────────┬─────────┘
+                        ▼
+           [结果汇聚回审计Agent会话A]
+                        │
+              [综合分析 + 生成报告]
+                        │
+                    返回员工
+
+ ▶ 全程 TraceID 串联，所有节点记录审计日志
+ ▶ 财务/采购原始数据不流转至审计Agent</div>
+
+      <h4 class="sh2" style="margin-top:12px">跨实例协作的记忆与经验隔离</h4>
+      <p style="font-size:12px;color:var(--ink3);line-height:1.65;margin-bottom:8px">即使在 A2A 协作中，各 Agent 的记忆也严格隔离：</p>
+      <div class="tw">
+        <table class="tbl sm">
+          <thead><tr><th>记忆类型</th><th>协作时是否共享</th><th>说明</th></tr></thead>
+          <tbody>
+            <tr><td>企业级记忆</td><td>✅ 共享</td><td>跨所有 Agent 的全局知识</td></tr>
+            <tr><td>部门级记忆（审计部）</td><td>🚫 不共享</td><td>仅审计 Agent 自身可读</td></tr>
+            <tr><td>部门级记忆（财务部）</td><td>🚫 不共享</td><td>仅财务 Agent 自身可读</td></tr>
+            <tr><td>协作经验（跨 Agent）</td><td>✅ 有条件共享</td><td>A2A 协作结果摘要可写入企业级记忆（需审批）</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ §7 核心数据模型 ═══ -->
+<section class="sec reveal" id="s7">
+  <div class="sec-hd">
+    <div class="sec-eye"><span class="etag blue">第7章</span><span class="esub">DATA MODEL</span></div>
+    <h2 class="st">核心数据模型</h2>
+  </div>
+
+  <div class="asc">
+<span class="aa">┌─────────────────┐       ┌─────────────────┐       ┌───────────────────────┐</span>
+<span class="ab">│  agent_types    │──定义──│ business_agents │──绑定──│   skill_packs         │</span>
+<span class="ab">│ type_id (PK)    │       │ agent_id (PK)   │       │ pack_id (PK)          │</span>
+<span class="ab">│ base_skill_pack │       │ type_id (FK)    │       │ scope: platform/bu/dept│</span>
+<span class="ab">│ config_schema   │       │ dept_id (FK)    │       │ tools: JSON[]         │</span>
+<span class="ab">└─────────────────┘       │ quota_config    │       │ version: semver       │</span>
+                          <span class="ab">│ autonomy_level  │       └───────────────────────┘</span>
+                          <span class="ab">│ max_sessions    │</span>
+                          <span class="ab">│ status          │</span>
+                          <span class="aa">└────────┬────────┘</span>
+                                   <span class="aa">│ 接受</span>
+                 <span class="aa">┌────────────────┬┴───────────────────┐</span>
+                 <span class="ab">▼</span>                <span class="ab">▼</span>                    <span class="ab">▼</span>
+      <span class="ac">┌─────────────────┐  ┌──────────────────┐  ┌──────────────────┐</span>
+      <span class="ac">│    sessions     │  │  knowledge_bases  │  │   memory_scopes  │</span>
+      <span class="ac">│ session_id (PK) │  │ kb_id (PK)        │  │ scope_id (PK)    │</span>
+      <span class="ac">│ agent_id (FK)   │  │ agent_id (FK)     │  │ agent_id (FK)    │</span>
+      <span class="ac">│ caller_type     │  │ dept_id           │  │ level: ent/dept  │</span>
+      <span class="ac">│ caller_id       │  │ milvus_collection │  │ /personal        │</span>
+      <span class="ac">│ status          │  │ neo4j_label       │  │ ttl_days         │</span>
+      <span class="ac">│ token_used      │  │ version           │  │ approval_required│</span>
+      <span class="ac">│ context_snap    │  └──────────────────┘  └──────────────────┘</span>
+      <span class="ac">│ trace_id        │</span>
+      <span class="ac">└────────┬────────┘</span>
+               <span class="aa">│ 产生</span>
+   <span class="aa">┌───────────┴───────────┐</span>
+   <span class="ad">▼</span>                       <span class="ad">▼</span>
+<span class="ad">┌──────────────┐  ┌──────────────────┐</span>
+<span class="ad">│   messages   │  │     tasks        │</span>
+<span class="ad">│ msg_id (PK)  │  │ task_id (PK)     │</span>
+<span class="ad">│ session_id   │  │ session_id (FK)  │</span>
+<span class="ad">│ role         │  │ status           │</span>
+<span class="ad">│ content_hash │  │ tool_calls: JSON │</span>
+<span class="ad">│ token_count  │  │ result_summary   │</span>
+<span class="ad">└──────────────┘  │ a2a_parent_id   │</span>
+                  <span class="ad">└──────────────────┘</span></div>
+</section>
+
+<!-- ═══ §8 接口规范 ═══ -->
+<section class="sec reveal" id="s8">
+  <div class="sec-hd">
+    <div class="sec-eye"><span class="etag teal">第8章</span><span class="esub">API SPECIFICATION</span></div>
+    <h2 class="st">接口规范</h2>
+    <p class="sd">业务智能体对外暴露两类接口：面向人类用户/外部系统的 REST/WebSocket 接口，以及面向其他智能体的 A2A 接口。</p>
+  </div>
+
+  <div class="g2">
+    <div>
+      <h4 class="sh2">面向员工 / 外部系统的接口</h4>
+      <div class="iface">
+        <div class="iface-hd"><span class="iface-method im-post" style="background:var(--vb-bg);color:var(--vb);border:1px solid #b8ccff">POST</span><span class="iface-path">/api/v1/agents/<span style="color:var(--amber)">{agent_id}</span>/sessions</span></div>
+        <div class="iface-body">创建新会话。返回 session_id 和 WebSocket 连接 URL。若 Agent 已达并发上限，返回 503 + retry_after。<br><br>
+        <strong>Request：</strong><code>{ "initial_message": "...", "caller_context": {...} }</code><br>
+        <strong>Response：</strong><code>{ "session_id": "...", "ws_url": "...", "token_budget": 8000 }</code></div>
+      </div>
+      <div class="iface">
+        <div class="iface-hd"><span class="iface-method im-ws" style="background:var(--purple-bg);color:var(--purple);border:1px solid #d0b0f0">WS</span><span class="iface-path">/v1/ws/sessions/<span style="color:var(--amber)">{session_id}</span></span></div>
+        <div class="iface-body">会话主通道，支持流式事件推送。事件类型与 HLD M2 中 StreamEvent 定义一致（delta/thought/tool_call/hitl_required/done）。</div>
+      </div>
+      <div class="iface">
+        <div class="iface-hd"><span class="iface-method im-get" style="background:var(--green-bg);color:var(--green);border:1px solid #a0d0b0">GET</span><span class="iface-path">/api/v1/agents/<span style="color:var(--amber)">{agent_id}</span>/sessions/<span style="color:var(--amber)">{session_id}</span>/status</span></div>
+        <div class="iface-body">查询会话状态（ACTIVE/HITL_WAIT/IDLE/CLOSED）及当前 Token 消耗量。</div>
+      </div>
+      <div class="iface">
+        <div class="iface-hd"><span class="iface-method im-get" style="background:var(--green-bg);color:var(--green);border:1px solid #a0d0b0">GET</span><span class="iface-path">/api/v1/agents/<span style="color:var(--amber)">{agent_id}</span>/quota</span></div>
+        <div class="iface-body">查询该 Agent 当前并发会话数和配额剩余情况。返回 <code>{ current: 7, max: 10, token_remaining_pct: 62 }</code>。</div>
+      </div>
+    </div>
+    <div>
+      <h4 class="sh2">面向其他智能体的 A2A 接口</h4>
+      <div class="iface">
+        <div class="iface-hd"><span class="iface-method im-get" style="background:var(--green-bg);color:var(--green);border:1px solid #a0d0b0">GET</span><span class="iface-path">/a2a/<span style="color:var(--amber)">{agent_id}</span>/.well-known/agent-card</span></div>
+        <div class="iface-body">返回该 Agent 的能力描述卡片（Agent Card），包含支持的任务类型、输入/输出 Schema、自主度级别、所属部门等元数据。</div>
+      </div>
+      <div class="iface">
+        <div class="iface-hd"><span class="iface-method im-post" style="background:var(--vb-bg);color:var(--vb);border:1px solid #b8ccff">POST</span><span class="iface-path">/a2a/<span style="color:var(--amber)">{agent_id}</span>/tasks</span></div>
+        <div class="iface-body">另一个 Agent 向本 Agent 委派子任务，建立 Agent 间会话。<br><br>
+        <strong>Request：</strong><code>{ "caller_agent_id": "AGENT-AUD-02", "task_type": "...", "input": {...}, "output_schema": "..." }</code><br>
+        <strong>Response：</strong><code>{ "task_id": "...", "session_id": "...", "status": "accepted" }</code></div>
+      </div>
+      <div class="iface">
+        <div class="iface-hd"><span class="iface-method im-get" style="background:var(--green-bg);color:var(--green);border:1px solid #a0d0b0">GET</span><span class="iface-path">/a2a/<span style="color:var(--amber)">{agent_id}</span>/tasks/<span style="color:var(--amber)">{task_id}</span></span></div>
+        <div class="iface-body">轮询 A2A 任务状态，获取执行进度和结果摘要。支持 Webhook 回调替代轮询（在 POST /tasks 时指定 callback_url）。</div>
+      </div>
+
+      <h4 class="sh2" style="margin-top:14px">会话跨生命周期事件（Kafka Topics）</h4>
+      <div class="tw">
+        <table class="tbl sm">
+          <thead><tr><th>Topic</th><th>触发时机</th><th>消费方</th></tr></thead>
+          <tbody>
+            <tr><td>ba.session.created</td><td>新会话建立</td><td>M9 审计、监控</td></tr>
+            <tr><td>ba.session.closed</td><td>会话关闭</td><td>M7 记忆提炼（Mem0）</td></tr>
+            <tr><td>ba.task.completed</td><td>任务完成</td><td>M8 A2A 回调、M9 审计</td></tr>
+            <tr><td>ba.quota.warning</td><td>配额 ≥ 80%</td><td>M10 告警通知</td></tr>
+            <tr><td>ba.a2a.delegated</td><td>发起 A2A 委派</td><td>M9 审计链路追踪</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ §9 状态机 ═══ -->
+<section class="sec reveal" id="s9">
+  <div class="sec-hd">
+    <div class="sec-eye"><span class="etag amber">第9章</span><span class="esub">STATE MACHINE & LIFECYCLE</span></div>
+    <h2 class="st">状态机与生命周期</h2>
+  </div>
+
+  <div class="g2">
+    <div>
+      <h4 class="sh2">业务智能体实例状态机</h4>
+      <div class="asc" style="font-size:11px;padding:16px">DRAFT → VALIDATING → TESTING → PUBLISHED
+  │           │              │             │
+  └(校验失败) └(校验通过)   └(测试通过)   ├→ DEPRECATED → ARCHIVED
+              ↓              ↓             └→ SUSPENDED（违规/紧急停用）
+
+PUBLISHED 状态下，接受会话请求：
+  ├── max_sessions 未满 → 建立新会话
+  └── max_sessions 已满 → 503 + retry_after</div>
+
+      <h4 class="sh2" style="margin-top:12px">单次会话状态机</h4>
+      <div class="asc" style="font-size:11px;padding:16px">INITIALIZING（初始化上下文 + 记忆加载）
+     ↓
+ACTIVE（ReAct 推理循环中）
+     ├→ HITL_WAIT（等待人工审批，推理暂停）
+     │       └→ ACTIVE（审批通过，恢复推理）
+     ├→ IDLE（推理完成，等待用户下一条消息）
+     │       └→ ACTIVE（用户输入，继续推理）
+     └→ CLOSED
+          ├── 正常：任务完成 / 用户主动关闭
+          ├── 超时：idle_ttl 到期（默认 30min）
+          ├── 预算耗尽：token_budget 用完
+          └── 异常：推理引擎故障，强制关闭</div>
+
+      <div class="callout" style="margin-top:10px">
+        <p><strong>CLOSED 后处理：</strong>会话进入 CLOSED 状态后，推理引擎释放该会话的 Redis 热缓存（保留 PG 持久记录），并发布 <code>ba.session.closed</code> 事件触发 Mem0 异步记忆提炼，同时从并发计数器中释放一个 slot。</p>
+      </div>
+    </div>
+    <div>
+      <h4 class="sh2">关键 NFR 指标</h4>
+      <div class="tw">
+        <table class="tbl sm">
+          <thead><tr><th>指标</th><th>目标值</th><th>测量方式</th></tr></thead>
+          <tbody>
+            <tr><td>会话建立延迟</td><td>P95 ≤ 500ms</td><td>从请求到 WebSocket 就绪</td></tr>
+            <tr><td>会话准入判断</td><td>≤ 10ms</td><td>Redis Lua 脚本执行时间</td></tr>
+            <tr><td>记忆加载延迟</td><td>P95 ≤ 200ms</td><td>三层并行检索总耗时</td></tr>
+            <tr><td>首 Token 延迟</td><td>P95 ≤ 3s</td><td>从用户发送到首个 delta 事件</td></tr>
+            <tr><td>并发会话数</td><td>≤ max_concurrent_sessions</td><td>Redis SCARD 实时监控</td></tr>
+            <tr><td>会话关闭后记忆提炼</td><td>30s 内触发</td><td>Kafka 消费延迟监控</td></tr>
+            <tr><td>A2A 任务接受延迟</td><td>P95 ≤ 300ms</td><td>从委派请求到 accepted 响应</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h4 class="sh2" style="margin-top:14px">监控与告警</h4>
+      <div class="tw">
+        <table class="tbl sm">
+          <thead><tr><th>监控指标</th><th>告警阈值</th><th>通知渠道</th></tr></thead>
+          <tbody>
+            <tr><td>Agent 并发会话占用率</td><td>&gt; 90%</td><td>Slack + 邮件</td></tr>
+            <tr><td>会话失败率（5min 窗口）</td><td>&gt; 10%</td><td>PagerDuty P1</td></tr>
+            <tr><td>A2A 任务超时率</td><td>&gt; 5%</td><td>Slack P2</td></tr>
+            <tr><td>记忆提炼 Kafka 积压</td><td>&gt; 1000 条</td><td>邮件预警</td></tr>
+            <tr><td>跨部门访问拒绝频率</td><td>&gt; 20次/min</td><td>安全团队 P1</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- 文档结尾 -->
+  <div style="margin-top:48px;background:var(--ink);border-radius:var(--rl);padding:32px;color:rgba(255,255,255,.6);text-align:center">
+    <div style="display:flex;align-items:center;justify-content:center;gap:12px;margin-bottom:10px">
+      <svg width="28" height="28" viewBox="0 0 64 64" fill="none">
+        <polygon points="32,5 58,54 6,54" fill="none" stroke="#00c4ff" stroke-width="1.8" stroke-linejoin="round"/>
+        <polygon points="32,16 50,48 14,48" fill="rgba(26,111,255,.15)" stroke="#1a6fff" stroke-width="1"/>
+        <circle cx="32" cy="5" r="2.5" fill="#f5c842"/>
+        <line x1="7" y1="58" x2="57" y2="58" stroke="rgba(0,196,255,.2)" stroke-width="1.2"/>
+      </svg>
+      <div style="font-family:var(--serif);font-size:18px;font-weight:700;color:#fff">Vela · 织帆 — 业务智能体设计说明</div>
+    </div>
+    <div style="font-family:var(--mono);font-size:11px;margin-bottom:14px">SDD-BA-VELA-2026-001 · v1.0.0 · 2026-06-15 · Apache 2.0</div>
+    <div style="font-size:12px;line-height:1.8;max-width:640px;margin:0 auto 16px">
+      本文档覆盖：9章节 · 会话模型与隔离机制 · 共享能力层（Skill/知识/经验/记忆） · 并发配额管理 · 多业务单位差异化实例化 · 跨实例 A2A 协作 · 核心数据模型与接口规范 · 状态机与生命周期
+    </div>
+    <div style="display:flex;justify-content:center;gap:20px;flex-wrap:wrap;font-family:var(--mono);font-size:10px;color:rgba(255,255,255,.3)">
+      <span>上游: HLD-VELA-2026-001</span><span>|</span>
+      <span>关联: PRD-VELA-2026-001</span><span>|</span>
+      <span>API: EAGP-API-SDK-v1.0</span>
+    </div>
+  </div>
+</section>
+
+</div>
+
+<script>
+function toggleSb(){document.getElementById('sb').classList.toggle('open');document.getElementById('ov').classList.toggle('open')}
+function closeSb(){document.getElementById('sb').classList.remove('open');document.getElementById('ov').classList.remove('open')}
+function cm(){if(window.innerWidth<=1024)closeSb()}
+window.addEventListener('scroll',()=>{
+  const sc=window.scrollY,dh=document.documentElement.scrollHeight-window.innerHeight;
+  const p=Math.round(sc/dh*100);
+  document.getElementById('pct').textContent=p+'%';
+  document.getElementById('pf').style.width=p+'%';
+});
+const secs=document.querySelectorAll('section[id],[id]');
+const navs=document.querySelectorAll('.ni');
+const io=new IntersectionObserver(entries=>{
+  entries.forEach(e=>{
+    if(e.isIntersecting){
+      const id=e.target.id;
+      navs.forEach(n=>{n.classList.remove('on');if(n.getAttribute('href')==='#'+id)n.classList.add('on')});
+    }
+  });
+},{threshold:0.1,rootMargin:'-55px 0px -65% 0px'});
+secs.forEach(s=>s.id&&io.observe(s));
+const revs=document.querySelectorAll('.reveal');
+const rio=new IntersectionObserver(entries=>{entries.forEach(e=>{if(e.isIntersecting)e.target.classList.add('vis')})},{threshold:0.04});
+revs.forEach(el=>rio.observe(el));
+</script>
+</body>
+</html>

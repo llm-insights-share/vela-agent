@@ -1,0 +1,1260 @@
+import asyncio
+import json
+import re
+import os
+import shutil
+import hashlib
+import traceback
+from typing import Dict, Any, Optional, List
+from sqlalchemy.orm import Session
+from models import (
+    Agent, AgentVersion, AgentStatus, VersionStatus, ChangeType,
+    AgentSkillBinding, AgentKnowledgeBinding, AgentToolBinding,
+    Session as SessionModel, ModelService, ModelProvider,
+    SkillPack, SkillPackStatus, KnowledgeBase, Tool, ToolStatus,
+    gen_uuid, now_utc
+)
+from schemas import AgentCreate, AgentUpdate, ValidationResult
+from services.builtin_tools import (
+    BuiltinTool, BUILTIN_TOOLS, build_builtin_openai_tool_def, execute_builtin_tool,
+)
+
+
+class AgentLoopError(Exception):
+    pass
+
+
+class TokenBudgetExceededError(AgentLoopError):
+    pass
+
+
+class MaxIterationsExceededError(AgentLoopError):
+    pass
+
+
+class AgentService:
+
+    @staticmethod
+    def validate_agent(db: Session, agent_id: str) -> ValidationResult:
+        result = ValidationResult()
+        agent = db.query(Agent).filter(Agent.agent_id == agent_id).first()
+        if not agent:
+            result.errors.append({"field": "agent_id", "message": "Agent 不存在"})
+            result.passed = False
+            return result
+
+        model_svc = db.query(ModelService).filter(
+            ModelService.model_service_id == agent.model_service_id
+        ).first()
+        if not model_svc:
+            result.errors.append({"field": "model_service_id", "message": "模型服务不存在"})
+        elif model_svc.status.value != "ACTIVE":
+            result.errors.append({"field": "model_service_id", "message": f"模型服务状态异常: {model_svc.status.value}"})
+
+        if agent.max_concurrent_sessions < 1:
+            result.errors.append({"field": "max_concurrent_sessions", "message": "最大并发会话数必须 ≥ 1"})
+
+        if agent.token_budget < 1000:
+            result.errors.append({"field": "token_budget", "message": "Token 预算必须 ≥ 1000"})
+
+        if not agent.system_prompt or not agent.system_prompt.strip():
+            result.warnings.append({"field": "system_prompt", "message": "System Prompt 为空"})
+        elif len(agent.system_prompt) > 32000:
+            result.warnings.append({"field": "system_prompt", "message": "System Prompt 超过 32000 字符"})
+
+        if agent.autonomy_level == "L1":
+            has_hitl = any(
+                v == "ask_first" for v in (agent.tool_permissions or {}).values()
+            )
+            if not has_hitl:
+                result.warnings.append({
+                    "field": "autonomy_level",
+                    "message": "L1 级别建议配置 HITL 审批通道（tool_permissions 中设置 ask_first）"
+                })
+
+        for skill_binding in db.query(AgentSkillBinding).filter(
+            AgentSkillBinding.agent_id == agent_id
+        ).all():
+            skill = db.query(SkillPack).filter(
+                SkillPack.skill_pack_id == skill_binding.skill_pack_id
+            ).first()
+            if not skill or skill.status.value not in ("ACTIVE",):
+                result.warnings.append({
+                    "field": "skill_pack_ids",
+                    "message": f"Skill 包 {skill_binding.skill_pack_id} 不可用"
+                })
+
+        for kb_binding in db.query(AgentKnowledgeBinding).filter(
+            AgentKnowledgeBinding.agent_id == agent_id
+        ).all():
+            kb = db.query(KnowledgeBase).filter(
+                KnowledgeBase.kb_id == kb_binding.kb_id
+            ).first()
+            if not kb or kb.status.value not in ("ACTIVE",):
+                result.warnings.append({
+                    "field": "knowledge_base_ids",
+                    "message": f"知识库 {kb_binding.kb_id} 不可用"
+                })
+
+        result.passed = len(result.errors) == 0
+        return result
+
+    @staticmethod
+    def create_agent(db: Session, data: AgentCreate) -> Agent:
+        agent = Agent(
+            agent_id=gen_uuid(),
+            name=data.name,
+            description=data.description,
+            model_service_id=data.model_service_id,
+            system_prompt=data.system_prompt,
+            dept_id=data.dept_id,
+            autonomy_level=data.autonomy_level,
+            max_concurrent_sessions=data.max_concurrent_sessions,
+            token_budget=data.token_budget,
+            tool_permissions=data.tool_permissions,
+            tags=data.tags,
+            status=AgentStatus.DRAFT,
+        )
+        db.add(agent)
+        db.flush()
+
+        snapshot = {
+            "name": data.name,
+            "description": data.description,
+            "model_service_id": data.model_service_id,
+            "system_prompt": data.system_prompt,
+            "dept_id": data.dept_id,
+            "autonomy_level": data.autonomy_level,
+            "max_concurrent_sessions": data.max_concurrent_sessions,
+            "token_budget": data.token_budget,
+            "tool_permissions": data.tool_permissions,
+            "tags": data.tags,
+        }
+        version = AgentVersion(
+            version_id=gen_uuid(),
+            agent_id=agent.agent_id,
+            version="0.1.0-draft",
+            version_seq=1,
+            change_type=ChangeType.MINOR,
+            change_summary="初始创建",
+            snapshot=snapshot,
+            status=VersionStatus.DRAFT,
+        )
+        db.add(version)
+        db.flush()
+
+        agent.current_version_id = version.version_id
+
+        for sp_id in (data.skill_pack_ids or []):
+            skill = db.query(SkillPack).filter(SkillPack.skill_pack_id == sp_id).first()
+            if skill:
+                binding = AgentSkillBinding(
+                    agent_id=agent.agent_id,
+                    skill_pack_id=sp_id,
+                    tool_permissions=data.tool_permissions or {},
+                )
+                db.add(binding)
+
+        for kb_id in (data.knowledge_base_ids or []):
+            kb = db.query(KnowledgeBase).filter(KnowledgeBase.kb_id == kb_id).first()
+            if kb:
+                binding = AgentKnowledgeBinding(
+                    agent_id=agent.agent_id,
+                    kb_id=kb_id,
+                )
+                db.add(binding)
+
+        for tid in (data.tool_ids or []):
+            tool = db.query(Tool).filter(Tool.tool_id == tid).first()
+            if tool:
+                binding = AgentToolBinding(
+                    agent_id=agent.agent_id,
+                    tool_id=tid,
+                    permission="allowed",
+                )
+                db.add(binding)
+
+        db.commit()
+        db.refresh(agent)
+        return agent
+
+    @staticmethod
+    def update_agent(db: Session, agent_id: str, data: AgentUpdate) -> Optional[Agent]:
+        agent = db.query(Agent).filter(Agent.agent_id == agent_id).first()
+        if not agent:
+            return None
+
+        update_fields = data.model_dump(exclude_unset=True, exclude={"skill_pack_ids", "knowledge_base_ids", "tool_ids", "change_summary"})
+        change_summary = data.change_summary or "配置修改"
+
+        for key, value in update_fields.items():
+            if hasattr(agent, key):
+                setattr(agent, key, value)
+
+        last_version = db.query(AgentVersion).filter(
+            AgentVersion.agent_id == agent_id
+        ).order_by(AgentVersion.version_seq.desc()).first()
+
+        last_seq = last_version.version_seq if last_version else 0
+        last_ver = last_version.version if last_version else "0.0.0"
+
+        parts = last_ver.replace("-draft", "").split(".")
+        if data.model_service_id or data.autonomy_level:
+            change_type = ChangeType.MAJOR
+            new_ver = f"{int(parts[0]) + 1}.0.0"
+        elif data.system_prompt or data.skill_pack_ids or data.knowledge_base_ids:
+            change_type = ChangeType.MINOR
+            new_ver = f"{parts[0]}.{int(parts[1]) + 1}.0"
+        else:
+            change_type = ChangeType.PATCH
+            new_ver = f"{parts[0]}.{parts[1]}.{int(parts[2]) + 1}"
+
+        if agent.status == AgentStatus.DRAFT:
+            new_ver += "-draft"
+
+        snapshot = {
+            "name": agent.name,
+            "description": agent.description,
+            "model_service_id": agent.model_service_id,
+            "system_prompt": agent.system_prompt,
+            "dept_id": agent.dept_id,
+            "autonomy_level": agent.autonomy_level,
+            "max_concurrent_sessions": agent.max_concurrent_sessions,
+            "token_budget": agent.token_budget,
+            "tool_permissions": agent.tool_permissions,
+            "tags": agent.tags,
+        }
+        version = AgentVersion(
+            version_id=gen_uuid(),
+            agent_id=agent_id,
+            version=new_ver,
+            version_seq=last_seq + 1,
+            change_type=change_type,
+            change_summary=change_summary,
+            snapshot=snapshot,
+            status=VersionStatus.DRAFT,
+        )
+        db.add(version)
+        db.flush()
+        agent.current_version_id = version.version_id
+
+        if data.skill_pack_ids is not None:
+            db.query(AgentSkillBinding).filter(
+                AgentSkillBinding.agent_id == agent_id
+            ).delete()
+            for sp_id in data.skill_pack_ids:
+                skill = db.query(SkillPack).filter(SkillPack.skill_pack_id == sp_id).first()
+                if skill:
+                    binding = AgentSkillBinding(
+                        agent_id=agent_id,
+                        skill_pack_id=sp_id,
+                        tool_permissions=(data.tool_permissions or agent.tool_permissions or {}),
+                    )
+                    db.add(binding)
+
+        if data.knowledge_base_ids is not None:
+            db.query(AgentKnowledgeBinding).filter(
+                AgentKnowledgeBinding.agent_id == agent_id
+            ).delete()
+            for kb_id in data.knowledge_base_ids:
+                kb = db.query(KnowledgeBase).filter(KnowledgeBase.kb_id == kb_id).first()
+                if kb:
+                    binding = AgentKnowledgeBinding(agent_id=agent_id, kb_id=kb_id)
+                    db.add(binding)
+
+        if data.tool_ids is not None:
+            db.query(AgentToolBinding).filter(
+                AgentToolBinding.agent_id == agent_id
+            ).delete()
+            for tid in data.tool_ids:
+                tool = db.query(Tool).filter(Tool.tool_id == tid).first()
+                if tool:
+                    binding = AgentToolBinding(
+                        agent_id=agent_id,
+                        tool_id=tid,
+                        permission="allowed",
+                    )
+                    db.add(binding)
+
+        db.commit()
+        db.refresh(agent)
+        return agent
+
+    @staticmethod
+    def publish_agent(db: Session, agent_id: str, version_id: Optional[str] = None) -> Optional[Agent]:
+        agent = db.query(Agent).filter(Agent.agent_id == agent_id).first()
+        if not agent:
+            return None
+
+        target_version_id = version_id or agent.current_version_id
+        version = db.query(AgentVersion).filter(
+            AgentVersion.version_id == target_version_id
+        ).first()
+        if not version:
+            return None
+
+        version.status = VersionStatus.PUBLISHED
+        version.version = version.version.replace("-draft", "")
+        agent.status = AgentStatus.PUBLISHED
+        agent.current_version_id = version.version_id
+
+        db.commit()
+        db.refresh(agent)
+        return agent
+
+    @staticmethod
+    async def chat_with_agent(
+        db: Session,
+        agent_id: str,
+        session_id: str,
+        message: str,
+        skill_pack_id: Optional[str] = None,
+        timeout_seconds: Optional[int] = None,
+        execution_mode: Optional[str] = "auto",
+        skip_history: bool = False,
+    ) -> Dict[str, Any]:
+        agent = db.query(Agent).filter(Agent.agent_id == agent_id).first()
+        if not agent:
+            raise ValueError("Agent 不存在")
+
+        model_svc = db.query(ModelService).filter(
+            ModelService.model_service_id == agent.model_service_id
+        ).first()
+        if not model_svc:
+            raise ValueError("模型服务不存在")
+
+        provider = db.query(ModelProvider).filter(
+            ModelProvider.provider_id == model_svc.provider_id
+        ).first()
+        if not provider:
+            raise ValueError("模型供应商不存在")
+
+        session = db.query(SessionModel).filter(
+            SessionModel.session_id == session_id
+        ).first()
+        if not session:
+            raise ValueError("会话不存在")
+
+        knowledge_context = ""
+        kb_bindings = db.query(AgentKnowledgeBinding).filter(
+            AgentKnowledgeBinding.agent_id == agent_id
+        ).all()
+        if kb_bindings:
+            try:
+                from services.knowledge_service import knowledge_service as ks
+                kb_parts = []
+                for binding in kb_bindings:
+                    results = ks.search(binding.kb_id, message, top_k=3)
+                    for r in results:
+                        kb_parts.append(r["content"])
+                if kb_parts:
+                    knowledge_context = "\n\n参考知识库内容：\n" + "\n---\n".join(kb_parts)
+            except Exception as e:
+                print(f"[AgentService] 知识库搜索失败，跳过: {e}")
+
+        skill_context = ""
+        active_skill_name = None
+        if skill_pack_id:
+            skill = db.query(SkillPack).filter(
+                SkillPack.skill_pack_id == skill_pack_id,
+                SkillPack.status == SkillPackStatus.ACTIVE,
+            ).first()
+            if skill:
+                skill_context = f"\n\n你需要使用以下 Skill 来处理用户请求：\n## Skill: {skill.name}\n{skill.skill_content or skill.description}"
+                active_skill_name = skill.name
+        else:
+            skill_bindings = db.query(AgentSkillBinding).filter(
+                AgentSkillBinding.agent_id == agent_id
+            ).all()
+            if skill_bindings:
+                skill_parts = []
+                for binding in skill_bindings:
+                    skill = db.query(SkillPack).filter(
+                        SkillPack.skill_pack_id == binding.skill_pack_id,
+                        SkillPack.status == SkillPackStatus.ACTIVE,
+                    ).first()
+                    if not skill:
+                        continue
+
+                    relevance = _compute_skill_relevance(message, skill)
+                    if relevance > 0.15:
+                        skill_parts.append(f"## Skill: {skill.name}\n{skill.skill_content or skill.description}")
+
+                if skill_parts:
+                    skill_context = "\n\n你可以使用以下 Skill 来处理用户请求：\n" + "\n\n".join(skill_parts)
+
+        tool_bindings = db.query(AgentToolBinding).filter(
+            AgentToolBinding.agent_id == agent_id
+        ).all()
+        available_tools = []
+        for tb in tool_bindings:
+            tool = db.query(Tool).filter(
+                Tool.tool_id == tb.tool_id,
+                Tool.status == ToolStatus.ACTIVE,
+            ).first()
+            if tool:
+                available_tools.append(tool)
+
+        available_tools.extend(BUILTIN_TOOLS)
+
+        has_tools = len(available_tools) > 0
+        has_kb = len(kb_bindings) > 0
+        has_skills = bool(skill_context)
+
+        mode = execution_mode or "auto"
+        if mode == "auto":
+            mode = _analyze_execution_mode(message, has_tools, has_kb, has_skills)
+
+        loop = AgentLoop(
+            db=db,
+            agent=agent,
+            session=session,
+            provider=provider,
+            model_svc=model_svc,
+            available_tools=available_tools,
+            timeout_seconds=timeout_seconds,
+            user_message=message,
+            active_skill_name=active_skill_name,
+            knowledge_context=knowledge_context,
+            skill_context=skill_context,
+            skip_history=skip_history,
+        )
+
+        try:
+            result = await loop.run(mode)
+            return result
+        except Exception as e:
+            traceback.print_exc()
+            thinking_log = loop.thinking_log if loop else []
+            return {
+                "success": False,
+                "error": str(e),
+                "content": str(e),
+                "thinking_log": thinking_log,
+                "files": [],
+            }
+
+
+class AgentLoop:
+    MAX_ITERATIONS = 10
+    MAX_CONTEXT_MESSAGES = 50
+    TOOL_RETRY_COUNT = 2
+    SKILL_MAX_CHARS = 8000
+
+    def __init__(
+        self,
+        db: Session,
+        agent,
+        session,
+        provider,
+        model_svc,
+        available_tools: list,
+        timeout_seconds: Optional[int],
+        user_message: str,
+        active_skill_name: Optional[str],
+        knowledge_context: str,
+        skill_context: str,
+        skip_history: bool = False,
+    ):
+        self.db = db
+        self.agent = agent
+        self.session = session
+        self.provider = provider
+        self.model_svc = model_svc
+        self.available_tools = available_tools
+        self.timeout_seconds = timeout_seconds
+        self.user_message = user_message
+        self.active_skill_name = active_skill_name
+        self.knowledge_context = knowledge_context
+        self.skill_context = skill_context
+        self.skip_history = skip_history
+        self.thinking_log: List[str] = []
+        self.total_tokens_used = 0
+        self.generated_files: List[Dict[str, str]] = []
+
+        self.output_dir = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)), "data", "outputs", session.session_id
+        )
+        os.makedirs(self.output_dir, exist_ok=True)
+
+    async def run(self, mode: str) -> Dict[str, Any]:
+        total_timeout = float(self.timeout_seconds) if self.timeout_seconds else 300.0
+        try:
+            result = await asyncio.wait_for(
+                self._run_inner(mode),
+                timeout=total_timeout,
+            )
+            return result
+        except asyncio.TimeoutError:
+            self.thinking_log.append(f"[TIMEOUT] 整体执行超时（{total_timeout}s）")
+            return self._build_result(
+                f"任务执行超时（{total_timeout}s）。请尝试简化 Skill 内容或增加超时时间。",
+                "\n".join(self.thinking_log),
+                mode,
+            )
+
+    async def _run_inner(self, mode: str) -> Dict[str, Any]:
+        if mode == "direct":
+            return await self._run_direct()
+        elif mode == "react" and self.available_tools:
+            return await self._run_react()
+        elif mode == "plan_and_execute" and (self.available_tools or self.knowledge_context):
+            return await self._run_plan_and_execute()
+        else:
+            return await self._run_direct()
+
+    def _build_system_prompt(self) -> str:
+        system_prompt = self.agent.system_prompt or "你是一个智能助手。"
+        if self.knowledge_context:
+            system_prompt += self.knowledge_context
+        if self.skill_context:
+            truncated = self.skill_context
+            if len(truncated) > self.SKILL_MAX_CHARS:
+                truncated = truncated[:self.SKILL_MAX_CHARS] + "\n\n[Skill 内容过长，已截断，请关注核心指令]"
+            system_prompt += truncated
+        return system_prompt
+
+    def _build_initial_messages(self) -> List[Dict[str, Any]]:
+        messages = [{"role": "system", "content": self._build_system_prompt()}]
+
+        if not self.skip_history:
+            history = self.session.messages or []
+            for msg in history[-self.MAX_CONTEXT_MESSAGES:]:
+                messages.append(msg)
+
+        messages.append({"role": "user", "content": self.user_message})
+        return messages
+
+    def _truncate_context(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if len(messages) <= self.MAX_CONTEXT_MESSAGES + 1:
+            return messages
+
+        system_msg = messages[0]
+        recent = messages[-(self.MAX_CONTEXT_MESSAGES):]
+
+        tool_ids_seen = set()
+        orphan_tool_messages = []
+        for msg in reversed(recent):
+            if msg.get("role") == "tool":
+                tool_ids_seen.add(msg.get("tool_call_id", ""))
+            elif msg.get("role") == "assistant" and msg.get("tool_calls"):
+                for tc in msg["tool_calls"]:
+                    if tc.get("id") not in tool_ids_seen:
+                        orphan_tool_messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc["id"],
+                            "content": "[工具结果已截断]",
+                        })
+
+        truncated = [system_msg] + orphan_tool_messages + recent
+        return truncated
+
+    def _check_token_budget(self, estimated_tokens: int):
+        current = self.session.token_used or 0
+        budget = self.session.token_budget or self.agent.token_budget
+        if current + estimated_tokens + self.total_tokens_used > budget:
+            self.thinking_log.append(
+                f"[WARNING] Token 预算超限: 已用 {current + self.total_tokens_used}, 预算 {budget}，继续执行"
+            )
+
+    def _estimate_tokens(self, messages: List[Dict[str, Any]]) -> int:
+        total_chars = 0
+        for msg in messages:
+            content = msg.get("content", "") or ""
+            total_chars += len(content)
+            if msg.get("tool_calls"):
+                for tc in msg["tool_calls"]:
+                    total_chars += len(tc.get("function", {}).get("arguments", ""))
+        return max(1, total_chars // 3)
+
+    async def _call_llm(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        max_tokens: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        from services.model_provider import model_provider_service
+
+        effective_max_tokens = max_tokens or min(
+            self.agent.token_budget - (self.session.token_used or 0) - self.total_tokens_used,
+            4096,
+        )
+        if effective_max_tokens < 1024:
+            effective_max_tokens = 1024
+
+        self._check_token_budget(self._estimate_tokens(messages) + effective_max_tokens)
+
+        self.thinking_log.append(f"[LLM 调用] {len(messages)} 条消息, max_tokens={effective_max_tokens}")
+
+        completion = await model_provider_service.chat_completion(
+            provider=self.provider,
+            model_name=self.model_svc.model_name,
+            messages=messages,
+            max_tokens=effective_max_tokens,
+            tools=tools,
+            timeout_seconds=self.timeout_seconds,
+        )
+
+        usage = completion.get("usage", {})
+        self.total_tokens_used += usage.get("total_tokens", 0)
+        return completion
+
+    def _parse_tool_calls(self, msg: Dict[str, Any]) -> List[Dict[str, Any]]:
+        tool_calls = msg.get("tool_calls")
+        if tool_calls:
+            return tool_calls
+
+        content = msg.get("content", "")
+        parsed = self._parse_structured_output(content)
+        if parsed:
+            return [{
+                "id": f"call_{gen_uuid()[:8]}",
+                "type": "function",
+                "function": {
+                    "name": parsed["tool_name"],
+                    "arguments": json.dumps(parsed["arguments"], ensure_ascii=False),
+                },
+            }]
+
+        return []
+
+    def _parse_structured_output(self, content: str) -> Optional[Dict[str, Any]]:
+        if not content:
+            return None
+
+        json_match = re.search(r'```json\s*\n?(.*?)\n?```', content, re.DOTALL)
+        if json_match:
+            try:
+                data = json.loads(json_match.group(1))
+                if isinstance(data, dict) and "tool_name" in data:
+                    return data
+                if isinstance(data, dict) and "function" in data:
+                    return data["function"]
+            except json.JSONDecodeError:
+                pass
+
+        json_match = re.search(r'\{[^{}]*"tool_name"\s*:\s*"[^"]+"[^{}]*\}', content, re.DOTALL)
+        if json_match:
+            try:
+                data = json.loads(json_match.group(0))
+                if "tool_name" in data:
+                    return data
+            except json.JSONDecodeError:
+                pass
+
+        return None
+
+    @staticmethod
+    def _safe_parse_tool_args(args_str: str) -> dict:
+        if not args_str:
+            return {}
+        try:
+            return json.loads(args_str)
+        except json.JSONDecodeError:
+            pass
+
+        repaired = args_str.rstrip()
+        if not repaired.endswith("}"):
+            brace_depth = 0
+            for ch in repaired:
+                if ch == "{":
+                    brace_depth += 1
+                elif ch == "}":
+                    brace_depth -= 1
+            repaired += "}" * max(0, brace_depth)
+            try:
+                return json.loads(repaired)
+            except json.JSONDecodeError:
+                pass
+
+        try:
+            import re as _re
+            result = {}
+            str_pat = r'"([^"\\]*(?:\\.[^"\\]*)*)"'
+            for m in _re.finditer(rf'"({str_pat})"\s*:\s*({str_pat})', repaired):
+                key = m.group(2)
+                val = m.group(4)
+                try:
+                    result[key] = json.loads(f'"{val}"')
+                except json.JSONDecodeError:
+                    result[key] = val
+            if result:
+                return result
+        except Exception:
+            pass
+
+        return {}
+
+    async def _execute_tool_with_retry(self, tool, args: Dict[str, Any]) -> Dict[str, Any]:
+        if isinstance(tool, BuiltinTool):
+            try:
+                return await execute_builtin_tool(tool.name, args, self.output_dir)
+            except Exception as e:
+                return {"success": False, "error": f"内置工具执行失败: {str(e)}"}
+
+        from services.tool_service import tool_execution_service
+
+        last_error = None
+        for attempt in range(self.TOOL_RETRY_COUNT + 1):
+            try:
+                result = await tool_execution_service.execute_tool(
+                    tool, args, timeout_seconds=self.timeout_seconds or 60
+                )
+                return result
+            except Exception as e:
+                last_error = str(e)
+                self.thinking_log.append(f"  工具 [{tool.name}] 第 {attempt + 1} 次执行失败: {last_error[:200]}")
+                if attempt < self.TOOL_RETRY_COUNT:
+                    continue
+
+        return {"success": False, "error": last_error or "工具执行失败"}
+
+    async def _run_direct(self) -> Dict[str, Any]:
+        self.thinking_log.append("[Direct] 开始分析用户请求...")
+        messages = self._build_initial_messages()
+        messages = self._truncate_context(messages)
+
+        completion = await self._call_llm(messages)
+
+        choices = completion.get("choices", [])
+        if not choices:
+            raise ValueError("模型返回空响应")
+
+        assistant_message = choices[0].get("message", {})
+        assistant_content = assistant_message.get("content", "")
+        reasoning_content = completion.get("reasoning_content", "")
+
+        history = self.session.messages or []
+        history.append({"role": "user", "content": self.user_message})
+        history.append({"role": "assistant", "content": assistant_content})
+        self._persist_session(history)
+
+        self._extract_and_save_files_from_content(assistant_content)
+
+        return self._build_result(assistant_content, reasoning_content, "direct")
+
+    @staticmethod
+    def _build_tool_defs(available_tools: list) -> list:
+        from services.tool_service import tool_execution_service
+
+        defs = []
+        for t in available_tools:
+            if isinstance(t, BuiltinTool):
+                defs.append(build_builtin_openai_tool_def(t))
+            else:
+                defs.append(tool_execution_service.build_openai_tool_def(t))
+        return defs
+
+    async def _run_react(self) -> Dict[str, Any]:
+        openai_tools = self._build_tool_defs(self.available_tools)
+
+        self.thinking_log.append(f"[ReAct] 开始执行, 可用工具: {len(self.available_tools)}")
+
+        messages = self._build_initial_messages()
+        messages = self._truncate_context(messages)
+
+        new_messages = []
+
+        iteration = 0
+        planning_done = False
+        while iteration < self.MAX_ITERATIONS:
+            iteration += 1
+            self.thinking_log.append(f"[ReAct 迭代 {iteration}/{self.MAX_ITERATIONS}]")
+
+            completion = await self._call_llm(messages, tools=openai_tools)
+
+            choices = completion.get("choices", [])
+            if not choices:
+                self.thinking_log.append("模型返回空响应")
+                break
+
+            choice = choices[0]
+            msg = choice.get("message", {})
+
+            if msg.get("content"):
+                if not planning_done and iteration == 1:
+                    self.thinking_log.append(f"[规划] {msg['content'][:300]}")
+                    planning_done = True
+                else:
+                    self.thinking_log.append(f"思考: {msg['content'][:200]}")
+
+            tool_calls = self._parse_tool_calls(msg)
+
+            if tool_calls:
+                self.thinking_log.append(f"调用 {len(tool_calls)} 个工具")
+
+                assistant_entry = {
+                    "role": "assistant",
+                    "content": msg.get("content") or "",
+                }
+                tc_list = []
+                for tc in tool_calls:
+                    tc_list.append({
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tc["function"]["name"],
+                            "arguments": tc["function"]["arguments"],
+                        },
+                    })
+                assistant_entry["tool_calls"] = tc_list
+                messages.append(assistant_entry)
+                new_messages.append(assistant_entry)
+
+                for tc in tool_calls:
+                    func_name = tc["function"]["name"]
+                    raw_args = tc["function"].get("arguments", "")
+                    func_args = self._safe_parse_tool_args(raw_args)
+
+                    parse_failed = bool(raw_args) and not func_args
+
+                    tool = next((t for t in self.available_tools if t.name == func_name), None)
+                    if tool:
+                        if parse_failed:
+                            tool_result_str = (
+                                f"工具调用参数解析失败。请确保 arguments 是合法的 JSON 字符串，"
+                                f"特别注意：1) 字符串中的换行符需用 \\n 转义；"
+                                f"2) 字符串中的引号需用 \\\" 转义；"
+                                f"3) 大文件内容建议通过代码块输出而非工具参数传递。"
+                            )
+                            self.thinking_log.append(f"  工具 [{func_name}] 参数解析失败: {raw_args[:200]}")
+                        else:
+                            exec_result = await self._execute_tool_with_retry(tool, func_args)
+                            if exec_result.get("success"):
+                                tool_result_str = exec_result.get("result", "")
+                            else:
+                                tool_result_str = f"工具执行错误: {exec_result.get('error', '')}"
+                            self._extract_files_from_result(tool_result_str)
+                            self.thinking_log.append(f"  工具 [{func_name}] 结果: {tool_result_str[:200]}")
+                    else:
+                        tool_result_str = f"工具 {func_name} 未找到，可用工具: {[t.name for t in self.available_tools]}"
+                        self.thinking_log.append(f"  {tool_result_str}")
+
+                    tool_msg = {
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "content": tool_result_str,
+                    }
+                    messages.append(tool_msg)
+                    new_messages.append(tool_msg)
+
+                messages = self._truncate_context(messages)
+                continue
+
+            assistant_content = msg.get("content", "")
+            reasoning_content = completion.get("reasoning_content", "")
+
+            new_messages.append({"role": "assistant", "content": assistant_content})
+
+            history = (self.session.messages or []) + [{"role": "user", "content": self.user_message}] + new_messages
+            self._persist_session(history)
+
+            self._extract_and_save_files_from_content(assistant_content)
+
+            return self._build_result(assistant_content, reasoning_content, "react")
+
+        history = (self.session.messages or []) + [{"role": "user", "content": self.user_message}] + new_messages
+        if not new_messages:
+            history.append({"role": "assistant", "content": "已达到最大迭代次数，任务未完成。"})
+        self._persist_session(history)
+
+        return self._build_result(
+            "任务执行超时，已达到最大迭代次数。请尝试简化问题或增加超时时间。",
+            "\n".join(self.thinking_log),
+            "react",
+        )
+
+    async def _run_plan_and_execute(self) -> Dict[str, Any]:
+        self.thinking_log.append("[Plan-and-Execute] 开始规划阶段")
+
+        messages = self._build_initial_messages()
+        messages = self._truncate_context(messages)
+
+        plan_prompt = (
+            "请先制定一个执行计划。列出需要执行的步骤，每步一行，格式为：\n"
+            "- 步骤N: 描述 [可选: 工具名称]\n"
+            "然后给出最终答案。"
+        )
+        plan_messages = list(messages)
+        plan_messages.append({"role": "user", "content": plan_prompt})
+
+        plan_completion = await self._call_llm(plan_messages)
+
+        plan_choices = plan_completion.get("choices", [])
+        if not plan_choices:
+            plan_content = "无法生成计划"
+        else:
+            plan_content = plan_choices[0].get("message", {}).get("content", "")
+
+        self.thinking_log.append(f"计划内容:\n{plan_content[:500]}")
+
+        steps = re.findall(
+            r"-\s*步骤?\d+[：:]\s*(.+?)(?=\n-\s*步骤?\d+[：:]|\n\n|$)",
+            plan_content + "\n", re.DOTALL,
+        )
+        if not steps:
+            steps = [
+                line.strip("- ").strip()
+                for line in plan_content.split("\n")
+                if line.strip().startswith("-") and len(line.strip()) > 2
+            ]
+
+        if not steps:
+            steps = [plan_content]
+
+        self.thinking_log.append(f"[Plan-and-Execute] 开始执行阶段，共 {len(steps)} 个步骤")
+
+        openai_tools = (
+            self._build_tool_defs(self.available_tools)
+            if self.available_tools else None
+        )
+
+        execute_messages = list(messages)
+        step_results = []
+
+        for i, step in enumerate(steps):
+            step_text = step.strip()[:500]
+            self.thinking_log.append(f"  执行步骤 {i + 1}/{len(steps)}: {step_text[:100]}")
+
+            execute_messages.append({
+                "role": "user",
+                "content": f"请执行计划中的第 {i + 1} 步: {step_text}",
+            })
+            execute_messages = self._truncate_context(execute_messages)
+
+            step_completion = await self._call_llm(
+                execute_messages,
+                tools=openai_tools,
+                max_tokens=2048,
+            )
+
+            step_choices = step_completion.get("choices", [])
+            if step_choices:
+                step_msg = step_choices[0].get("message", {})
+                step_content = step_msg.get("content", "")
+
+                tool_calls = self._parse_tool_calls(step_msg)
+                if tool_calls:
+                    for tc in tool_calls:
+                        func_name = tc["function"]["name"]
+                        raw_args = tc["function"].get("arguments", "")
+                        func_args = self._safe_parse_tool_args(raw_args)
+
+                        parse_failed = bool(raw_args) and not func_args
+
+                        tool = next((t for t in self.available_tools if t.name == func_name), None)
+                        if tool:
+                            if parse_failed:
+                                tool_result_str = (
+                                    f"工具调用参数解析失败。请确保 arguments 是合法的 JSON 字符串，"
+                                    f"特别注意：1) 字符串中的换行符需用 \\n 转义；"
+                                    f"2) 字符串中的引号需用 \\\" 转义；"
+                                    f"3) 大文件内容建议通过代码块输出而非工具参数传递。"
+                                )
+                                self.thinking_log.append(f"    工具 [{func_name}] 参数解析失败: {raw_args[:200]}")
+                            else:
+                                exec_result = await self._execute_tool_with_retry(tool, func_args)
+                                if exec_result.get("success"):
+                                    tool_result_str = exec_result.get("result", "")
+                                else:
+                                    tool_result_str = f"工具执行错误: {exec_result.get('error', '')}"
+                                self._extract_files_from_result(tool_result_str)
+                                self.thinking_log.append(f"    工具 [{func_name}]: {tool_result_str[:200]}")
+                            step_content += f"\n\n工具结果: {tool_result_str}"
+
+                step_results.append(step_content)
+                execute_messages.append({"role": "assistant", "content": step_content})
+
+        self.thinking_log.append("[Plan-and-Execute] 汇总结果")
+
+        execute_messages.append({
+            "role": "user",
+            "content": "请根据以上各步骤的执行结果，给出最终的综合回答。如果需要生成文件（如 .drawio、.xml、.json 等），请在回答中输出完整的文件内容，并用代码块标记。",
+        })
+
+        final_completion = await self._call_llm(execute_messages, max_tokens=8192)
+
+        final_choices = final_completion.get("choices", [])
+        if not final_choices:
+            final_content = "\n\n".join(step_results)
+        else:
+            final_content = final_choices[0].get("message", {}).get("content", "")
+
+        reasoning_content = final_completion.get("reasoning_content", "")
+
+        self._extract_and_save_files_from_content(final_content)
+
+        history = (self.session.messages or []) + [
+            {"role": "user", "content": self.user_message},
+            {"role": "assistant", "content": final_content},
+        ]
+        self._persist_session(history)
+
+        return self._build_result(final_content, reasoning_content, "plan_and_execute")
+
+    def _persist_session(self, history: List[Dict[str, Any]]):
+        self.session.messages = history
+        self.session.token_used = (self.session.token_used or 0) + self.total_tokens_used
+        self.session.last_active_at = now_utc()
+        self.db.commit()
+
+    def _build_result(self, content: str, thinking: str, mode: str) -> Dict[str, Any]:
+        content = self._replace_file_references(content)
+        result = {
+            "content": content,
+            "thinking": "\n".join(self.thinking_log) + "\n" + (thinking or ""),
+            "tokens_used": self.total_tokens_used,
+            "total_tokens": self.session.token_used,
+            "active_skill": self.active_skill_name,
+            "execution_mode": mode,
+        }
+        if self.generated_files:
+            result["files"] = self.generated_files
+        return result
+
+    def _replace_file_references(self, content: str) -> str:
+        if not self.generated_files or not content:
+            return content
+
+        file_by_name = {}
+        for f in self.generated_files:
+            name_lower = f["name"].lower()
+            file_by_name[name_lower] = f
+            name_no_ext = os.path.splitext(name_lower)[0]
+            file_by_name[name_no_ext] = f
+
+        def replace_ref(match):
+            desc = match.group(1)
+            ref_path = match.group(2)
+
+            ref_lower = ref_path.lower().strip()
+            ref_basename = os.path.basename(ref_lower)
+            ref_no_ext = os.path.splitext(ref_basename)[0]
+
+            matched_file = None
+            if ref_basename in file_by_name:
+                matched_file = file_by_name[ref_basename]
+            elif ref_no_ext in file_by_name:
+                matched_file = file_by_name[ref_no_ext]
+            elif ref_lower in file_by_name:
+                matched_file = file_by_name[ref_lower]
+
+            if not matched_file and self.generated_files:
+                for f in self.generated_files:
+                    f_ext = os.path.splitext(f["name"].lower())[1]
+                    ref_ext = os.path.splitext(ref_basename)[1]
+                    if f_ext and ref_ext and f_ext in ref_ext:
+                        matched_file = f
+                        break
+
+            if not matched_file and self.generated_files:
+                matched_file = self.generated_files[0]
+
+            if matched_file:
+                return f"[📥 下载 {desc}]({matched_file['url']}) ({matched_file['size_display']})"
+            return match.group(0)
+
+        content = re.sub(
+            r'!\[([^\]]*)\]\(([^)]+)\)',
+            replace_ref,
+            content,
+        )
+        return content
+
+    def _register_file(self, file_path: str) -> Optional[Dict[str, str]]:
+        if not file_path or not os.path.isfile(file_path):
+            return None
+
+        filename = os.path.basename(file_path)
+        ext = os.path.splitext(filename)[1]
+
+        file_hash = hashlib.md5(file_path.encode()).hexdigest()[:8]
+        dest_name = f"{file_hash}{ext}"
+        dest_path = os.path.join(self.output_dir, dest_name)
+
+        if not os.path.exists(dest_path):
+            shutil.copy2(file_path, dest_path)
+
+        file_size = os.path.getsize(dest_path)
+        file_info = {
+            "name": filename,
+            "url": f"/api/v1/files/{self.session.session_id}/{dest_name}",
+            "size": file_size,
+            "size_display": self._format_size(file_size),
+        }
+
+        for existing in self.generated_files:
+            if existing["name"] == filename:
+                return existing
+
+        self.generated_files.append(file_info)
+        self.thinking_log.append(f"[文件] 生成文件: {filename} ({file_info['size_display']})")
+        return file_info
+
+    def _extract_files_from_result(self, result_str: str) -> None:
+        try:
+            data = json.loads(result_str)
+            if isinstance(data, dict):
+                for key in ("file_path", "output_file", "path", "filename"):
+                    if key in data and isinstance(data[key], str):
+                        self._register_file(data[key])
+                for key in ("files", "generated_files", "outputs"):
+                    if key in data and isinstance(data[key], list):
+                        for item in data[key]:
+                            if isinstance(item, str):
+                                self._register_file(item)
+                            elif isinstance(item, dict):
+                                p = item.get("path") or item.get("file_path") or item.get("filename")
+                                if p:
+                                    self._register_file(p)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        for pattern in [
+            r'(?:文件路径|文件|path|file)[：:]\s*([^\s,，。\n]+)',
+            r'(?:保存在|已保存到|写入|生成于|输出到)[：:]?\s*([^\s,，。\n]+)',
+        ]:
+            for match in re.finditer(pattern, result_str, re.IGNORECASE):
+                self._register_file(match.group(1))
+
+    def _extract_and_save_files_from_content(self, content: str) -> None:
+        if not content:
+            return
+
+        ext_map = {
+            "xml": ".drawio",
+            "drawio": ".drawio",
+            "html": ".html",
+            "json": ".json",
+            "python": ".py",
+            "javascript": ".js",
+            "typescript": ".ts",
+            "yaml": ".yaml",
+            "yml": ".yml",
+            "csv": ".csv",
+            "sql": ".sql",
+            "markdown": ".md",
+            "text": ".txt",
+        }
+
+        code_blocks = re.findall(
+            r'```(\w*)\s*\n(.*?)```',
+            content, re.DOTALL,
+        )
+
+        for idx, (lang, code) in enumerate(code_blocks):
+            code = code.strip()
+            if not code:
+                continue
+
+            ext = ext_map.get(lang.lower() if lang else "", "")
+
+            if not ext:
+                if code.startswith("<mxGraphModel") or code.startswith("<mxfile"):
+                    ext = ".drawio"
+                elif code.startswith("<?xml") or code.startswith("<mx"):
+                    ext = ".drawio"
+                elif code.strip().startswith("{") or code.strip().startswith("["):
+                    ext = ".json"
+                elif code.strip().startswith("<"):
+                    ext = ".html"
+
+            if not ext:
+                continue
+
+            if idx == 0 and not code_blocks:
+                filename = f"output{ext}"
+            elif idx == 0:
+                filename = f"output{ext}"
+            else:
+                filename = f"output_{idx}{ext}"
+
+            file_path = os.path.join(self.output_dir, filename)
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(code)
+
+            self._register_file(file_path)
+
+        if not code_blocks:
+            raw_xml_patterns = [
+                (r'(<mxfile[\s\S]*?</mxfile>)', ".drawio"),
+                (r'(<mxGraphModel[\s\S]*?</mxGraphModel>)', ".drawio"),
+            ]
+            for pattern, ext in raw_xml_patterns:
+                for match in re.finditer(pattern, content):
+                    xml_content = match.group(1).strip()
+                    if len(xml_content) > 200:
+                        filename = f"output{ext}"
+                        file_path = os.path.join(self.output_dir, filename)
+                        with open(file_path, "w", encoding="utf-8") as f:
+                            f.write(xml_content)
+                        self._register_file(file_path)
+                        return
+
+    @staticmethod
+    def _format_size(size: int) -> str:
+        if size < 1024:
+            return f"{size}B"
+        elif size < 1024 * 1024:
+            return f"{size / 1024:.1f}KB"
+        else:
+            return f"{size / (1024 * 1024):.1f}MB"
+
+
+def _compute_skill_relevance(message: str, skill) -> float:
+    query_words = set(message.lower().split())
+    if not query_words:
+        return 0.0
+
+    skill_text = f"{skill.name} {skill.description or ''}"
+    for tool in (skill.tools or []):
+        if isinstance(tool, dict):
+            skill_text += f" {tool.get('name', '')} {tool.get('description', '')}"
+
+    skill_words = set(skill_text.lower().split())
+    if not skill_words:
+        return 0.0
+
+    overlap = query_words & skill_words
+    return len(overlap) / min(len(query_words), len(skill_words) or 1)
+
+
+def _analyze_execution_mode(message: str, has_tools: bool, has_kb: bool, has_skills: bool) -> str:
+    multi_step_keywords = [
+        "先", "然后", "接着", "最后", "步骤", "第一步", "第二步",
+        "首先", "其次", "再", "之后", "流程", "依次", "先后",
+        "first", "then", "next", "finally", "step", "plan",
+    ]
+    analysis_keywords = [
+        "分析", "对比", "比较", "评估", "总结", "归纳", "概括",
+        "analyze", "compare", "evaluate", "summarize", "review",
+    ]
+    action_keywords = [
+        "查询", "搜索", "获取", "调用", "执行", "计算", "生成",
+        "search", "get", "fetch", "call", "execute", "calculate",
+    ]
+
+    msg_lower = message.lower()
+
+    multi_step_count = sum(1 for kw in multi_step_keywords if kw in msg_lower)
+    analysis_count = sum(1 for kw in analysis_keywords if kw in msg_lower)
+    action_count = sum(1 for kw in action_keywords if kw in msg_lower)
+
+    if multi_step_count >= 2 and has_tools:
+        return "plan_and_execute"
+    if multi_step_count >= 1 and analysis_count >= 1 and has_tools:
+        return "plan_and_execute"
+
+    if has_skills:
+        return "direct"
+
+    if has_kb and (action_count >= 1 or has_tools):
+        return "react"
+
+    if has_tools and action_count >= 1:
+        return "react"
+
+    return "direct"
+
+
+agent_service = AgentService()
