@@ -59,22 +59,42 @@
       </a-form>
     </a-modal>
 
-    <a-modal v-model:open="importOpen" title="导入 Skill 包" @ok="handleImport" :confirm-loading="importing" width="500px">
-      <a-upload-dragger
-        :before-upload="beforeUpload"
-        :file-list="importFileList"
-        :max-count="1"
-        accept=".zip"
-        @remove="importFileList = []"
+    <a-modal v-model:open="importOpen" title="导入 Skill 包" :footer="null" width="500px">
+      <div
+        class="drop-zone"
+        :class="{ 'drop-zone-active': dragOver }"
+        @dragenter.prevent="onDragEnter"
+        @dragover.prevent="onDragOver"
+        @dragleave.prevent="onDragLeave"
+        @drop.prevent="onDrop"
+        @click="triggerFileInput"
       >
         <p class="ant-upload-drag-icon">
           <InboxOutlined style="font-size: 48px; color: #c2410c" />
         </p>
-        <p class="ant-upload-text">点击或拖拽 Skill 压缩包到此区域</p>
+        <p class="ant-upload-text">点击或拖拽 Skill 目录 / .zip 文件到此区域</p>
         <p class="ant-upload-hint">
-          支持 .zip 格式，需包含 skill.yaml 或 skill.json 清单文件
+          支持拖拽整个 Skill 目录，或 .zip 压缩包，需包含 SKILL.md、skill.yaml 或 skill.json 清单文件
         </p>
-      </a-upload-dragger>
+        <input
+          ref="fileInputRef"
+          type="file"
+          accept=".zip"
+          style="display: none"
+          @change="onFileSelected"
+        />
+      </div>
+      <div v-if="selectedName" class="drop-selected">
+        <a-tag color="blue">{{ selectedName }}</a-tag>
+        <span v-if="selectedFileCount" style="color: #888; font-size: 12px">{{ selectedFileCount }} 个文件</span>
+      </div>
+      <div v-if="importing" style="margin-top: 12px; text-align: center">
+        <a-spin /> 正在打包导入...
+      </div>
+      <div v-if="!importing && selectedName" style="margin-top: 16px; text-align: right">
+        <a-button @click="resetImport" style="margin-right: 8px">取消</a-button>
+        <a-button type="primary" :loading="importing" @click="handleImport">导入</a-button>
+      </div>
     </a-modal>
   </div>
 </template>
@@ -84,6 +104,7 @@ import { ref, reactive, onMounted } from 'vue'
 import { PlusOutlined, ImportOutlined, InboxOutlined } from '@ant-design/icons-vue'
 import { skillApi } from '../../api'
 import { message } from 'ant-design-vue'
+import JSZip from 'jszip'
 
 const loading = ref(false)
 const skills = ref([])
@@ -93,9 +114,13 @@ const saving = ref(false)
 const toolsText = ref('[]')
 
 const importOpen = ref(false)
-const importFileList = ref([])
 const importing = ref(false)
-let importFile = null
+const dragOver = ref(false)
+const selectedName = ref('')
+const selectedFileCount = ref(0)
+const fileInputRef = ref(null)
+let importBlob = null
+let importFileName = ''
 
 const columns = [
   { title: '名称', dataIndex: 'name' },
@@ -185,30 +210,152 @@ async function handleDelete(id) {
 }
 
 function openImport() {
-  importFileList.value = []
-  importFile = null
+  importBlob = null
+  importFileName = ''
+  selectedName.value = ''
+  selectedFileCount.value = 0
+  dragOver.value = false
   importOpen.value = true
 }
 
-function beforeUpload(file) {
-  const isZip = file.type === 'application/zip' || file.name.toLowerCase().endsWith('.zip')
-  if (!isZip) {
+function resetImport() {
+  importBlob = null
+  importFileName = ''
+  selectedName.value = ''
+  selectedFileCount.value = 0
+}
+
+function triggerFileInput() {
+  fileInputRef.value?.click()
+}
+
+function onFileSelected(e) {
+  const file = e.target.files[0]
+  if (!file) return
+  if (!file.name.toLowerCase().endsWith('.zip')) {
     message.error('仅支持 .zip 格式文件')
-    return false
+    return
   }
-  importFile = file
-  importFileList.value = [file]
-  return false
+  importBlob = file
+  importFileName = file.name
+  selectedName.value = file.name
+  selectedFileCount.value = 0
+  e.target.value = ''
+}
+
+function onDragEnter() {
+  dragOver.value = true
+}
+
+function onDragOver() {
+  dragOver.value = true
+}
+
+function onDragLeave() {
+  dragOver.value = false
+}
+
+async function onDrop(e) {
+  dragOver.value = false
+  const items = e.dataTransfer.items
+  if (!items || items.length === 0) return
+
+  const firstItem = items[0]
+  // 检查是否是目录拖拽
+  const entry = firstItem.webkitGetAsEntry?.()
+  if (entry && entry.isDirectory) {
+    await handleDirectoryDrop(entry)
+    return
+  }
+
+  // 检查是否是文件拖拽
+  const file = firstItem.getAsFile?.()
+  if (file) {
+    handleFileDrop(file)
+    return
+  }
+}
+
+function handleFileDrop(file) {
+  if (!file.name.toLowerCase().endsWith('.zip')) {
+    message.error('仅支持 .zip 格式文件')
+    return
+  }
+  importBlob = file
+  importFileName = file.name
+  selectedName.value = file.name
+  selectedFileCount.value = 0
+}
+
+async function handleDirectoryDrop(dirEntry) {
+  const files = []
+  await readDirectoryEntries(dirEntry, '', files)
+
+  if (files.length === 0) {
+    message.error('目录为空')
+    return
+  }
+
+  const dirName = dirEntry.name || 'skill'
+  selectedName.value = dirName
+  selectedFileCount.value = files.length
+
+  const zip = new JSZip()
+  for (const { path, blob } of files) {
+    zip.file(dirName + '/' + path, blob)
+  }
+  importBlob = await zip.generateAsync({ type: 'blob' })
+  importFileName = dirName + '.zip'
+}
+
+async function readDirectoryEntries(dirEntry, basePath, results) {
+  const reader = dirEntry.createReader()
+  const entries = await readAllEntries(reader)
+  for (const entry of entries) {
+    const fullPath = basePath ? basePath + '/' + entry.name : entry.name
+    if (entry.isFile) {
+      const file = await entryToFile(entry)
+      results.push({ path: fullPath, blob: file })
+    } else if (entry.isDirectory) {
+      // 跳过隐藏目录
+      if (entry.name.startsWith('.')) continue
+      await readDirectoryEntries(entry, fullPath, results)
+    }
+  }
+}
+
+function readAllEntries(reader) {
+  return new Promise((resolve, reject) => {
+    const allEntries = []
+    function readBatch() {
+      reader.readEntries((entries) => {
+        if (entries.length === 0) {
+          resolve(allEntries)
+        } else {
+          allEntries.push(...entries)
+          readBatch()
+        }
+      }, reject)
+    }
+    readBatch()
+  })
+}
+
+function entryToFile(entry) {
+  return new Promise((resolve, reject) => {
+    entry.file(resolve, reject)
+  })
 }
 
 async function handleImport() {
-  if (!importFile) {
-    message.warning('请先选择文件')
+  if (!importBlob) {
+    message.warning('请先选择文件或拖拽目录')
     return
   }
   importing.value = true
   try {
-    await skillApi.import(importFile)
+    const file = new File([importBlob], importFileName, { type: 'application/zip' })
+    await skillApi.import(file)
     message.success('Skill 包导入成功')
     importOpen.value = false
     fetchSkills()
@@ -225,4 +372,27 @@ onMounted(fetchSkills)
 <style scoped>
 .page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
 .page-title { font-family: 'Noto Serif SC', serif; font-size: 22px; font-weight: 700; color: #1a1714; margin: 0; }
+
+.drop-zone {
+  border: 2px dashed #d9d9d9;
+  border-radius: 8px;
+  padding: 32px 16px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.3s, background 0.3s;
+}
+.drop-zone:hover {
+  border-color: #c2410c;
+  background: #fff7ed;
+}
+.drop-zone-active {
+  border-color: #c2410c;
+  background: #fff7ed;
+}
+.drop-selected {
+  margin-top: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 </style>

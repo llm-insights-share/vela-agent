@@ -113,3 +113,25 @@ export const configApi = {
   updateTavily: (data) => api.put('/config/tools/tavily', data),
   getTavilyStatus: () => api.get('/config/tools/tavily/status'),
 }
+
+export const compositionApi = {
+  get: (agentId) => api.get(`/agents/${agentId}/composition`),
+  addSubAgent: (agentId, data) => api.post(`/agents/${agentId}/composition/sub-agents`, data),
+  removeSubAgent: (agentId, childId) => api.delete(`/agents/${agentId}/composition/sub-agents/${childId}`),
+  updateCoordinator: (agentId, data) => api.put(`/agents/${agentId}/composition/coordinator`, data),
+  listCandidates: (agentId) => api.get(`/agents/${agentId}/composition/candidates`),
+}
+
+export const workflowApi = {
+  get: (agentId) => api.get(`/agents/${agentId}/workflow`),
+  update: (agentId, data) => api.put(`/agents/${agentId}/workflow`, data),
+  validate: (agentId) => api.post(`/agents/${agentId}/workflow/validate`),
+  candidates: (agentId) => api.get(`/agents/${agentId}/workflow/candidates`),
+  triggerCron: (agentId) => api.post(`/agents/${agentId}/workflow/cron/trigger`),
+}
+
+export const hitlApi = {
+  getPending: (sessionId) => api.get(`/sessions/${sessionId}/pending-approvals`),
+  approve: (sessionId, approvalId, data) => api.post(`/sessions/${sessionId}/approvals/${approvalId}/approve`, data),
+  reject: (sessionId, approvalId, data) => api.post(`/sessions/${sessionId}/approvals/${approvalId}/reject`, data),
+}

@@ -32,6 +32,16 @@ const routes = [
     component: () => import('../views/agents/AgentChat.vue'),
   },
   {
+    path: '/agents/:agent_id/composition',
+    name: 'AgentComposition',
+    component: () => import('../views/agents/AgentComposition.vue'),
+  },
+  {
+    path: '/agents/:agent_id/workflow',
+    name: 'AgentWorkflow',
+    component: () => import('../views/agents/AgentWorkflow.vue'),
+  },
+  {
     path: '/providers',
     name: 'ProviderList',
     component: () => import('../views/services/ProviderList.vue'),

@@ -42,6 +42,7 @@
         <span class="chat-title">{{ agent.name }} - 对话测试</span>
         <a-tag color="green">会话: {{ sessionId?.substring(0, 8) }}...</a-tag>
         <a-select
+          v-if="agent.agent_type === 'SINGLE'"
           v-model:value="executionMode"
           size="small"
           style="width: 160px; margin-left: auto;"
@@ -81,18 +82,82 @@
 
         <div class="chat-msg-content" v-if="msg.content" v-html="renderMarkdown(msg.content)"></div>
         <div v-if="msg.files && msg.files.length > 0" class="chat-files">
+          <a-alert
+            v-if="msg.filesTruncated || hasTruncatedFiles(msg.files)"
+            type="warning"
+            show-icon
+            style="margin-bottom: 8px;"
+          >
+            <template #message>文件可能不完整</template>
+            <template #description>
+              模型输出在生成文件时被截断，当前文件内容可能缺失尾部。请尝试简化请求、增加超时时间，或让 Agent 继续补全。
+            </template>
+          </a-alert>
           <div class="chat-files-title">生成的文件：</div>
           <div
             v-for="f in msg.files"
             :key="f.url"
             class="chat-file-item"
           >
-            <a :href="f.url" :download="f.name" class="chat-file-link">
-              <DownloadOutlined />
+            <span class="chat-file-link" @click="previewFile(f)">
+              <FileOutlined />
               <span class="chat-file-name">{{ f.name }}</span>
               <span class="chat-file-size">({{ f.size_display }})</span>
-            </a>
+              <a-tag v-if="f.truncated" color="warning" class="chat-file-truncated-tag">可能不完整</a-tag>
+            </span>
           </div>
+        </div>
+
+        <div v-if="msg.executionTrace && msg.executionTrace.length" class="chat-trace">
+          <div class="chat-thinking-header" @click="msg.traceExpanded = !msg.traceExpanded">
+            <CaretRightOutlined v-if="!msg.traceExpanded" style="font-size: 10px;" />
+            <CaretDownOutlined v-else style="font-size: 10px;" />
+            <span style="margin-left: 4px;">工作流执行轨迹 ({{ msg.executionTrace.length }} 步)</span>
+          </div>
+          <div v-if="msg.traceExpanded" class="chat-trace-body">
+            <div v-for="(step, si) in msg.executionTrace" :key="si" class="trace-step">
+              <a-tag :color="step.status === 'success' ? 'green' : step.status === 'hitl_wait' ? 'orange' : 'red'" size="small">
+                {{ step.node_type }}
+              </a-tag>
+              <span class="trace-label">{{ step.label || step.node_id }}</span>
+              <span class="trace-duration" v-if="step.duration_ms">{{ step.duration_ms }}ms</span>
+            </div>
+          </div>
+        </div>
+
+        <div v-if="msg.pendingApprovalId && !msg.approvalStatus" class="chat-hitl-actions">
+          <a-alert
+            :message="msg.pendingWorkflow ? '工作流 HITL 等待审批' : msg.pendingDelivery ? '多 Agent 交付物等待审批' : `工具 [${msg.pendingToolName}] 等待审批`"
+            type="warning"
+            show-icon
+            style="margin-bottom: 8px;"
+          />
+          <a-space>
+            <a-button type="primary" size="small" :loading="msg.approving" @click="approveHitl(msg)">
+              批准
+            </a-button>
+            <a-button danger size="small" :loading="msg.approving" @click="rejectHitl(msg)">
+              拒绝
+            </a-button>
+          </a-space>
+        </div>
+
+        <div v-if="msg.approvalStatus === 'approved' && msg.pendingWorkflow && msg.approvalFinalResult" class="chat-hitl-result">
+          <a-alert message="工作流审批已通过 - 执行结果" type="success" show-icon style="margin-bottom: 8px;" />
+          <div class="chat-msg-content" v-html="renderMarkdown(msg.approvalFinalResult)"></div>
+        </div>
+
+        <div v-if="msg.approvalStatus === 'approved' && msg.pendingDelivery && msg.approvalFinalResult" class="chat-hitl-result">
+          <a-alert message="审批已通过 - 交付物" type="success" show-icon style="margin-bottom: 8px;" />
+          <div class="chat-msg-content" v-html="renderMarkdown(msg.approvalFinalResult)"></div>
+        </div>
+
+        <div v-if="msg.approvalStatus === 'approved' && !msg.pendingDelivery && !msg.pendingWorkflow" class="chat-hitl-result">
+          <a-alert message="工具审批已通过，结果已注入对话上下文。请发送消息继续。" type="success" show-icon />
+        </div>
+
+        <div v-if="msg.approvalStatus === 'rejected'" class="chat-hitl-result">
+          <a-alert :message="msg.pendingWorkflow ? '工作流审批已拒绝' : msg.pendingDelivery ? '交付物审批已拒绝' : '工具审批已拒绝，已通知 Agent。'" type="error" show-icon />
         </div>
       </div>
 
@@ -195,18 +260,112 @@
         </div>
       </div>
     </div>
+
+    <!-- 文件预览弹窗 -->
+    <Teleport to="body">
+      <div class="preview-overlay" v-if="previewVisible" @mousedown.self="closePreview">
+        <div
+          class="preview-modal"
+          :style="{ width: previewWidth + 'px', height: previewHeight + 'px' }"
+        >
+          <div class="preview-header">
+            <span class="preview-title">
+              <FileOutlined style="margin-right: 6px;" />{{ previewFileName }}
+              <a-tag v-if="previewFileTruncated" color="warning" style="margin-left: 8px; font-size: 11px;">可能不完整</a-tag>
+            </span>
+            <div class="preview-actions">
+              <a-button size="small" type="text" :href="previewFileUrl" :download="previewFileName">
+                <DownloadOutlined /> 下载
+              </a-button>
+              <a-button size="small" type="text" @click="closePreview">
+                <CloseOutlined />
+              </a-button>
+            </div>
+          </div>
+          <div class="preview-body" ref="previewBodyRef">
+            <a-alert
+              v-if="previewFileTruncated"
+              type="warning"
+              show-icon
+              message="此文件可能因模型输出截断而不完整"
+              description="预览内容可能缺少尾部，建议重新生成或请求 Agent 补全文件。"
+              style="margin: 12px 12px 0;"
+            />
+            <!-- HTML 预览 -->
+            <iframe
+              v-if="previewType === 'html'"
+              :srcdoc="previewContent"
+              class="preview-iframe"
+              sandbox="allow-scripts allow-same-origin"
+            />
+            <!-- Markdown 预览 -->
+            <div
+              v-else-if="previewType === 'markdown'"
+              class="preview-markdown"
+              v-html="renderMarkdown(previewContent)"
+            />
+            <!-- 图片预览 -->
+            <img
+              v-else-if="previewType === 'image'"
+              :src="previewFileUrl"
+              class="preview-image"
+              :alt="previewFileName"
+            />
+            <!-- CSV 表格预览 -->
+            <div v-else-if="previewType === 'csv'" class="preview-csv">
+              <table class="csv-table" v-if="csvData.length > 0">
+                <thead>
+                  <tr>
+                    <th v-for="(h, hi) in csvData[0]" :key="hi">{{ h }}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(row, ri) in csvData.slice(1)" :key="ri">
+                    <td v-for="(cell, ci) in row" :key="ci">{{ cell }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <!-- 文本/JSON/XML 预览 -->
+            <pre v-else-if="previewType === 'text'" class="preview-text">{{ previewContent }}</pre>
+            <!-- PDF 预览 -->
+            <iframe
+              v-else-if="previewType === 'pdf'"
+              :src="previewFileUrl"
+              class="preview-iframe"
+            />
+            <!-- Office 文件：提示下载 -->
+            <div v-else-if="previewType === 'office'" class="preview-office">
+              <FileOutlined style="font-size: 48px; color: #9e9590;" />
+              <p style="margin-top: 16px; color: #5c5650;">此文件类型不支持在线预览</p>
+              <a-button type="primary" :href="previewFileUrl" :download="previewFileName" style="margin-top: 12px;">
+                <DownloadOutlined /> 下载文件
+              </a-button>
+            </div>
+            <!-- 加载中 -->
+            <div v-else-if="previewLoading" class="preview-loading">
+              <a-spin size="large" />
+              <p style="margin-top: 12px; color: #9e9590;">加载中...</p>
+            </div>
+          </div>
+          <!-- 右下角拖拽调整大小 -->
+          <div class="preview-resize-handle" @mousedown="startResize"></div>
+        </div>
+      </div>
+    </Teleport>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, nextTick, watch } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   ArrowLeftOutlined, CaretRightOutlined, CaretDownOutlined,
   ThunderboltOutlined, SendOutlined, PlusOutlined, DownloadOutlined,
+  FileOutlined, CloseOutlined,
 } from '@ant-design/icons-vue'
-import { agentApi, sessionApi } from '../../api'
+import { agentApi, sessionApi, hitlApi, skillApi } from '../../api'
 import { message } from 'ant-design-vue'
 import { marked } from 'marked'
 
@@ -247,6 +406,24 @@ const executionModeOptions = [
   { label: '直接对话', value: 'direct' },
 ]
 
+// 文件预览相关状态
+const previewVisible = ref(false)
+const previewFileName = ref('')
+const previewFileUrl = ref('')
+const previewFileTruncated = ref(false)
+const previewType = ref('')
+const previewContent = ref('')
+const previewLoading = ref(false)
+const csvData = ref([])
+const previewWidth = ref(900)
+const previewHeight = ref(600)
+const previewBodyRef = ref(null)
+let isResizing = false
+let resizeStartX = 0
+let resizeStartY = 0
+let resizeStartW = 0
+let resizeStartH = 0
+
 const filteredSkills = computed(() => {
   if (!slashQuery.value) return skills.value
   const q = slashQuery.value.toLowerCase()
@@ -260,7 +437,7 @@ onMounted(async () => {
     const a = await agentApi.get(agentId)
     Object.assign(agent, a)
 
-    skills.value = await agentApi.getSkills(agentId)
+    skills.value = (await skillApi.list({ page_size: 100 })).items || []
 
     const session = await sessionApi.create({
       agent_id: agentId,
@@ -390,12 +567,133 @@ function clearSkill() {
   activeSkillId.value = null
 }
 
+// ---- 文件预览 ----
+
+const TEXT_EXTENSIONS = new Set(['.txt', '.json', '.xml', '.drawio', '.dio', '.py', '.js', '.ts', '.css', '.yaml', '.yml', '.toml', '.ini', '.cfg', '.sh', '.bat', '.log', '.env'])
+const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico', '.bmp'])
+const OFFICE_EXTENSIONS = new Set(['.docx', '.xlsx', '.pptx', '.doc', '.xls', '.ppt'])
+
+function getPreviewType(filename) {
+  const ext = filename.substring(filename.lastIndexOf('.')).toLowerCase()
+  if (ext === '.html' || ext === '.htm') return 'html'
+  if (ext === '.md' || ext === '.markdown') return 'markdown'
+  if (ext === '.csv') return 'csv'
+  if (ext === '.pdf') return 'pdf'
+  if (IMAGE_EXTENSIONS.has(ext)) return 'image'
+  if (OFFICE_EXTENSIONS.has(ext)) return 'office'
+  if (TEXT_EXTENSIONS.has(ext)) return 'text'
+  return 'text'
+}
+
+function hasTruncatedFiles(files) {
+  return Array.isArray(files) && files.some(f => f.truncated)
+}
+
+async function previewFile(file) {
+  previewVisible.value = true
+  previewFileName.value = file.name
+  previewFileUrl.value = file.url
+  previewFileTruncated.value = !!file.truncated
+  previewContent.value = ''
+  previewLoading.value = true
+  csvData.value = []
+
+  const type = getPreviewType(file.name)
+  previewType.value = type
+
+  if (type === 'text' || type === 'markdown' || type === 'html' || type === 'csv' || type === 'json') {
+    try {
+      const resp = await fetch(file.url)
+      if (!resp.ok) throw new Error('加载失败')
+      const text = await resp.text()
+      previewContent.value = text
+
+      if (type === 'csv') {
+        parseCsv(text)
+      }
+    } catch (e) {
+      previewContent.value = '加载文件内容失败: ' + e.message
+    }
+  }
+
+  previewLoading.value = false
+}
+
+function parseCsv(text) {
+  const lines = text.trim().split('\n')
+  const result = []
+  for (const line of lines) {
+    const cols = []
+    let current = ''
+    let inQuotes = false
+    for (const ch of line) {
+      if (ch === '"') {
+        inQuotes = !inQuotes
+      } else if (ch === ',' && !inQuotes) {
+        cols.push(current.trim())
+        current = ''
+      } else {
+        current += ch
+      }
+    }
+    cols.push(current.trim())
+    result.push(cols)
+  }
+  csvData.value = result
+}
+
+function closePreview() {
+  previewVisible.value = false
+  previewFileName.value = ''
+  previewFileUrl.value = ''
+  previewFileTruncated.value = false
+  previewType.value = ''
+  previewContent.value = ''
+  csvData.value = []
+}
+
+function startResize(e) {
+  if (!e.target.classList.contains('preview-resize-handle')) return
+  isResizing = true
+  resizeStartX = e.clientX
+  resizeStartY = e.clientY
+  resizeStartW = previewWidth.value
+  resizeStartH = previewHeight.value
+  document.addEventListener('mousemove', onResize)
+  document.addEventListener('mouseup', onResizeEnd)
+  e.preventDefault()
+}
+
+function onResize(e) {
+  if (!isResizing) return
+  const dx = e.clientX - resizeStartX
+  const dy = e.clientY - resizeStartY
+  previewWidth.value = Math.max(400, resizeStartW + dx)
+  previewHeight.value = Math.max(300, resizeStartH + dy)
+}
+
+function onResizeEnd() {
+  isResizing = false
+  document.removeEventListener('mousemove', onResize)
+  document.removeEventListener('mouseup', onResizeEnd)
+}
+
+onUnmounted(() => {
+  document.removeEventListener('mousemove', onResize)
+  document.removeEventListener('mouseup', onResizeEnd)
+})
+
 async function sendMessage() {
   const text = inputText.value.trim()
   if (!text || sending.value) return
 
+  const skillPackId = activeSkillId.value
+  const skillName = activeSkill.value
+
   inputText.value = ''
   showSkillMenu.value = false
+  activeSkill.value = null
+  activeSkillId.value = null
   messages.value.push({ role: 'user', content: text })
   sending.value = true
   thinkingExpanded.value = false
@@ -405,8 +703,8 @@ async function sendMessage() {
 
   try {
     const payload = { message: text, timeout_seconds: timeoutSeconds.value, execution_mode: executionMode.value, skip_history: skipHistory.value }
-    if (activeSkillId.value) {
-      payload.skill_pack_id = activeSkillId.value
+    if (skillPackId) {
+      payload.skill_pack_id = skillPackId
     }
 
     const res = await sessionApi.chat(sessionId.value, payload)
@@ -416,9 +714,18 @@ async function sendMessage() {
       content: res.content,
       thinking: res.thinking || '',
       thinkingExpanded: false,
-      activeSkill: res.active_skill || activeSkill.value,
+      traceExpanded: true,
+      activeSkill: res.active_skill || skillName,
       executionMode: res.execution_mode || executionMode.value,
+      executionTrace: res.execution_trace || [],
       files: res.files || [],
+      filesTruncated: !!res.files_truncated,
+      pendingApprovalId: res.pending_approval_id || null,
+      pendingDelivery: !!res.pending_delivery,
+      pendingWorkflow: !!res.pending_workflow,
+      pendingToolName: res.pending_tool_name || '',
+      approvalStatus: null,
+      approvalFinalResult: '',
     }
 
     if (res.thinking) {
@@ -431,6 +738,54 @@ async function sendMessage() {
     message.error(e.message)
   } finally {
     sending.value = false
+  }
+}
+
+async function approveHitl(msg) {
+  msg.approving = true
+  try {
+    const res = await hitlApi.approve(sessionId.value, msg.pendingApprovalId, {
+      approved: true,
+      reviewer: 'current_user',
+      comment: '',
+    })
+    msg.approvalStatus = 'approved'
+    if (res.kind === 'delivery') {
+      msg.approvalFinalResult = res.final_result || ''
+    } else if (res.kind === 'workflow') {
+      msg.approvalFinalResult = res.final_result || ''
+      if (res.execution_trace?.length) {
+        msg.executionTrace = res.execution_trace
+      }
+      if (res.pending_approval_id) {
+        msg.pendingApprovalId = res.pending_approval_id
+        msg.approvalStatus = null
+        msg.pendingWorkflow = true
+        msg.content = res.final_result || msg.content
+      }
+    }
+    message.success(res.message || '已批准')
+  } catch (e) {
+    message.error('审批失败: ' + e.message)
+  } finally {
+    msg.approving = false
+  }
+}
+
+async function rejectHitl(msg) {
+  msg.approving = true
+  try {
+    const res = await hitlApi.reject(sessionId.value, msg.pendingApprovalId, {
+      approved: false,
+      reviewer: 'current_user',
+      comment: '用户拒绝',
+    })
+    msg.approvalStatus = 'rejected'
+    message.success(res.message || '已拒绝')
+  } catch (e) {
+    message.error('审批失败: ' + e.message)
+  } finally {
+    msg.approving = false
   }
 }
 
@@ -663,6 +1018,16 @@ function renderMarkdown(text) {
   margin-bottom: 6px;
   font-weight: 500;
 }
+.chat-hitl-actions {
+  margin-top: 10px;
+  padding: 10px 14px;
+  background: #fffbe6;
+  border: 1px solid #ffe58f;
+  border-radius: 8px;
+}
+.chat-hitl-result {
+  margin-top: 10px;
+}
 .chat-file-item {
   margin-bottom: 4px;
 }
@@ -676,6 +1041,7 @@ function renderMarkdown(text) {
   padding: 4px 8px;
   border-radius: 4px;
   transition: background 0.2s;
+  cursor: pointer;
 }
 .chat-file-link:hover {
   background: #e8e4dc;
@@ -687,6 +1053,11 @@ function renderMarkdown(text) {
 .chat-file-size {
   font-size: 11px;
   color: #9e9590;
+}
+.chat-file-truncated-tag {
+  margin-left: 6px;
+  font-size: 10px;
+  line-height: 18px;
 }
 
 .chat-thinking {
@@ -721,6 +1092,28 @@ function renderMarkdown(text) {
   background: #fef9f0;
   border-color: #f5e6cc;
 }
+
+.chat-trace {
+  margin: 6px 0;
+  font-size: 12px;
+}
+.chat-trace-body {
+  margin-top: 4px;
+  padding: 8px 12px;
+  background: #f0f5ff;
+  border: 1px solid #adc6ff;
+  border-radius: 6px;
+}
+.trace-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  border-bottom: 1px solid #e8e4dc;
+}
+.trace-step:last-child { border-bottom: none; }
+.trace-label { flex: 1; color: #333; }
+.trace-duration { color: #999; font-size: 11px; }
 
 .thinking-steps {
   display: flex;
@@ -834,5 +1227,160 @@ function renderMarkdown(text) {
   color: #9e9590;
   margin-top: 2px;
   margin-left: 22px;
+}
+
+/* ---- 文件预览弹窗 ---- */
+.preview-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+.preview-modal {
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.18);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  position: relative;
+  min-width: 400px;
+  min-height: 300px;
+}
+.preview-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px;
+  border-bottom: 1px solid #e8e4dc;
+  background: #faf8f5;
+  flex-shrink: 0;
+}
+.preview-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: #1a1714;
+  display: flex;
+  align-items: center;
+}
+.preview-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.preview-body {
+  flex: 1;
+  overflow: auto;
+  padding: 0;
+}
+.preview-iframe {
+  width: 100%;
+  height: 100%;
+  border: none;
+}
+.preview-markdown {
+  padding: 20px 24px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: #1a1714;
+}
+.preview-markdown :deep(p) {
+  margin: 0 0 10px 0;
+}
+.preview-markdown :deep(h1) { font-size: 20px; margin: 16px 0 8px; }
+.preview-markdown :deep(h2) { font-size: 17px; margin: 14px 0 6px; }
+.preview-markdown :deep(h3) { font-size: 15px; margin: 12px 0 6px; }
+.preview-markdown :deep(code) {
+  background: rgba(0, 0, 0, 0.05);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+.preview-markdown :deep(pre) {
+  background: rgba(0, 0, 0, 0.05);
+  padding: 12px;
+  border-radius: 6px;
+  overflow-x: auto;
+}
+.preview-markdown :deep(pre code) {
+  background: none;
+  padding: 0;
+}
+.preview-image {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+.preview-text {
+  padding: 16px 20px;
+  margin: 0;
+  font-size: 12px;
+  font-family: 'SF Mono', 'Monaco', 'Menlo', monospace;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: #1a1714;
+  background: #faf8f5;
+  min-height: 100%;
+}
+.preview-csv {
+  padding: 0;
+  overflow: auto;
+}
+.csv-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.csv-table th,
+.csv-table td {
+  border: 1px solid #e8e4dc;
+  padding: 6px 10px;
+  text-align: left;
+  white-space: nowrap;
+}
+.csv-table th {
+  background: #f5f2ed;
+  font-weight: 600;
+  color: #1a1714;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+.csv-table tr:hover td {
+  background: #fef9f0;
+}
+.preview-office {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  min-height: 300px;
+}
+.preview-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  min-height: 300px;
+}
+.preview-resize-handle {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 20px;
+  height: 20px;
+  cursor: nwse-resize;
+  background: linear-gradient(135deg, transparent 50%, #d9d0c5 50%);
+  border-radius: 0 0 12px 0;
+}
+.preview-resize-handle:hover {
+  background: linear-gradient(135deg, transparent 50%, #b5afa8 50%);
 }
 </style>

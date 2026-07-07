@@ -9,7 +9,7 @@ from models import (
 )
 from schemas import (
     AgentCreate, AgentUpdate, AgentResponse, AgentVersionResponse,
-    AgentPublishRequest, ValidationResult, PaginatedResponse
+    AgentPublishRequest, ValidationResult, PaginatedResponse, ToolBindingItem
 )
 from services.agent_service import agent_service
 
@@ -256,30 +256,53 @@ def get_agent_tools(agent_id: str, db: Session = Depends(get_db)):
             "description": tool.description if tool else "",
             "tool_type": tool.tool_type.value if tool and tool.tool_type else "",
             "permission": b.permission,
+            "require_approval": bool(b.require_approval),
         })
     return result
 
 
 @router.put("/{agent_id}/tools")
-def bind_agent_tools(agent_id: str, tool_ids: list[str], db: Session = Depends(get_db)):
+def bind_agent_tools(agent_id: str, payload, db: Session = Depends(get_db)):
+    """SGL-CFG-06: 支持两种格式
+    - 新格式: [{"tool_id": "xxx", "require_approval": true}, ...]
+    - 旧格式: ["tool_id_1", "tool_id_2", ...]（向后兼容，默认 require_approval=False）
+    """
     agent = db.query(Agent).filter(Agent.agent_id == agent_id).first()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent 不存在")
+
+    # 解析入参
+    bindings_to_write = []
+    if isinstance(payload, dict) and "tool_ids" in payload:
+        payload = payload["tool_ids"]
+    for item in payload:
+        if isinstance(item, str):
+            bindings_to_write.append({"tool_id": item, "require_approval": False})
+        elif isinstance(item, dict):
+            bindings_to_write.append({
+                "tool_id": item.get("tool_id"),
+                "require_approval": bool(item.get("require_approval", False)),
+            })
 
     db.query(AgentToolBinding).filter(
         AgentToolBinding.agent_id == agent_id
     ).delete()
 
-    for tid in tool_ids:
+    for b in bindings_to_write:
         binding = AgentToolBinding(
             agent_id=agent_id,
-            tool_id=tid,
+            tool_id=b["tool_id"],
             permission="allowed",
+            require_approval=b["require_approval"],
         )
         db.add(binding)
 
     db.commit()
-    return {"message": "工具绑定已更新", "tool_ids": tool_ids}
+    return {
+        "message": "工具绑定已更新",
+        "tool_ids": [b["tool_id"] for b in bindings_to_write],
+        "tool_bindings": bindings_to_write,
+    }
 
 
 def _agent_to_dict(agent: Agent, db: Session) -> dict:
@@ -315,15 +338,20 @@ def _agent_to_dict(agent: Agent, db: Session) -> dict:
         kb = db.query(KnowledgeBase).filter(KnowledgeBase.kb_id == kid).first()
         kb_names.append(kb.name if kb else kid)
 
-    tool_ids = [
-        b.tool_id for b in db.query(AgentToolBinding).filter(
-            AgentToolBinding.agent_id == agent.agent_id
-        ).all()
-    ]
+    tool_bindings = db.query(AgentToolBinding).filter(
+        AgentToolBinding.agent_id == agent.agent_id
+    ).all()
+    tool_ids = [b.tool_id for b in tool_bindings]
     tool_names = []
-    for tid in tool_ids:
-        t = db.query(Tool).filter(Tool.tool_id == tid).first()
-        tool_names.append(t.display_name or t.name if t else tid)
+    # SGL-CFG-06: 同时回传 require_approval 配置
+    tool_bindings_out = []
+    for b in tool_bindings:
+        t = db.query(Tool).filter(Tool.tool_id == b.tool_id).first()
+        tool_names.append(t.display_name or t.name if t else b.tool_id)
+        tool_bindings_out.append({
+            "tool_id": b.tool_id,
+            "require_approval": bool(b.require_approval),
+        })
 
     return {
         "agent_id": agent.agent_id,
@@ -347,6 +375,17 @@ def _agent_to_dict(agent: Agent, db: Session) -> dict:
         "knowledge_base_names": kb_names,
         "tool_ids": tool_ids,
         "tool_names": tool_names,
+        "tool_bindings": tool_bindings_out,
+        "max_iterations": agent.max_iterations if agent.max_iterations is not None else 10,
+        "step_timeout_seconds": agent.step_timeout_seconds if agent.step_timeout_seconds is not None else 60,
+        "tool_retry_count": agent.tool_retry_count if agent.tool_retry_count is not None else 2,
+        "tool_retry_backoff": agent.tool_retry_backoff or "fixed",
+        "allow_repeat_tool_calls": agent.allow_repeat_tool_calls if agent.allow_repeat_tool_calls is not None else True,
+        "max_repeat_threshold": agent.max_repeat_threshold if agent.max_repeat_threshold is not None else 3,
+        "single_call_token_limit": agent.single_call_token_limit if agent.single_call_token_limit is not None else 8192,
+        "agent_type": agent.agent_type.value if agent.agent_type else "SINGLE",
+        "composition_config": agent.composition_config or {},
+        "workflow_definition": agent.workflow_definition or {},
         "created_at": agent.created_at,
         "updated_at": agent.updated_at,
     }

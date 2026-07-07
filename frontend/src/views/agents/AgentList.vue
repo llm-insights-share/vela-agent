@@ -19,6 +19,11 @@
           <template v-if="column.key === 'name'">
             <a @click="$router.push(`/agents/${record.agent_id}`)">{{ record.name }}</a>
           </template>
+          <template v-if="column.key === 'agent_type'">
+            <a-tag :color="agentTypeColor(record.agent_type)">
+              {{ agentTypeLabel(record.agent_type) }}
+            </a-tag>
+          </template>
           <template v-if="column.key === 'status'">
             <a-tag :color="statusColor(record.status)">{{ statusLabel(record.status) }}</a-tag>
           </template>
@@ -30,6 +35,8 @@
             <a-space>
               <a @click="$router.push(`/agents/${record.agent_id}`)">详情</a>
               <a v-if="record.status !== 'PUBLISHED'" @click="$router.push(`/agents/${record.agent_id}/edit`)">编辑</a>
+              <a v-if="record.agent_type === 'COMPOSITE'" @click="$router.push(`/agents/${record.agent_id}/composition`)">编排配置</a>
+              <a v-if="record.agent_type === 'WORKFLOW'" @click="$router.push(`/agents/${record.agent_id}/workflow`)">工作流配置</a>
               <a v-if="record.status === 'DEPRECATED'" @click="handleRepublish(record.agent_id)">重新上架</a>
               <a @click="$router.push(`/agents/${record.agent_id}/chat`)" v-if="record.status === 'PUBLISHED'">对话</a>
               <a-popconfirm title="确认删除?" @confirm="handleDelete(record.agent_id)">
@@ -56,11 +63,12 @@ const pagination = reactive({ current: 1, pageSize: 20, total: 0 })
 const columns = [
   { title: '名称', key: 'name', dataIndex: 'name' },
   { title: '描述', dataIndex: 'description', ellipsis: true },
+  { title: '类型', key: 'agent_type', width: 100 },
   { title: '模型', key: 'model_name' },
   { title: '版本', dataIndex: 'current_version' },
   { title: '自主级别', dataIndex: 'autonomy_level', width: 100 },
   { title: '状态', key: 'status', width: 100 },
-  { title: '操作', key: 'action', width: 180 },
+  { title: '操作', key: 'action', width: 220 },
 ]
 
 function statusColor(s) {
@@ -70,6 +78,15 @@ function statusColor(s) {
 function statusLabel(s) {
   const m = { DRAFT: '草稿', VALIDATING: '验证中', PUBLISHED: '已发布', DEPRECATED: '已下架', DELETED: '已删除' }
   return m[s] || s
+}
+
+function agentTypeColor(t) {
+  const m = { SINGLE: 'cyan', COMPOSITE: 'purple', WORKFLOW: 'orange' }
+  return m[t] || 'default'
+}
+function agentTypeLabel(t) {
+  const m = { SINGLE: '单体', COMPOSITE: '多Agent', WORKFLOW: '工作流' }
+  return m[t] || t
 }
 
 async function fetchAgents() {

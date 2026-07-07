@@ -23,6 +23,12 @@ class AgentStatus(str, enum.Enum):
     DELETED = "DELETED"
 
 
+class AgentType(str, enum.Enum):
+    SINGLE = "SINGLE"       # 单体 Agent
+    COMPOSITE = "COMPOSITE" # 多 Agent 编排
+    WORKFLOW = "WORKFLOW"   # 工作流型
+
+
 class VersionStatus(str, enum.Enum):
     DRAFT = "DRAFT"
     TESTING = "TESTING"
@@ -120,6 +126,25 @@ class Agent(Base):
     tags = Column(JSON, default=list)
     status = Column(SAEnum(AgentStatus), default=AgentStatus.DRAFT)
     current_version_id = Column(String, nullable=True)
+    # MA: Agent 类型与编排配置
+    agent_type = Column(SAEnum(AgentType), default=AgentType.SINGLE)
+    composition_config = Column(JSON, default=dict)
+    # WF: 工作流画布定义
+    workflow_definition = Column(JSON, default=dict)
+    # SGL-CFG-02: ReAct 最大迭代次数
+    max_iterations = Column(Integer, default=10)
+    # SGL-CFG-03: 单步超时时间（秒）
+    step_timeout_seconds = Column(Integer, default=60)
+    # SGL-CFG-04: 工具失败重试次数
+    tool_retry_count = Column(Integer, default=2)
+    # SGL-CFG-04: 退避策略 fixed/exponential
+    tool_retry_backoff = Column(String(16), default="fixed")
+    # SGL-CFG-05: 是否允许连续调用同一工具（防死循环开关）
+    allow_repeat_tool_calls = Column(Boolean, default=True)
+    # SGL-CFG-05: 连续相同调用阈值
+    max_repeat_threshold = Column(Integer, default=3)
+    # SGL-CFG-07: 单次调用 Token 上限
+    single_call_token_limit = Column(Integer, default=8192)
     created_at = Column(DateTime, default=now_utc)
     updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)
 
@@ -207,6 +232,8 @@ class Session(Base):
     token_budget = Column(Integer, default=100000)
     ttl_seconds = Column(Integer, default=1800)
     messages = Column(JSON, default=list)
+    # SGL-CFG-06 / MA-IMP-09: HITL 挂起上下文（pending_tool_call / pending_delivery）
+    pending_context = Column(JSON, default=dict)
     trace_id = Column(String(128), default="")
     created_at = Column(DateTime, default=now_utc)
     last_active_at = Column(DateTime, default=now_utc)
@@ -246,4 +273,50 @@ class AgentToolBinding(Base):
     agent_id = Column(String, ForeignKey("agents.agent_id"), nullable=False)
     tool_id = Column(String, ForeignKey("tools.tool_id"), nullable=False)
     permission = Column(String(16), default="allowed")
+    # SGL-CFG-06: 该工具调用前是否需要人工审批
+    require_approval = Column(Boolean, default=False)
     created_at = Column(DateTime, default=now_utc)
+
+
+class AgentComposition(Base):
+    """MA: 多 Agent 编排关系表"""
+    __tablename__ = "agent_compositions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    parent_agent_id = Column(String, ForeignKey("agents.agent_id"), nullable=False, index=True)
+    child_agent_id = Column(String, ForeignKey("agents.agent_id"), nullable=False)
+    role_name = Column(String(128), nullable=False)
+    role_description = Column(Text, default="")
+    task_keywords = Column(JSON, default=list)
+    created_at = Column(DateTime, default=now_utc)
+
+
+class AuditLog(Base):
+    """审计日志表"""
+    __tablename__ = "audit_logs"
+
+    log_id = Column(String, primary_key=True, default=gen_uuid)
+    agent_id = Column(String, index=True)
+    session_id = Column(String, index=True)
+    event_type = Column(String(64))
+    event_data = Column(JSON, default=dict)
+    tokens_used = Column(Integer, default=0)
+    duration_ms = Column(Integer, default=0)
+    trace_id = Column(String(128), index=True)
+    created_at = Column(DateTime, default=now_utc)
+
+
+class HITLApproval(Base):
+    """HITL 人工审批工单"""
+    __tablename__ = "hitl_approvals"
+
+    approval_id = Column(String, primary_key=True, default=gen_uuid)
+    session_id = Column(String, ForeignKey("sessions.session_id"), nullable=False, index=True)
+    agent_id = Column(String, nullable=False)
+    tool_name = Column(String(128), nullable=False)
+    tool_args = Column(JSON, default=dict)
+    status = Column(String(16), default="PENDING")  # PENDING / APPROVED / REJECTED
+    reviewer = Column(String(128), default="")
+    review_comment = Column(Text, default="")
+    created_at = Column(DateTime, default=now_utc)
+    reviewed_at = Column(DateTime, nullable=True)

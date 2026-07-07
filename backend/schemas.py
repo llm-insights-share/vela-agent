@@ -83,7 +83,20 @@ class AgentCreate(BaseModel):
     skill_pack_ids: List[str] = Field(default_factory=list)
     knowledge_base_ids: List[str] = Field(default_factory=list)
     tool_ids: List[str] = Field(default_factory=list)
+    # SGL-CFG-06: 支持按工具勾选 HITL 审批；与 tool_ids 二选一，优先 tool_bindings
+    tool_bindings: Optional[List["ToolBindingItem"]] = None
     tags: List[str] = Field(default_factory=list)
+    # SGL-CFG-02~07: ReAct 循环参数
+    max_iterations: int = Field(default=10, ge=1, le=50)
+    step_timeout_seconds: int = Field(default=60, ge=5, le=600)
+    tool_retry_count: int = Field(default=2, ge=0, le=10)
+    tool_retry_backoff: str = Field(default="fixed", pattern="^(fixed|exponential)$")
+    allow_repeat_tool_calls: bool = Field(default=True)
+    max_repeat_threshold: int = Field(default=3, ge=2, le=10)
+    single_call_token_limit: int = Field(default=8192, ge=1024)
+    agent_type: str = Field(default="SINGLE", pattern="^(SINGLE|COMPOSITE|WORKFLOW)$")
+    composition_config: Dict[str, Any] = Field(default_factory=dict)
+    workflow_definition: Dict[str, Any] = Field(default_factory=dict)
 
 
 class AgentUpdate(BaseModel):
@@ -99,8 +112,99 @@ class AgentUpdate(BaseModel):
     skill_pack_ids: Optional[List[str]] = None
     knowledge_base_ids: Optional[List[str]] = None
     tool_ids: Optional[List[str]] = None
+    # SGL-CFG-06: 支持按工具勾选 HITL 审批
+    tool_bindings: Optional[List["ToolBindingItem"]] = None
     tags: Optional[List[str]] = None
     change_summary: str = Field(default="")
+    max_iterations: Optional[int] = None
+    step_timeout_seconds: Optional[int] = None
+    tool_retry_count: Optional[int] = None
+    tool_retry_backoff: Optional[str] = None
+    allow_repeat_tool_calls: Optional[bool] = None
+    max_repeat_threshold: Optional[int] = None
+    single_call_token_limit: Optional[int] = None
+    agent_type: Optional[str] = None
+    composition_config: Optional[Dict[str, Any]] = None
+    workflow_definition: Optional[Dict[str, Any]] = None
+    workflow_definition: Optional[Dict[str, Any]] = None
+
+
+# WF: 工作流型相关 Schema
+class WorkflowDefinitionUpdate(BaseModel):
+    version: int = Field(default=1, ge=1)
+    nodes: List[Dict[str, Any]] = Field(default_factory=list)
+    edges: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class WorkflowResponse(BaseModel):
+    parent_agent_id: str
+    workflow_definition: Dict[str, Any] = {}
+
+
+class WorkflowValidationResult(BaseModel):
+    errors: List[Dict[str, str]] = []
+    warnings: List[Dict[str, str]] = []
+    passed: bool = True
+
+
+# MA: 多 Agent 编排相关 Schema
+class SubAgentAdd(BaseModel):
+    child_agent_id: str
+    role_name: str = Field(..., min_length=1, max_length=128)
+    role_description: str = Field(default="", max_length=2048)
+    task_keywords: List[str] = Field(default_factory=list)
+
+
+class SubAgentRemove(BaseModel):
+    child_agent_id: str
+
+
+class CoordinatorConfigUpdate(BaseModel):
+    dispatch_strategy: str = Field(default="llm", pattern="^(llm|rule)$")
+    max_dispatch_rounds: int = Field(default=5, ge=1, le=20)
+    result_integration: str = Field(default="coordinator", pattern="^(coordinator|concat)$")
+    coordinator_model_service_id: Optional[str] = None
+    a2a_direct_whitelist: List[List[str]] = Field(default_factory=list)
+    hitl_before_delivery: bool = Field(default=True)
+    total_token_budget: int = Field(default=500000, ge=10000)
+    max_a2a_calls: int = Field(default=20, ge=1, le=100)
+
+
+class CompositionResponse(BaseModel):
+    parent_agent_id: str
+    sub_agents: List[Dict[str, Any]] = []
+    coordinator_config: Dict[str, Any] = {}
+
+
+# HITL 审批 Schema
+class HITLApprovalResponse(BaseModel):
+    approval_id: str
+    session_id: str
+    agent_id: str
+    tool_name: str
+    tool_args: Dict[str, Any] = {}
+    status: str
+    created_at: Optional[datetime] = None
+    reviewed_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+class HITLReview(BaseModel):
+    approved: bool
+    reviewer: str = Field(default="", max_length=128)
+    comment: str = Field(default="", max_length=2048)
+
+
+class ToolBindingItem(BaseModel):
+    """SGL-CFG-06: 工具绑定项，支持按工具勾选 HITL"""
+    tool_id: str
+    require_approval: bool = False
+
+
+# SGL-CFG-06: 解析 AgentCreate/AgentUpdate 中对 ToolBindingItem 的前向引用
+AgentCreate.model_rebuild()
+AgentUpdate.model_rebuild()
 
 
 class AgentResponse(BaseModel):
@@ -125,6 +229,16 @@ class AgentResponse(BaseModel):
     knowledge_base_names: List[str] = []
     tool_ids: List[str] = []
     tool_names: List[str] = []
+    max_iterations: int = 10
+    step_timeout_seconds: int = 60
+    tool_retry_count: int = 2
+    tool_retry_backoff: str = "fixed"
+    allow_repeat_tool_calls: bool = True
+    max_repeat_threshold: int = 3
+    single_call_token_limit: int = 8192
+    agent_type: str = "SINGLE"
+    composition_config: Dict[str, Any] = {}
+    workflow_definition: Dict[str, Any] = {}
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 

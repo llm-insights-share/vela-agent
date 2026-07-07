@@ -104,18 +104,25 @@ class SentenceTransformerEmbedding:
     """使用 sentence-transformers 进行语义嵌入"""
 
     # 优先使用本地已缓存的模型，避免网络下载
+    # 注意：bge-large-zh-v1.5 已在本地缓存，优先使用
     _CANDIDATE_MODELS = [
+        "BAAI/bge-large-zh-v1.5",                                          # 中文，1024维，本地已缓存
         "BAAI/bge-small-zh-v1.5",                                          # 中文，512维，体积小
         "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",     # 多语言，384维
         "sentence-transformers/all-MiniLM-L6-v2",                           # 英文，384维
     ]
 
     def __init__(self, model_name=None):
+        import os
+        # 设置离线模式，避免 huggingface.co 不可达时长时间超时
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
+        os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
         from sentence_transformers import SentenceTransformer
         if model_name:
             self._model = SentenceTransformer(model_name)
         else:
-            # 依次尝试候选模型，使用第一个能加载的
+            # 依次尝试候选模型，使用第一个能加载的（离线模式，仅用本地缓存）
             last_err = None
             for name in self._CANDIDATE_MODELS:
                 try:

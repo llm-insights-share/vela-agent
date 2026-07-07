@@ -4,7 +4,7 @@ from typing import Optional
 from database import get_db
 from models import Session as SessionModel, SessionStatus, gen_uuid, now_utc
 from schemas import SessionCreate, SessionChatRequest, SessionResponse, PaginatedResponse
-from services.agent_service import agent_service
+from services.agent_service import agent_service, _ensure_files_for_session
 
 router = APIRouter(prefix="/api/v1/sessions", tags=["sessions"])
 
@@ -26,6 +26,8 @@ def list_sessions(
     sessions = query.order_by(SessionModel.created_at.desc()).offset(
         (page - 1) * page_size
     ).limit(page_size).all()
+    for s in sessions:
+        _ensure_files_for_session(s, db)
     return PaginatedResponse(
         total=total, page=page, page_size=page_size,
         items=[SessionResponse.model_validate(s) for s in sessions]
@@ -58,6 +60,7 @@ def get_session(session_id: str, db: Session = Depends(get_db)):
     ).first()
     if not session:
         raise HTTPException(status_code=404, detail="会话不存在")
+    _ensure_files_for_session(session, db)
     session.last_active_at = now_utc()
     db.commit()
     return SessionResponse.model_validate(session)

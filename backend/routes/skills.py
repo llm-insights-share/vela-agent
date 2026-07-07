@@ -144,11 +144,15 @@ async def import_skill(file: UploadFile = File(...), db: Session = Depends(get_d
             if not name:
                 raise HTTPException(status_code=400, detail="Skill 清单中缺少 name 字段")
 
+            tools = manifest_data.get('tools', [])
+            if not tools:
+                tools = _extract_tools(manifest_data, instructions)
+
             existing = db.query(SkillPack).filter(SkillPack.name == name).first()
             if existing:
                 existing.version = manifest_data.get('version', existing.version)
                 existing.description = manifest_data.get('description', existing.description)
-                existing.tools = manifest_data.get('tools', [])
+                existing.tools = tools
                 existing.manifest = manifest_data
                 existing.skill_content = instructions
                 existing.status = SkillPackStatus.ACTIVE
@@ -161,7 +165,7 @@ async def import_skill(file: UploadFile = File(...), db: Session = Depends(get_d
                 name=name,
                 version=manifest_data.get('version', '1.0.0'),
                 scope=manifest_data.get('scope', 'platform'),
-                tools=manifest_data.get('tools', []),
+                tools=tools,
                 description=manifest_data.get('description', ''),
                 manifest=manifest_data,
                 skill_content=instructions,
@@ -202,3 +206,65 @@ def _parse_skill_md(raw: str):
         manifest['name'] = 'unnamed-skill'
 
     return manifest, instructions
+
+
+def _extract_tools(manifest: dict, instructions: str) -> list:
+    """当 manifest 中没有 tools 字段时，从 SKILL.md 内容中提取工具信息"""
+    tools = []
+
+    # 常见非工具标题（中英文）
+    skip_titles = {
+        'overview', 'description', 'usage', 'how to use', 'how to create',
+        'installation', 'setup', 'configuration', 'prerequisites', 'requirements',
+        'examples', 'notes', 'limitations', 'troubleshooting', 'faq',
+        'references', 'license', 'changelog', 'contributing', 'support',
+        'getting started', 'quick start', 'introduction', 'about',
+        'how to create a diagram', 'choosing the output format',
+        'supported export formats', 'how it works', 'when to use',
+        'trigger', 'triggers', 'instructions', 'dependencies',
+        'file naming', 'xml format', 'xml reference', 'design thinking',
+        'quick reference', 'important requirements', 'best practices',
+        'code style guidelines', 'design ideas', 'qa (required)',
+        'converting to images', 'next steps', 'keywords',
+        'common tasks', 'common workflow', 'all excel files',
+        'financial models', 'reading content', 'editing workflow',
+        'creating from scratch', 'reading and analyzing data',
+        'excel file workflows', 'creating new documents',
+        'editing existing documents', 'python libraries',
+        'command-line tools', 'frontend aesthetics guidelines',
+        '核心理念', '工作流', '通用美学规范', '配色主题', '常见迭代',
+        '依赖', '关键原则', '第一步', '第二步', '第三步', '第四步',
+        '第五步', '第六步', '第 0-1 步', '第 4 步', '第 5 步',
+        '原型 review 摘要',
+    }
+
+    skip_prefixes = ('how ', '第', 'step ', 'critical', 'important', 'note')
+
+    lines = instructions.split('\n')
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith('## ') and not stripped.startswith('### '):
+            title = stripped[3:].strip().lower()
+            if title in skip_titles:
+                continue
+            if any(title.startswith(p) for p in skip_prefixes):
+                continue
+            tools.append({
+                "name": stripped[3:].strip(),
+                "description": stripped[3:].strip(),
+            })
+
+    # 如果提取过多（>5），说明大部分是文档章节而非工具，回退到单个默认工具
+    if len(tools) > 5:
+        tools = []
+
+    # 默认：用 skill 名称作为工具
+    if not tools:
+        name = manifest.get('name', 'unnamed-skill')
+        desc = manifest.get('description', name)
+        tools.append({
+            "name": name,
+            "description": desc[:200] if desc else name,
+        })
+
+    return tools

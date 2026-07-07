@@ -8,9 +8,9 @@ import traceback
 from typing import Dict, Any, Optional, List
 from sqlalchemy.orm import Session
 from models import (
-    Agent, AgentVersion, AgentStatus, VersionStatus, ChangeType,
+    Agent, AgentVersion, AgentStatus, VersionStatus, ChangeType, AgentType,
     AgentSkillBinding, AgentKnowledgeBinding, AgentToolBinding,
-    Session as SessionModel, ModelService, ModelProvider,
+    Session as SessionModel, ModelService, ModelProvider, SessionStatus,
     SkillPack, SkillPackStatus, KnowledgeBase, Tool, ToolStatus,
     gen_uuid, now_utc
 )
@@ -30,6 +30,14 @@ class TokenBudgetExceededError(AgentLoopError):
 
 class MaxIterationsExceededError(AgentLoopError):
     pass
+
+
+class HITLPendingError(AgentLoopError):
+    """SGL-CFG-06 / MA-IMP-09: 工具调用或交付物需人工审批，循环挂起"""
+    def __init__(self, approval_id: str, tool_name: str, message: str = ""):
+        self.approval_id = approval_id
+        self.tool_name = tool_name
+        super().__init__(message or f"工具 [{tool_name}] 等待人工审批 (approval_id={approval_id})")
 
 
 class AgentService:
@@ -97,10 +105,23 @@ class AgentService:
                 })
 
         result.passed = len(result.errors) == 0
+
+        # WF: 工作流图校验
+        if agent.agent_type == AgentType.WORKFLOW:
+            from services.workflow_compiler import WorkflowCompiler
+            wf_result = WorkflowCompiler.validate(db, agent.workflow_definition or {})
+            for err in wf_result.get("errors", []):
+                result.errors.append(err)
+            for warn in wf_result.get("warnings", []):
+                result.warnings.append(warn)
+            if wf_result.get("errors"):
+                result.passed = False
+
         return result
 
     @staticmethod
     def create_agent(db: Session, data: AgentCreate) -> Agent:
+        agent_type = AgentType(data.agent_type) if data.agent_type else AgentType.SINGLE
         agent = Agent(
             agent_id=gen_uuid(),
             name=data.name,
@@ -114,6 +135,16 @@ class AgentService:
             tool_permissions=data.tool_permissions,
             tags=data.tags,
             status=AgentStatus.DRAFT,
+            agent_type=agent_type,
+            composition_config=data.composition_config or {},
+            workflow_definition=data.workflow_definition or {},
+            max_iterations=data.max_iterations,
+            step_timeout_seconds=data.step_timeout_seconds,
+            tool_retry_count=data.tool_retry_count,
+            tool_retry_backoff=data.tool_retry_backoff,
+            allow_repeat_tool_calls=data.allow_repeat_tool_calls,
+            max_repeat_threshold=data.max_repeat_threshold,
+            single_call_token_limit=data.single_call_token_limit,
         )
         db.add(agent)
         db.flush()
@@ -129,6 +160,16 @@ class AgentService:
             "token_budget": data.token_budget,
             "tool_permissions": data.tool_permissions,
             "tags": data.tags,
+            "max_iterations": data.max_iterations,
+            "step_timeout_seconds": data.step_timeout_seconds,
+            "tool_retry_count": data.tool_retry_count,
+            "tool_retry_backoff": data.tool_retry_backoff,
+            "allow_repeat_tool_calls": data.allow_repeat_tool_calls,
+            "max_repeat_threshold": data.max_repeat_threshold,
+            "single_call_token_limit": data.single_call_token_limit,
+            "agent_type": agent_type.value,
+            "composition_config": data.composition_config or {},
+            "workflow_definition": data.workflow_definition or {},
         }
         version = AgentVersion(
             version_id=gen_uuid(),
@@ -174,6 +215,23 @@ class AgentService:
                 )
                 db.add(binding)
 
+        # SGL-CFG-06: 若提供 tool_bindings，则覆盖上面的 tool_ids 写入（含 require_approval）
+        if data.tool_bindings:
+            # 先清除刚才按 tool_ids 写入的（避免重复）
+            db.query(AgentToolBinding).filter(
+                AgentToolBinding.agent_id == agent.agent_id
+            ).delete()
+            for b in data.tool_bindings:
+                tool = db.query(Tool).filter(Tool.tool_id == b.tool_id).first()
+                if tool:
+                    binding = AgentToolBinding(
+                        agent_id=agent.agent_id,
+                        tool_id=b.tool_id,
+                        permission="allowed",
+                        require_approval=bool(b.require_approval),
+                    )
+                    db.add(binding)
+
         db.commit()
         db.refresh(agent)
         return agent
@@ -184,11 +242,13 @@ class AgentService:
         if not agent:
             return None
 
-        update_fields = data.model_dump(exclude_unset=True, exclude={"skill_pack_ids", "knowledge_base_ids", "tool_ids", "change_summary"})
+        update_fields = data.model_dump(exclude_unset=True, exclude={"skill_pack_ids", "knowledge_base_ids", "tool_ids", "tool_bindings", "change_summary"})
         change_summary = data.change_summary or "配置修改"
 
         for key, value in update_fields.items():
             if hasattr(agent, key):
+                if key == "agent_type" and value is not None:
+                    value = AgentType(value)
                 setattr(agent, key, value)
 
         last_version = db.query(AgentVersion).filter(
@@ -223,6 +283,16 @@ class AgentService:
             "token_budget": agent.token_budget,
             "tool_permissions": agent.tool_permissions,
             "tags": agent.tags,
+            "max_iterations": agent.max_iterations,
+            "step_timeout_seconds": agent.step_timeout_seconds,
+            "tool_retry_count": agent.tool_retry_count,
+            "tool_retry_backoff": agent.tool_retry_backoff,
+            "allow_repeat_tool_calls": agent.allow_repeat_tool_calls,
+            "max_repeat_threshold": agent.max_repeat_threshold,
+            "single_call_token_limit": agent.single_call_token_limit,
+            "agent_type": agent.agent_type.value if agent.agent_type else "SINGLE",
+            "composition_config": agent.composition_config or {},
+            "workflow_definition": agent.workflow_definition or {},
         }
         version = AgentVersion(
             version_id=gen_uuid(),
@@ -276,6 +346,22 @@ class AgentService:
                     )
                     db.add(binding)
 
+        # SGL-CFG-06: 若提供 tool_bindings，则覆盖上面的 tool_ids 更新（含 require_approval）
+        if data.tool_bindings is not None:
+            db.query(AgentToolBinding).filter(
+                AgentToolBinding.agent_id == agent_id
+            ).delete()
+            for b in data.tool_bindings:
+                tool = db.query(Tool).filter(Tool.tool_id == b.tool_id).first()
+                if tool:
+                    binding = AgentToolBinding(
+                        agent_id=agent_id,
+                        tool_id=b.tool_id,
+                        permission="allowed",
+                        require_approval=bool(b.require_approval),
+                    )
+                    db.add(binding)
+
         db.commit()
         db.refresh(agent)
         return agent
@@ -301,6 +387,73 @@ class AgentService:
         db.commit()
         db.refresh(agent)
         return agent
+
+    @staticmethod
+    async def _finalize_workflow_chat(
+        db: Session,
+        session: SessionModel,
+        message: str,
+        result: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """WF: 统一处理工作流 chat 响应与 session 写入"""
+        messages = session.messages or []
+        if message and message.strip():
+            messages.append({"role": "user", "content": message})
+
+        pending_approval_id = result.get("pending_approval_id")
+        status = result.get("status", "")
+
+        if status == "completed" and not pending_approval_id:
+            messages.append({"role": "assistant", "content": result.get("result", "")})
+            session.pending_context = {}
+            session.status = SessionStatus.ACTIVE
+        elif pending_approval_id:
+            session.status = SessionStatus.HITL_WAIT
+
+        session.messages = messages
+        session.token_used = (session.token_used or 0) + result.get("total_tokens", 0)
+        session.last_active_at = now_utc()
+        db.commit()
+
+        if pending_approval_id:
+            preview = ""
+            for t in reversed(result.get("trace") or []):
+                if t.get("node_type") == "hitl":
+                    preview = t.get("output", "")
+                    break
+            return {
+                "content": f"⏸️ 工作流执行到 HITL 审批节点，等待人工审批。\n审批工单 ID: `{pending_approval_id}`\n\n{preview}",
+                "thinking": "\n".join(result.get("thinking_log", [])),
+                "tokens_used": result.get("total_tokens", 0),
+                "total_tokens": session.token_used or 0,
+                "execution_mode": "hitl_pending",
+                "execution_trace": result.get("execution_trace", []),
+                "files": [],
+                "pending_approval_id": pending_approval_id,
+                "pending_workflow": True,
+                "session_status": "HITL_WAIT",
+            }
+
+        if status == "failed":
+            return {
+                "content": f"❌ 工作流执行失败：{result.get('result', '未知错误')}",
+                "thinking": "\n".join(result.get("thinking_log", [])),
+                "tokens_used": result.get("total_tokens", 0),
+                "total_tokens": session.token_used or 0,
+                "execution_mode": "workflow",
+                "execution_trace": result.get("execution_trace", []),
+                "files": [],
+            }
+
+        return {
+            "content": result.get("result", ""),
+            "thinking": "\n".join(result.get("thinking_log", [])),
+            "tokens_used": result.get("total_tokens", 0),
+            "total_tokens": session.token_used or 0,
+            "execution_mode": "workflow",
+            "execution_trace": result.get("execution_trace", []),
+            "files": [],
+        }
 
     @staticmethod
     async def chat_with_agent(
@@ -334,6 +487,96 @@ class AgentService:
         ).first()
         if not session:
             raise ValueError("会话不存在")
+
+        from models import AgentType
+
+        # WF: 工作流恢复（HITL 审批后由前端触发 resume 或 chat 空消息）
+        pending_ctx = session.pending_context or {}
+        if (
+            agent.agent_type == AgentType.WORKFLOW
+            and pending_ctx.get("kind") == "workflow"
+            and pending_ctx.get("workflow_resume")
+        ):
+            from services.workflow_engine import WorkflowEngine, WorkflowState
+            wf_state = WorkflowState.from_dict(pending_ctx.get("workflow_state") or {})
+            engine = WorkflowEngine(
+                db=db, agent=agent, session=session,
+                provider=provider, model_svc=model_svc,
+            )
+            result = await asyncio.wait_for(
+                engine.resume(wf_state, hitl_approved=True),
+                timeout=float(timeout_seconds) if timeout_seconds else 300.0,
+            )
+            return await AgentService._finalize_workflow_chat(
+                db, session, message, result
+            )
+
+        # MA: 如果是 COMPOSITE 类型，走 CoordinatorEngine
+        if agent.agent_type == AgentType.COMPOSITE:
+            from services.coordinator_service import CoordinatorEngine
+            coordinator = CoordinatorEngine(
+                db=db,
+                parent_agent=agent,
+                session=session,
+                provider=provider,
+                model_svc=model_svc,
+            )
+            result = await asyncio.wait_for(
+                coordinator.run(message),
+                timeout=float(timeout_seconds) if timeout_seconds else 300.0,
+            )
+            # 写入 session 消息历史（HITL 挂起时不写 final_result，留待审批通过后再写）
+            messages = session.messages or []
+            messages.append({"role": "user", "content": message})
+            pending_approval_id = result.get("pending_approval_id")
+            if not pending_approval_id:
+                messages.append({"role": "assistant", "content": result.get("result", "")})
+            session.messages = messages
+            session.token_used = (session.token_used or 0) + result.get("total_tokens", 0)
+            session.last_active_at = now_utc()
+            db.commit()
+
+            # MA-IMP-09: 交付前 HITL Gate 触发时返回挂起响应
+            if pending_approval_id:
+                return {
+                    "content": f"⏸️ 多 Agent 任务已完成，但 Coordinator 触发了交付前 HITL Gate。\n审批工单 ID: `{pending_approval_id}`\n\n请在审批中心通过后查看最终交付物。",
+                    "thinking": "\n".join(result.get("thinking_log", [])),
+                    "tokens_used": result.get("total_tokens", 0),
+                    "total_tokens": (session.token_used or 0),
+                    "execution_mode": "hitl_pending",
+                    "files": [],
+                    "audit_trail": result.get("audit_trail", []),
+                    "dispatch_count": result.get("dispatch_count", 0),
+                    "pending_approval_id": pending_approval_id,
+                    "pending_delivery": True,
+                    "session_status": "HITL_WAIT",
+                }
+
+            return {
+                "content": result.get("result", ""),
+                "thinking": "\n".join(result.get("thinking_log", [])),
+                "tokens_used": result.get("total_tokens", 0),
+                "total_tokens": (session.token_used or 0),
+                "execution_mode": "multi_agent",
+                "files": [],
+                "audit_trail": result.get("audit_trail", []),
+                "dispatch_count": result.get("dispatch_count", 0),
+            }
+
+        # WF: 工作流型 Agent
+        if agent.agent_type == AgentType.WORKFLOW:
+            from services.workflow_engine import WorkflowEngine
+            engine = WorkflowEngine(
+                db=db, agent=agent, session=session,
+                provider=provider, model_svc=model_svc,
+            )
+            result = await asyncio.wait_for(
+                engine.run(message),
+                timeout=float(timeout_seconds) if timeout_seconds else 300.0,
+            )
+            return await AgentService._finalize_workflow_chat(
+                db, session, message, result
+            )
 
         knowledge_context = ""
         kb_bindings = db.query(AgentKnowledgeBinding).filter(
@@ -423,6 +666,19 @@ class AgentService:
         try:
             result = await loop.run(mode)
             return result
+        except HITLPendingError as he:
+            # SGL-CFG-06: 工具需人工审批，返回挂起响应（不视为错误）
+            return {
+                "content": f"⏸️ 工具 [{he.tool_name}] 需要人工审批后才能继续执行。\n审批工单 ID: `{he.approval_id}`\n\n请在审批中心处理后继续对话。",
+                "thinking": "\n".join(loop.thinking_log) if loop else "",
+                "tokens_used": 0,
+                "total_tokens": session.token_used or 0,
+                "execution_mode": "hitl_pending",
+                "files": [],
+                "pending_approval_id": he.approval_id,
+                "pending_tool_name": he.tool_name,
+                "session_status": "HITL_WAIT",
+            }
         except Exception as e:
             traceback.print_exc()
             thinking_log = loop.thinking_log if loop else []
@@ -436,9 +692,7 @@ class AgentService:
 
 
 class AgentLoop:
-    MAX_ITERATIONS = 10
     MAX_CONTEXT_MESSAGES = 50
-    TOOL_RETRY_COUNT = 2
     SKILL_MAX_CHARS = 8000
 
     def __init__(
@@ -471,6 +725,30 @@ class AgentLoop:
         self.thinking_log: List[str] = []
         self.total_tokens_used = 0
         self.generated_files: List[Dict[str, str]] = []
+
+        # SGL-CFG-02: ReAct 最大迭代次数（可配置）
+        self.max_iterations = agent.max_iterations or 10
+        # SGL-CFG-03: 单步超时时间
+        self.step_timeout = agent.step_timeout_seconds or 60
+        # SGL-CFG-04: 工具失败重试次数与退避策略
+        self.tool_retry_count = agent.tool_retry_count if agent.tool_retry_count is not None else 2
+        self.tool_retry_backoff = agent.tool_retry_backoff or "fixed"
+        # SGL-CFG-05: 防死循环配置
+        self.allow_repeat_tool_calls = agent.allow_repeat_tool_calls if agent.allow_repeat_tool_calls is not None else True
+        self.max_repeat_threshold = agent.max_repeat_threshold or 3
+        # SGL-CFG-07: 单次调用 Token 上限
+        self.single_call_token_limit = agent.single_call_token_limit or 8192
+
+        # SGL-IMP-03: 死循环检测历史
+        self._tool_call_history: List[str] = []
+
+        # SGL-CFG-06: 加载工具→require_approval 映射
+        self.tool_require_approval: Dict[str, bool] = {}
+        for b in db.query(AgentToolBinding).filter(
+            AgentToolBinding.agent_id == agent.agent_id
+        ).all():
+            if b.require_approval:
+                self.tool_require_approval[b.tool_id] = True
 
         self.output_dir = os.path.join(
             os.path.dirname(os.path.dirname(__file__)), "data", "outputs", session.session_id
@@ -575,9 +853,10 @@ class AgentLoop:
     ) -> Dict[str, Any]:
         from services.model_provider import model_provider_service
 
+        # SGL-CFG-07: 单次调用 Token 上限
         effective_max_tokens = max_tokens or min(
             self.agent.token_budget - (self.session.token_used or 0) - self.total_tokens_used,
-            4096,
+            self.single_call_token_limit,
         )
         if effective_max_tokens < 1024:
             effective_max_tokens = 1024
@@ -685,7 +964,36 @@ class AgentLoop:
 
         return {}
 
+    def _check_dead_loop(self, tool_name: str, args: dict) -> bool:
+        """SGL-IMP-03: 死循环检测 - 连续N次调用同一工具且参数相同时强制中断"""
+        if not self.allow_repeat_tool_calls:
+            return False
+        call_sig = f"{tool_name}:{json.dumps(args, sort_keys=True)}"
+        self._tool_call_history.append(call_sig)
+        if len(self._tool_call_history) < self.max_repeat_threshold:
+            return False
+        recent = self._tool_call_history[-self.max_repeat_threshold:]
+        if len(set(recent)) == 1:
+            self.thinking_log.append(
+                f"[死循环检测] 连续 {self.max_repeat_threshold} 次调用 [{tool_name}] 且参数相同，强制中断"
+            )
+            return True
+        return False
+
     async def _execute_tool_with_retry(self, tool, args: Dict[str, Any]) -> Dict[str, Any]:
+        # SGL-CFG-06: HITL 拦截 - 工具调用前检查 require_approval
+        tool_id = getattr(tool, "tool_id", None) or tool.name
+        if self.tool_require_approval.get(tool_id):
+            approval = self._create_hitl_approval(
+                tool_name=tool.name,
+                tool_args=args,
+                pending_kind="tool_call",
+            )
+            self.thinking_log.append(
+                f"  工具 [{tool.name}] 触发 HITL 审批 (approval_id={approval.approval_id})，循环挂起"
+            )
+            raise HITLPendingError(approval.approval_id, tool.name)
+
         if isinstance(tool, BuiltinTool):
             try:
                 return await execute_builtin_tool(tool.name, args, self.output_dir)
@@ -695,19 +1003,50 @@ class AgentLoop:
         from services.tool_service import tool_execution_service
 
         last_error = None
-        for attempt in range(self.TOOL_RETRY_COUNT + 1):
+        for attempt in range(self.tool_retry_count + 1):
             try:
                 result = await tool_execution_service.execute_tool(
-                    tool, args, timeout_seconds=self.timeout_seconds or 60
+                    tool, args, timeout_seconds=self.step_timeout
                 )
                 return result
             except Exception as e:
                 last_error = str(e)
                 self.thinking_log.append(f"  工具 [{tool.name}] 第 {attempt + 1} 次执行失败: {last_error[:200]}")
-                if attempt < self.TOOL_RETRY_COUNT:
+                if attempt < self.tool_retry_count:
+                    # SGL-CFG-04: 退避策略
+                    if self.tool_retry_backoff == "exponential":
+                        backoff = (2 ** attempt) * 1.0
+                        self.thinking_log.append(f"  指数退避 {backoff}s 后重试...")
+                        await asyncio.sleep(backoff)
                     continue
 
         return {"success": False, "error": last_error or "工具执行失败"}
+
+    def _create_hitl_approval(self, tool_name: str, tool_args: dict, pending_kind: str = "tool_call"):
+        """SGL-CFG-06: 创建 HITL 审批工单并挂起 session"""
+        from models import HITLApproval, SessionStatus
+        approval = HITLApproval(
+            approval_id=gen_uuid(),
+            session_id=self.session.session_id,
+            agent_id=self.agent.agent_id,
+            tool_name=tool_name,
+            tool_args=tool_args,
+            status="PENDING",
+        )
+        self.db.add(approval)
+        # 挂起 session，记录上下文便于审批后恢复
+        self.session.status = SessionStatus.HITL_WAIT
+        self.session.pending_context = {
+            "kind": pending_kind,
+            "tool_name": tool_name,
+            "tool_args": tool_args,
+            "approval_id": approval.approval_id,
+            "user_message": self.user_message,
+        }
+        self.session.last_active_at = now_utc()
+        self.db.commit()
+        self.db.refresh(approval)
+        return approval
 
     async def _run_direct(self) -> Dict[str, Any]:
         self.thinking_log.append("[Direct] 开始分析用户请求...")
@@ -723,13 +1062,14 @@ class AgentLoop:
         assistant_message = choices[0].get("message", {})
         assistant_content = assistant_message.get("content", "")
         reasoning_content = completion.get("reasoning_content", "")
+        response_truncated = self._get_finish_reason(completion) == "length"
 
         history = self.session.messages or []
         history.append({"role": "user", "content": self.user_message})
         history.append({"role": "assistant", "content": assistant_content})
         self._persist_session(history)
 
-        self._extract_and_save_files_from_content(assistant_content)
+        self._extract_and_save_files_from_content(assistant_content, response_truncated=response_truncated)
 
         return self._build_result(assistant_content, reasoning_content, "direct")
 
@@ -757,9 +1097,9 @@ class AgentLoop:
 
         iteration = 0
         planning_done = False
-        while iteration < self.MAX_ITERATIONS:
+        while iteration < self.max_iterations:
             iteration += 1
-            self.thinking_log.append(f"[ReAct 迭代 {iteration}/{self.MAX_ITERATIONS}]")
+            self.thinking_log.append(f"[ReAct 迭代 {iteration}/{self.max_iterations}]")
 
             completion = await self._call_llm(messages, tools=openai_tools)
 
@@ -819,11 +1159,15 @@ class AgentLoop:
                             )
                             self.thinking_log.append(f"  工具 [{func_name}] 参数解析失败: {raw_args[:200]}")
                         else:
-                            exec_result = await self._execute_tool_with_retry(tool, func_args)
-                            if exec_result.get("success"):
-                                tool_result_str = exec_result.get("result", "")
+                            # SGL-IMP-03: 死循环检测
+                            if self._check_dead_loop(func_name, func_args):
+                                tool_result_str = f"检测到死循环：连续 {self.max_repeat_threshold} 次以相同参数调用 {func_name}，已强制中断。请尝试不同的方法。"
                             else:
-                                tool_result_str = f"工具执行错误: {exec_result.get('error', '')}"
+                                exec_result = await self._execute_tool_with_retry(tool, func_args)
+                                if exec_result.get("success"):
+                                    tool_result_str = exec_result.get("result", "")
+                                else:
+                                    tool_result_str = f"工具执行错误: {exec_result.get('error', '')}"
                             self._extract_files_from_result(tool_result_str)
                             self.thinking_log.append(f"  工具 [{func_name}] 结果: {tool_result_str[:200]}")
                     else:
@@ -843,13 +1187,14 @@ class AgentLoop:
 
             assistant_content = msg.get("content", "")
             reasoning_content = completion.get("reasoning_content", "")
+            response_truncated = self._get_finish_reason(completion) == "length"
 
             new_messages.append({"role": "assistant", "content": assistant_content})
 
             history = (self.session.messages or []) + [{"role": "user", "content": self.user_message}] + new_messages
             self._persist_session(history)
 
-            self._extract_and_save_files_from_content(assistant_content)
+            self._extract_and_save_files_from_content(assistant_content, response_truncated=response_truncated)
 
             return self._build_result(assistant_content, reasoning_content, "react")
 
@@ -953,11 +1298,15 @@ class AgentLoop:
                                 )
                                 self.thinking_log.append(f"    工具 [{func_name}] 参数解析失败: {raw_args[:200]}")
                             else:
-                                exec_result = await self._execute_tool_with_retry(tool, func_args)
-                                if exec_result.get("success"):
-                                    tool_result_str = exec_result.get("result", "")
+                                # SGL-IMP-03: 死循环检测
+                                if self._check_dead_loop(func_name, func_args):
+                                    tool_result_str = f"检测到死循环：连续 {self.max_repeat_threshold} 次以相同参数调用 {func_name}，已强制中断。"
                                 else:
-                                    tool_result_str = f"工具执行错误: {exec_result.get('error', '')}"
+                                    exec_result = await self._execute_tool_with_retry(tool, func_args)
+                                    if exec_result.get("success"):
+                                        tool_result_str = exec_result.get("result", "")
+                                    else:
+                                        tool_result_str = f"工具执行错误: {exec_result.get('error', '')}"
                                 self._extract_files_from_result(tool_result_str)
                                 self.thinking_log.append(f"    工具 [{func_name}]: {tool_result_str[:200]}")
                             step_content += f"\n\n工具结果: {tool_result_str}"
@@ -977,12 +1326,14 @@ class AgentLoop:
         final_choices = final_completion.get("choices", [])
         if not final_choices:
             final_content = "\n\n".join(step_results)
+            response_truncated = False
         else:
             final_content = final_choices[0].get("message", {}).get("content", "")
+            response_truncated = self._get_finish_reason(final_completion) == "length"
 
         reasoning_content = final_completion.get("reasoning_content", "")
 
-        self._extract_and_save_files_from_content(final_content)
+        self._extract_and_save_files_from_content(final_content, response_truncated=response_truncated)
 
         history = (self.session.messages or []) + [
             {"role": "user", "content": self.user_message},
@@ -1010,6 +1361,26 @@ class AgentLoop:
         }
         if self.generated_files:
             result["files"] = self.generated_files
+            if any(f.get("truncated") for f in self.generated_files):
+                result["files_truncated"] = True
+
+        # 将 activeSkill / executionMode / files 持久化到 session.messages 的最后一条 assistant 消息中，
+        # 确保重新打开历史会话时 Skill 标志、执行模式标签和输出文件卡片都能正常显示
+        from sqlalchemy.orm.attributes import flag_modified
+        messages = self.session.messages or []
+        for msg in reversed(messages):
+            if msg.get("role") == "assistant":
+                if self.active_skill_name:
+                    msg["activeSkill"] = self.active_skill_name
+                msg["executionMode"] = mode
+                if self.generated_files:
+                    msg["files"] = self.generated_files
+                    if any(f.get("truncated") for f in self.generated_files):
+                        msg["filesTruncated"] = True
+                break
+        self.session.messages = messages
+        flag_modified(self.session, "messages")
+        self.db.commit()
         return result
 
     def _replace_file_references(self, content: str) -> str:
@@ -1061,7 +1432,7 @@ class AgentLoop:
         )
         return content
 
-    def _register_file(self, file_path: str) -> Optional[Dict[str, str]]:
+    def _register_file(self, file_path: str, truncated: bool = False) -> Optional[Dict[str, str]]:
         if not file_path or not os.path.isfile(file_path):
             return None
 
@@ -1081,15 +1452,46 @@ class AgentLoop:
             "url": f"/api/v1/files/{self.session.session_id}/{dest_name}",
             "size": file_size,
             "size_display": self._format_size(file_size),
+            "truncated": truncated,
         }
 
         for existing in self.generated_files:
             if existing["name"] == filename:
+                if truncated:
+                    existing["truncated"] = True
                 return existing
 
         self.generated_files.append(file_info)
-        self.thinking_log.append(f"[文件] 生成文件: {filename} ({file_info['size_display']})")
+        trunc_note = " [可能不完整]" if truncated else ""
+        self.thinking_log.append(f"[文件] 生成文件: {filename} ({file_info['size_display']}){trunc_note}")
         return file_info
+
+    @staticmethod
+    def _parse_code_blocks(content: str) -> List[tuple]:
+        """解析 markdown 代码块，返回 (lang, code, truncated) 列表。"""
+        results: List[tuple] = []
+        pos = 0
+        for match in re.finditer(r'```(\w*)\s*\n(.*?)```', content, re.DOTALL):
+            results.append((match.group(1), match.group(2), False))
+            pos = match.end()
+
+        remainder = content[pos:]
+        if '```' in remainder:
+            unclosed = re.search(r'```(\w*)\s*\n(.*)', remainder, re.DOTALL)
+            if unclosed and unclosed.group(2).strip():
+                results.append((unclosed.group(1), unclosed.group(2), True))
+        elif not results and '```' in content:
+            unclosed = re.search(r'```(\w*)\s*\n(.*)', content, re.DOTALL)
+            if unclosed and unclosed.group(2).strip():
+                results.append((unclosed.group(1), unclosed.group(2), True))
+        return results
+
+    @staticmethod
+    def _get_finish_reason(completion: Dict[str, Any]) -> Optional[str]:
+        choices = completion.get("choices", [])
+        if choices:
+            return choices[0].get("finish_reason")
+        return None
 
     def _extract_files_from_result(self, result_str: str) -> None:
         try:
@@ -1117,8 +1519,9 @@ class AgentLoop:
             for match in re.finditer(pattern, result_str, re.IGNORECASE):
                 self._register_file(match.group(1))
 
-    def _extract_and_save_files_from_content(self, content: str) -> None:
+    def _extract_and_save_files_from_content(self, content: str, response_truncated: bool = False) -> None:
         if not content:
+            print("[DEBUG _extract_files] content is empty, returning")
             return
 
         ext_map = {
@@ -1137,15 +1540,14 @@ class AgentLoop:
             "text": ".txt",
         }
 
-        code_blocks = re.findall(
-            r'```(\w*)\s*\n(.*?)```',
-            content, re.DOTALL,
-        )
+        code_blocks = self._parse_code_blocks(content)
 
-        for idx, (lang, code) in enumerate(code_blocks):
+        for idx, (lang, code, block_truncated) in enumerate(code_blocks):
             code = code.strip()
             if not code:
                 continue
+
+            is_truncated = block_truncated or response_truncated
 
             ext = ext_map.get(lang.lower() if lang else "", "")
 
@@ -1162,9 +1564,7 @@ class AgentLoop:
             if not ext:
                 continue
 
-            if idx == 0 and not code_blocks:
-                filename = f"output{ext}"
-            elif idx == 0:
+            if idx == 0:
                 filename = f"output{ext}"
             else:
                 filename = f"output_{idx}{ext}"
@@ -1173,7 +1573,7 @@ class AgentLoop:
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(code)
 
-            self._register_file(file_path)
+            self._register_file(file_path, truncated=is_truncated)
 
         if not code_blocks:
             raw_xml_patterns = [
@@ -1199,6 +1599,93 @@ class AgentLoop:
             return f"{size / 1024:.1f}KB"
         else:
             return f"{size / (1024 * 1024):.1f}MB"
+
+
+def _ensure_files_for_session(session, db) -> None:
+    """加载会话时，为缺少 files 的 assistant 消息自动提取代码块并生成文件。
+
+    这主要用于修复在持久化 files 功能之前创建的旧会话。
+    """
+    import shutil
+    from sqlalchemy.orm.attributes import flag_modified
+
+    messages = session.messages or []
+    output_dir = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)), "data", "outputs", session.session_id
+    )
+    os.makedirs(output_dir, exist_ok=True)
+
+    ext_map = {
+        "xml": ".drawio", "drawio": ".drawio", "html": ".html",
+        "json": ".json", "python": ".py", "javascript": ".js",
+        "typescript": ".ts", "yaml": ".yaml", "yml": ".yml",
+        "csv": ".csv", "sql": ".sql", "markdown": ".md", "text": ".txt",
+    }
+
+    modified = False
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            continue
+        if msg.get("files"):
+            continue
+
+        content = msg.get("content", "")
+        if not content:
+            continue
+
+        code_blocks = AgentLoop._parse_code_blocks(content)
+        if not code_blocks:
+            continue
+
+        file_infos = []
+        for idx, (lang, code, block_truncated) in enumerate(code_blocks):
+            code = code.strip()
+            if not code:
+                continue
+
+            ext = ext_map.get(lang.lower() if lang else "", "")
+            if not ext:
+                if code.startswith("<mxGraphModel") or code.startswith("<mxfile"):
+                    ext = ".drawio"
+                elif code.startswith("<?xml") or code.startswith("<mx"):
+                    ext = ".drawio"
+                elif code.strip().startswith("{") or code.strip().startswith("["):
+                    ext = ".json"
+                elif code.strip().startswith("<"):
+                    ext = ".html"
+            if not ext:
+                continue
+
+            filename = f"output{ext}" if idx == 0 else f"output_{idx}{ext}"
+            file_path = os.path.join(output_dir, filename)
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(code)
+
+            file_hash = hashlib.md5(file_path.encode()).hexdigest()[:8]
+            dest_name = f"{file_hash}{ext}"
+            dest_path = os.path.join(output_dir, dest_name)
+            if not os.path.exists(dest_path):
+                shutil.copy2(file_path, dest_path)
+
+            file_size = os.path.getsize(dest_path)
+            file_infos.append({
+                "name": filename,
+                "url": f"/api/v1/files/{session.session_id}/{dest_name}",
+                "size": file_size,
+                "size_display": AgentLoop._format_size(file_size),
+                "truncated": block_truncated,
+            })
+
+        if file_infos:
+            msg["files"] = file_infos
+            if any(f.get("truncated") for f in file_infos):
+                msg["filesTruncated"] = True
+            modified = True
+
+    if modified:
+        session.messages = messages
+        flag_modified(session, "messages")
+        db.commit()
 
 
 def _compute_skill_relevance(message: str, skill) -> float:
