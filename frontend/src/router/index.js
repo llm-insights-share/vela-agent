@@ -72,6 +72,16 @@ const routes = [
     component: () => import('../views/tools/ToolList.vue'),
   },
   {
+    path: '/data-access',
+    name: 'DataAccessConfig',
+    component: () => import('../views/dataquery/DataAccessConfig.vue'),
+  },
+  {
+    path: '/data-access/monitor',
+    name: 'DataQueryMonitor',
+    component: () => import('../views/dataquery/DataQueryMonitor.vue'),
+  },
+  {
     path: '/settings',
     name: 'SystemConfig',
     component: () => import('../views/settings/SystemConfig.vue'),

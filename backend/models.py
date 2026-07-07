@@ -320,3 +320,172 @@ class HITLApproval(Base):
     review_comment = Column(Text, default="")
     created_at = Column(DateTime, default=now_utc)
     reviewed_at = Column(DateTime, nullable=True)
+
+
+class DataQueryAgentStatus(str, enum.Enum):
+    ACTIVE = "ACTIVE"
+    INACTIVE = "INACTIVE"
+    DEPRECATED = "DEPRECATED"
+
+
+class DataQueryDatasourceStatus(str, enum.Enum):
+    ACTIVE = "ACTIVE"
+    INACTIVE = "INACTIVE"
+    ERROR = "ERROR"
+
+
+class DataQueryExecutionStatus(str, enum.Enum):
+    SUCCESS = "SUCCESS"
+    FAILED = "FAILED"
+    BLOCKED = "BLOCKED"
+
+
+class DataQueryAgent(Base):
+    __tablename__ = "dataquery_agents"
+
+    dq_agent_id = Column(String, primary_key=True, default=gen_uuid)
+    name = Column(String(128), unique=True, nullable=False, index=True)
+    description = Column(Text, default="")
+    model_service_id = Column(String, ForeignKey("model_services.model_service_id"), nullable=False)
+    planner_model_service_id = Column(String, ForeignKey("model_services.model_service_id"), nullable=True)
+    sql_model_service_id = Column(String, ForeignKey("model_services.model_service_id"), nullable=True)
+    temperature = Column(Float, default=0.1)
+    max_tokens = Column(Integer, default=2048)
+    default_limit = Column(Integer, default=200)
+    timeout_seconds = Column(Integer, default=30)
+    strict_mode = Column(Boolean, default=True)
+    allow_cross_datasource = Column(Boolean, default=False)
+    status = Column(SAEnum(DataQueryAgentStatus), default=DataQueryAgentStatus.ACTIVE)
+    created_at = Column(DateTime, default=now_utc)
+    updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)
+
+
+class DataQueryDatasourceBinding(Base):
+    __tablename__ = "dataquery_datasource_bindings"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    dq_agent_id = Column(String, ForeignKey("dataquery_agents.dq_agent_id"), nullable=False, index=True)
+    datasource_id = Column(String(128), nullable=False, index=True)
+    datasource_name = Column(String(256), default="")
+    db_type = Column(String(32), default="sqlite")
+    db_url = Column(String(1024), default="")
+    schema_name = Column(String(128), default="")
+    table_whitelist = Column(JSON, default=list)
+    sensitive_columns = Column(JSON, default=list)
+    default_limit = Column(Integer, default=200)
+    timeout_seconds = Column(Integer, default=30)
+    status = Column(SAEnum(DataQueryDatasourceStatus), default=DataQueryDatasourceStatus.ACTIVE)
+    created_at = Column(DateTime, default=now_utc)
+    updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)
+
+
+class DataQueryExecutionLog(Base):
+    __tablename__ = "dataquery_execution_logs"
+
+    log_id = Column(String, primary_key=True, default=gen_uuid)
+    dq_agent_id = Column(String, ForeignKey("dataquery_agents.dq_agent_id"), nullable=False, index=True)
+    datasource_id = Column(String(128), index=True)
+    session_id = Column(String(128), index=True)
+    question = Column(Text, default="")
+    normalized_question = Column(Text, default="")
+    generated_sql = Column(Text, default="")
+    execution_status = Column(SAEnum(DataQueryExecutionStatus), default=DataQueryExecutionStatus.SUCCESS)
+    error_message = Column(Text, default="")
+    rows = Column(Integer, default=0)
+    duration_ms = Column(Integer, default=0)
+    tokens_used = Column(Integer, default=0)
+    applied_terms = Column(JSON, default=list)
+    applied_mappings = Column(JSON, default=list)
+    feedback_score = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=now_utc)
+
+
+class DataDictionaryItem(Base):
+    __tablename__ = "dataquery_dictionary_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    dq_agent_id = Column(String, ForeignKey("dataquery_agents.dq_agent_id"), nullable=False, index=True)
+    datasource_id = Column(String(128), nullable=False, index=True)
+    table_name = Column(String(128), nullable=False, index=True)
+    column_name = Column(String(128), nullable=False, index=True)
+    business_name = Column(String(256), default="")
+    description = Column(Text, default="")
+    value_type = Column(String(64), default="string")
+    synonyms = Column(JSON, default=list)
+    metric_formula = Column(Text, default="")
+    created_at = Column(DateTime, default=now_utc)
+    updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)
+
+
+class DataCodeMapping(Base):
+    __tablename__ = "dataquery_code_mappings"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    dq_agent_id = Column(String, ForeignKey("dataquery_agents.dq_agent_id"), nullable=False, index=True)
+    datasource_id = Column(String(128), nullable=False, index=True)
+    table_name = Column(String(128), default="")
+    column_name = Column(String(128), nullable=False, index=True)
+    code_value = Column(String(128), nullable=False, index=True)
+    display_name = Column(String(256), nullable=False)
+    aliases = Column(JSON, default=list)
+    effective_from = Column(DateTime, nullable=True)
+    effective_to = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=now_utc)
+    updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)
+
+
+class DataQueryExample(Base):
+    __tablename__ = "dataquery_examples"
+
+    example_id = Column(String, primary_key=True, default=gen_uuid)
+    dq_agent_id = Column(String, ForeignKey("dataquery_agents.dq_agent_id"), nullable=False, index=True)
+    datasource_id = Column(String(128), nullable=False, index=True)
+    intent_tag = Column(String(128), default="", index=True)
+    nl_question = Column(Text, nullable=False)
+    sql_template = Column(Text, nullable=False)
+    variables = Column(JSON, default=dict)
+    explanation = Column(Text, default="")
+    quality_score = Column(Float, default=0.0)
+    enabled = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=now_utc)
+    updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)
+
+
+class DataTermMapping(Base):
+    __tablename__ = "dataquery_term_mappings"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    dq_agent_id = Column(String, ForeignKey("dataquery_agents.dq_agent_id"), nullable=False, index=True)
+    source_term = Column(String(256), nullable=False, index=True)
+    normalized_term = Column(String(256), nullable=False)
+    mapping_type = Column(String(32), default="synonym")
+    priority = Column(Integer, default=100)
+    enabled = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=now_utc)
+    updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)
+
+
+class DataQueryFeedback(Base):
+    __tablename__ = "dataquery_feedback"
+
+    feedback_id = Column(String, primary_key=True, default=gen_uuid)
+    log_id = Column(String, ForeignKey("dataquery_execution_logs.log_id"), nullable=False, index=True)
+    dq_agent_id = Column(String, ForeignKey("dataquery_agents.dq_agent_id"), nullable=False, index=True)
+    session_id = Column(String(128), index=True)
+    rating = Column(Integer, default=0)  # 1-5
+    comment = Column(Text, default="")
+    created_at = Column(DateTime, default=now_utc)
+
+
+class DataQueryQualityStats(Base):
+    __tablename__ = "dataquery_quality_stats"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    dq_agent_id = Column(String, ForeignKey("dataquery_agents.dq_agent_id"), nullable=False, index=True)
+    stat_date = Column(String(16), nullable=False, index=True)  # YYYY-MM-DD
+    total_queries = Column(Integer, default=0)
+    success_queries = Column(Integer, default=0)
+    failed_queries = Column(Integer, default=0)
+    avg_duration_ms = Column(Float, default=0.0)
+    avg_feedback_score = Column(Float, default=0.0)
+    updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)

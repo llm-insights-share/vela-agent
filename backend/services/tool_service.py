@@ -7,6 +7,7 @@ from typing import Dict, Any, Optional, List
 import httpx
 
 from models import Tool, ToolType, ToolStatus
+from database import SessionLocal
 
 
 class ToolExecutionService:
@@ -15,6 +16,9 @@ class ToolExecutionService:
         self, tool: Tool, parameters: Dict[str, Any], timeout_seconds: int = 60
     ) -> Dict[str, Any]:
         try:
+            config = tool.config or {}
+            if config.get("adapter") == "dataquery_agent":
+                return await self._execute_dataquery_agent(tool, parameters)
             if tool.tool_type == ToolType.MCP:
                 return await self._execute_mcp(tool, parameters, timeout_seconds)
             elif tool.tool_type == ToolType.RESTFUL:
@@ -25,6 +29,43 @@ class ToolExecutionService:
                 return {"success": False, "error": f"不支持的工具类型: {tool.tool_type}"}
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+    async def _execute_dataquery_agent(self, tool: Tool, parameters: Dict[str, Any]) -> Dict[str, Any]:
+        from services.dataquery_service import dataquery_service
+
+        config = tool.config or {}
+        dq_agent_id = parameters.get("dq_agent_id") or config.get("dq_agent_id", "")
+        question = parameters.get("question") or parameters.get("query") or ""
+        datasource_id = parameters.get("datasource_id")
+        top_k = int(parameters.get("top_k", 100))
+        strict_mode = bool(parameters.get("strict_mode", True))
+        return_sql_only = bool(parameters.get("return_sql_only", False))
+        session_id = parameters.get("session_id", "")
+
+        if not dq_agent_id:
+            return {"success": False, "error": "缺少 dq_agent_id"}
+        if not question:
+            return {"success": False, "error": "缺少 question"}
+
+        db = SessionLocal()
+        try:
+            result = await dataquery_service.query(
+                db=db,
+                dq_agent_id=dq_agent_id,
+                question=question,
+                datasource_id=datasource_id,
+                top_k=top_k,
+                strict_mode=strict_mode,
+                return_sql_only=return_sql_only,
+                session_id=session_id,
+            )
+            if result.get("success"):
+                return {"success": True, "result": json.dumps(result, ensure_ascii=False), "raw": result}
+            return {"success": False, "error": result.get("error", "dataquery 执行失败")}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+        finally:
+            db.close()
 
     def _resolve_mcp_tool_name(self, mcp_tool_name, parameters: Dict[str, Any], fallback: str) -> str:
         if isinstance(mcp_tool_name, list) and len(mcp_tool_name) > 0:

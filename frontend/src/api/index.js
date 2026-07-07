@@ -130,6 +130,42 @@ export const workflowApi = {
   triggerCron: (agentId) => api.post(`/agents/${agentId}/workflow/cron/trigger`),
 }
 
+export const dataQueryApi = {
+  listAgents: (params) => api.get('/dataquery-agents', { params }),
+  createAgent: (data) => api.post('/dataquery-agents', data),
+  getAgent: (id) => api.get(`/dataquery-agents/${id}`),
+  updateAgent: (id, data) => api.put(`/dataquery-agents/${id}`, data),
+  deleteAgent: (id) => api.delete(`/dataquery-agents/${id}`),
+  getDatasources: (id) => api.get(`/dataquery-agents/${id}/datasources`),
+  updateDatasources: (id, data) => api.put(`/dataquery-agents/${id}/datasources`, data),
+  testQuery: (id, data) => api.post(`/dataquery-agents/${id}/test-query`, data),
+  listLogs: (id, params) => api.get(`/dataquery-agents/${id}/logs`, { params }),
+  listQualityStats: (id, params) => api.get(`/dataquery-agents/${id}/quality-stats`, { params }),
+
+  listDictionary: (id, params) => api.get(`/dataquery-agents/${id}/metadata/dictionary`, { params }),
+  createDictionary: (id, data) => api.post(`/dataquery-agents/${id}/metadata/dictionary`, data),
+  updateDictionary: (id, itemId, data) => api.put(`/dataquery-agents/${id}/metadata/dictionary/${itemId}`, data),
+  deleteDictionary: (id, itemId) => api.delete(`/dataquery-agents/${id}/metadata/dictionary/${itemId}`),
+
+  listCodeMappings: (id, params) => api.get(`/dataquery-agents/${id}/metadata/code-mappings`, { params }),
+  createCodeMapping: (id, data) => api.post(`/dataquery-agents/${id}/metadata/code-mappings`, data),
+  updateCodeMapping: (id, itemId, data) => api.put(`/dataquery-agents/${id}/metadata/code-mappings/${itemId}`, data),
+  deleteCodeMapping: (id, itemId) => api.delete(`/dataquery-agents/${id}/metadata/code-mappings/${itemId}`),
+
+  listExamples: (id, params) => api.get(`/dataquery-agents/${id}/knowledge/examples`, { params }),
+  createExample: (id, data) => api.post(`/dataquery-agents/${id}/knowledge/examples`, data),
+  updateExample: (id, itemId, data) => api.put(`/dataquery-agents/${id}/knowledge/examples/${itemId}`, data),
+  deleteExample: (id, itemId) => api.delete(`/dataquery-agents/${id}/knowledge/examples/${itemId}`),
+
+  listTerms: (id, params) => api.get(`/dataquery-agents/${id}/knowledge/terms`, { params }),
+  createTerm: (id, data) => api.post(`/dataquery-agents/${id}/knowledge/terms`, data),
+  updateTerm: (id, itemId, data) => api.put(`/dataquery-agents/${id}/knowledge/terms/${itemId}`, data),
+  deleteTerm: (id, itemId) => api.delete(`/dataquery-agents/${id}/knowledge/terms/${itemId}`),
+
+  listFeedback: (id, params) => api.get(`/dataquery-agents/${id}/knowledge/feedback`, { params }),
+  createFeedback: (id, data) => api.post(`/dataquery-agents/${id}/knowledge/feedback`, data),
+}
+
 export const hitlApi = {
   getPending: (sessionId) => api.get(`/sessions/${sessionId}/pending-approvals`),
   approve: (sessionId, approvalId, data) => api.post(`/sessions/${sessionId}/approvals/${approvalId}/approve`, data),

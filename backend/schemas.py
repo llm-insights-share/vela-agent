@@ -126,7 +126,6 @@ class AgentUpdate(BaseModel):
     agent_type: Optional[str] = None
     composition_config: Optional[Dict[str, Any]] = None
     workflow_definition: Optional[Dict[str, Any]] = None
-    workflow_definition: Optional[Dict[str, Any]] = None
 
 
 # WF: 工作流型相关 Schema
@@ -386,6 +385,265 @@ class SessionResponse(BaseModel):
     messages: List[Dict[str, Any]] = []
     created_at: Optional[datetime] = None
     last_active_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+class DataQueryAgentCreate(BaseModel):
+    name: str = Field(..., min_length=2, max_length=128)
+    description: str = Field(default="", max_length=2048)
+    model_service_id: str = Field(...)
+    planner_model_service_id: Optional[str] = None
+    sql_model_service_id: Optional[str] = None
+    temperature: float = Field(default=0.1, ge=0, le=2)
+    max_tokens: int = Field(default=2048, ge=256, le=32768)
+    default_limit: int = Field(default=200, ge=1, le=5000)
+    timeout_seconds: int = Field(default=30, ge=5, le=300)
+    strict_mode: bool = True
+    allow_cross_datasource: bool = False
+    status: str = Field(default="ACTIVE", pattern="^(ACTIVE|INACTIVE|DEPRECATED)$")
+
+
+class DataQueryAgentUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    model_service_id: Optional[str] = None
+    planner_model_service_id: Optional[str] = None
+    sql_model_service_id: Optional[str] = None
+    temperature: Optional[float] = Field(default=None, ge=0, le=2)
+    max_tokens: Optional[int] = Field(default=None, ge=256, le=32768)
+    default_limit: Optional[int] = Field(default=None, ge=1, le=5000)
+    timeout_seconds: Optional[int] = Field(default=None, ge=5, le=300)
+    strict_mode: Optional[bool] = None
+    allow_cross_datasource: Optional[bool] = None
+    status: Optional[str] = Field(default=None, pattern="^(ACTIVE|INACTIVE|DEPRECATED)$")
+
+
+class DataQueryAgentResponse(BaseModel):
+    dq_agent_id: str
+    name: str
+    description: str = ""
+    model_service_id: str
+    planner_model_service_id: Optional[str] = None
+    sql_model_service_id: Optional[str] = None
+    temperature: float = 0.1
+    max_tokens: int = 2048
+    default_limit: int = 200
+    timeout_seconds: int = 30
+    strict_mode: bool = True
+    allow_cross_datasource: bool = False
+    status: str = "ACTIVE"
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+class DataQueryDatasourceBindingItem(BaseModel):
+    datasource_id: str
+    datasource_name: str = ""
+    db_type: str = Field(default="sqlite", pattern="^(sqlite|postgresql|mysql)$")
+    db_url: str = Field(..., min_length=1, max_length=1024)
+    schema_name: str = ""
+    table_whitelist: List[str] = Field(default_factory=list)
+    sensitive_columns: List[str] = Field(default_factory=list)
+    default_limit: int = Field(default=200, ge=1, le=5000)
+    timeout_seconds: int = Field(default=30, ge=5, le=300)
+    status: str = Field(default="ACTIVE", pattern="^(ACTIVE|INACTIVE|ERROR)$")
+
+
+class DataQueryDatasourceBindingResponse(BaseModel):
+    id: int
+    dq_agent_id: str
+    datasource_id: str
+    datasource_name: str = ""
+    db_type: str = "sqlite"
+    db_url: str = ""
+    schema_name: str = ""
+    table_whitelist: List[str] = []
+    sensitive_columns: List[str] = []
+    default_limit: int = 200
+    timeout_seconds: int = 30
+    status: str = "ACTIVE"
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+class DataQueryDatasourceUpdateRequest(BaseModel):
+    bindings: List[DataQueryDatasourceBindingItem] = Field(default_factory=list)
+
+
+class DataQueryTestQueryRequest(BaseModel):
+    question: str = Field(..., min_length=1)
+    datasource_id: Optional[str] = None
+    top_k: int = Field(default=100, ge=1, le=5000)
+    strict_mode: bool = True
+    return_sql_only: bool = False
+    session_id: Optional[str] = None
+
+
+class DataQueryDictionaryCreate(BaseModel):
+    datasource_id: str
+    table_name: str
+    column_name: str
+    business_name: str = ""
+    description: str = ""
+    value_type: str = "string"
+    synonyms: List[str] = Field(default_factory=list)
+    metric_formula: str = ""
+
+
+class DataQueryDictionaryUpdate(BaseModel):
+    business_name: Optional[str] = None
+    description: Optional[str] = None
+    value_type: Optional[str] = None
+    synonyms: Optional[List[str]] = None
+    metric_formula: Optional[str] = None
+
+
+class DataQueryDictionaryResponse(BaseModel):
+    id: int
+    dq_agent_id: str
+    datasource_id: str
+    table_name: str
+    column_name: str
+    business_name: str = ""
+    description: str = ""
+    value_type: str = "string"
+    synonyms: List[str] = []
+    metric_formula: str = ""
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+class DataCodeMappingCreate(BaseModel):
+    datasource_id: str
+    table_name: str = ""
+    column_name: str
+    code_value: str
+    display_name: str
+    aliases: List[str] = Field(default_factory=list)
+
+
+class DataCodeMappingUpdate(BaseModel):
+    display_name: Optional[str] = None
+    aliases: Optional[List[str]] = None
+
+
+class DataCodeMappingResponse(BaseModel):
+    id: int
+    dq_agent_id: str
+    datasource_id: str
+    table_name: str = ""
+    column_name: str
+    code_value: str
+    display_name: str
+    aliases: List[str] = []
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+class DataQueryExampleCreate(BaseModel):
+    datasource_id: str
+    intent_tag: str = ""
+    nl_question: str = Field(..., min_length=1)
+    sql_template: str = Field(..., min_length=1)
+    variables: Dict[str, Any] = Field(default_factory=dict)
+    explanation: str = ""
+    quality_score: float = 0.0
+    enabled: bool = True
+
+
+class DataQueryExampleUpdate(BaseModel):
+    intent_tag: Optional[str] = None
+    nl_question: Optional[str] = None
+    sql_template: Optional[str] = None
+    variables: Optional[Dict[str, Any]] = None
+    explanation: Optional[str] = None
+    quality_score: Optional[float] = None
+    enabled: Optional[bool] = None
+
+
+class DataQueryExampleResponse(BaseModel):
+    example_id: str
+    dq_agent_id: str
+    datasource_id: str
+    intent_tag: str = ""
+    nl_question: str
+    sql_template: str
+    variables: Dict[str, Any] = {}
+    explanation: str = ""
+    quality_score: float = 0.0
+    enabled: bool = True
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+class DataTermMappingCreate(BaseModel):
+    source_term: str
+    normalized_term: str
+    mapping_type: str = "synonym"
+    priority: int = Field(default=100, ge=1, le=1000)
+    enabled: bool = True
+
+
+class DataTermMappingUpdate(BaseModel):
+    normalized_term: Optional[str] = None
+    mapping_type: Optional[str] = None
+    priority: Optional[int] = Field(default=None, ge=1, le=1000)
+    enabled: Optional[bool] = None
+
+
+class DataTermMappingResponse(BaseModel):
+    id: int
+    dq_agent_id: str
+    source_term: str
+    normalized_term: str
+    mapping_type: str = "synonym"
+    priority: int = 100
+    enabled: bool = True
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+class DataQueryFeedbackCreate(BaseModel):
+    log_id: str
+    rating: int = Field(..., ge=1, le=5)
+    comment: str = ""
+
+
+class DataQueryFeedbackResponse(BaseModel):
+    feedback_id: str
+    log_id: str
+    dq_agent_id: str
+    session_id: str = ""
+    rating: int = 0
+    comment: str = ""
+    created_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+class DataQueryQualityStatsResponse(BaseModel):
+    id: int
+    dq_agent_id: str
+    stat_date: str
+    total_queries: int = 0
+    success_queries: int = 0
+    failed_queries: int = 0
+    avg_duration_ms: float = 0.0
+    avg_feedback_score: float = 0.0
+    updated_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
 

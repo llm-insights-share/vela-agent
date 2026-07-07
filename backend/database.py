@@ -32,7 +32,12 @@ def get_db():
 
 
 def init_db():
-    from models import Agent, AgentVersion, ModelProvider, ModelService, SkillPack, KnowledgeBase
+    from models import (
+        Agent, AgentVersion, ModelProvider, ModelService, SkillPack, KnowledgeBase,
+        DataQueryAgent, DataQueryDatasourceBinding, DataQueryExecutionLog,
+        DataDictionaryItem, DataCodeMapping, DataQueryExample, DataTermMapping,
+        DataQueryFeedback, DataQueryQualityStats,
+    )
     Base.metadata.create_all(bind=engine)
     _migrate_db()
 
