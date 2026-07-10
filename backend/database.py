@@ -35,7 +35,7 @@ def init_db():
     from models import (
         Agent, AgentVersion, ModelProvider, ModelService, SkillPack, KnowledgeBase,
         DataQueryAgent, DataQueryDatasourceBinding, DataQueryExecutionLog,
-        DataDictionaryItem, DataCodeMapping, DataQueryExample, DataTermMapping,
+        DataTableDictionary, DataDictionaryItem, DataCodeMapping, DataQueryExample, DataTermMapping,
         DataQueryFeedback, DataQueryQualityStats,
     )
     Base.metadata.create_all(bind=engine)

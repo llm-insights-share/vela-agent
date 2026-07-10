@@ -1,5 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from sqlalchemy import create_engine, inspect as sa_inspect
 
 from database import get_db
 from models import (
@@ -7,6 +9,7 @@ from models import (
     DataQueryDatasourceBinding,
     DataQueryExecutionLog,
     DataQueryQualityStats,
+    ModelService,
     gen_uuid,
     now_utc,
 )
@@ -49,12 +52,23 @@ def create_dataquery_agent(payload: DataQueryAgentCreate, db: Session = Depends(
     exists = db.query(DataQueryAgent).filter(DataQueryAgent.name == payload.name).first()
     if exists:
         raise HTTPException(status_code=400, detail="DataQueryAgent 名称已存在")
+    if not payload.model_service_id:
+        raise HTTPException(status_code=400, detail="model_service_id 不能为空")
+    model_service = db.query(ModelService).filter(
+        ModelService.model_service_id == payload.model_service_id
+    ).first()
+    if not model_service:
+        raise HTTPException(status_code=400, detail="model_service_id 不存在")
     item = DataQueryAgent(
         dq_agent_id=gen_uuid(),
         **payload.model_dump(),
     )
     db.add(item)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="DataQueryAgent 配置非法，请检查模型服务ID")
     db.refresh(item)
     return DataQueryAgentResponse.model_validate(item)
 
@@ -73,11 +87,24 @@ def update_dataquery_agent(dq_agent_id: str, payload: DataQueryAgentUpdate, db: 
     if not item:
         raise HTTPException(status_code=404, detail="DataQueryAgent 不存在")
     updates = payload.model_dump(exclude_unset=True)
+    if "model_service_id" in updates:
+        model_service_id = updates.get("model_service_id")
+        if not model_service_id:
+            raise HTTPException(status_code=400, detail="model_service_id 不能为空")
+        model_service = db.query(ModelService).filter(
+            ModelService.model_service_id == model_service_id
+        ).first()
+        if not model_service:
+            raise HTTPException(status_code=400, detail="model_service_id 不存在")
     for k, v in updates.items():
         if hasattr(item, k):
             setattr(item, k, v)
     item.updated_at = now_utc()
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="DataQueryAgent 配置非法，请检查模型服务ID")
     db.refresh(item)
     return DataQueryAgentResponse.model_validate(item)
 
@@ -124,7 +151,39 @@ def update_datasource_bindings(
     items = db.query(DataQueryDatasourceBinding).filter(
         DataQueryDatasourceBinding.dq_agent_id == dq_agent_id
     ).order_by(DataQueryDatasourceBinding.id.asc()).all()
+    dataquery_service.invalidate_schema_cache(dq_agent_id)
     return [DataQueryDatasourceBindingResponse.model_validate(x) for x in items]
+
+
+@router.get("/{dq_agent_id}/datasources/{datasource_id}/tables")
+def list_datasource_tables(
+    dq_agent_id: str,
+    datasource_id: str,
+    db: Session = Depends(get_db),
+):
+    binding = db.query(DataQueryDatasourceBinding).filter(
+        DataQueryDatasourceBinding.dq_agent_id == dq_agent_id,
+        DataQueryDatasourceBinding.datasource_id == datasource_id,
+    ).first()
+    if not binding:
+        raise HTTPException(status_code=404, detail="数据源绑定不存在")
+    if not binding.db_url:
+        raise HTTPException(status_code=400, detail="数据源未配置连接串")
+    try:
+        engine = create_engine(
+            dataquery_service.normalize_db_url(binding.db_type, binding.db_url)
+        )
+        inspector = sa_inspect(engine)
+        schema = binding.schema_name or None
+        tables = inspector.get_table_names(schema=schema)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"读取数据源表结构失败: {str(e)}")
+    finally:
+        try:
+            engine.dispose()
+        except Exception:
+            pass
+    return {"datasource_id": datasource_id, "tables": tables}
 
 
 @router.post("/{dq_agent_id}/test-query")

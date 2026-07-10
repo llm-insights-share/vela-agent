@@ -11,7 +11,7 @@ from models import (
     Agent, AgentVersion, AgentStatus, VersionStatus, ChangeType, AgentType,
     AgentSkillBinding, AgentKnowledgeBinding, AgentToolBinding,
     Session as SessionModel, ModelService, ModelProvider, SessionStatus,
-    SkillPack, SkillPackStatus, KnowledgeBase, Tool, ToolStatus,
+    SkillPack, SkillPackStatus, KnowledgeBase, Tool, ToolStatus, ToolType,
     gen_uuid, now_utc
 )
 from schemas import AgentCreate, AgentUpdate, ValidationResult
@@ -980,6 +980,156 @@ class AgentLoop:
             return True
         return False
 
+    def _is_sqlite_mcp_tool(self, tool) -> bool:
+        if getattr(tool, "name", "") == "query_sqlite":
+            return True
+        if getattr(tool, "tool_type", None) != ToolType.MCP:
+            return False
+        config = tool.config or {}
+        blob = json.dumps(config, ensure_ascii=False).lower()
+        return "sqlite" in blob or "mcp-server-sqlite" in blob
+
+    def _should_assess_tool_result(self, tool) -> bool:
+        if getattr(tool, "name", "") == "nl2sql_query":
+            return False
+        return self._is_sqlite_mcp_tool(tool)
+
+    def _heuristic_question_sql_mismatch(self, question: str, tool_args: Dict[str, Any]) -> Optional[str]:
+        sql = (tool_args.get("query") or tool_args.get("question") or "").strip()
+        if not sql:
+            return None
+        low_sql = sql.lower()
+        if not (low_sql.startswith("select") or low_sql.startswith("with")):
+            return None
+
+        from_tables = re.findall(r"\bfrom\s+([a-zA-Z0-9_\.]+)", low_sql)
+        join_tables = re.findall(r"\bjoin\s+([a-zA-Z0-9_\.]+)", low_sql)
+        tables = {t.split(".")[-1].lower() for t in from_tables + join_tables}
+        if not tables:
+            return None
+
+        q = question or ""
+        q_low = q.lower()
+        asks_customer = any(x in q for x in ("客户", "顾客")) or "customer" in q_low
+        asks_product = any(x in q for x in ("产品", "商品")) or "product" in q_low
+
+        customer_tables = {"customer", "customers", "client", "clients", "user", "users"}
+        product_tables = {"product", "products", "sku", "item", "items", "goods"}
+
+        if asks_customer and (tables & product_tables) and not (tables & customer_tables):
+            return f"SQL 查询表 {sorted(tables)} 与问题中的「客户」语义不匹配"
+        if asks_product and (tables & customer_tables) and not (tables & product_tables):
+            return f"SQL 查询表 {sorted(tables)} 与问题中的「产品」语义不匹配"
+        return None
+
+    async def _assess_tool_result_satisfies_question(
+        self, tool_name: str, tool_result: str, tool_args: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        question = (self.user_message or "").strip()
+        if not question or not tool_result:
+            return {"satisfied": True, "reason": "skip-empty"}
+
+        tool_args = tool_args or {}
+        heuristic_reason = self._heuristic_question_sql_mismatch(question, tool_args)
+        if heuristic_reason:
+            return {"satisfied": False, "reason": heuristic_reason}
+
+        from services.model_provider import model_provider_service
+
+        prompt = (
+            "你是工具结果质检员。判断「工具返回」是否已包含足够事实数据来回答「用户问题」。\n"
+            "必须结合工具调用参数（尤其是 SQL）判断查询对象是否与用户问题一致。\n"
+            "仅返回表名/表结构、报错信息、或查询了错误业务对象（如问客户却查产品），均视为未满足。\n\n"
+            f"用户问题：{question}\n"
+            f"工具名称：{tool_name}\n"
+            f"工具调用参数：{json.dumps(tool_args, ensure_ascii=False)[:1500]}\n"
+            f"工具返回：\n{tool_result[:3500]}\n\n"
+            '只输出 JSON：{"satisfied": true或false, "reason": "一句话原因"}'
+        )
+        try:
+            completion = await model_provider_service.chat_completion(
+                provider=self.provider,
+                model_name=self.model_svc.model_name,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=200,
+                timeout_seconds=min(30, self.step_timeout or 60),
+            )
+            content = (
+                completion.get("choices", [{}])[0]
+                .get("message", {})
+                .get("content", "")
+            )
+            m = re.search(r"\{.*\}", content, re.DOTALL)
+            if m:
+                data = json.loads(m.group())
+                return {
+                    "satisfied": bool(data.get("satisfied")),
+                    "reason": str(data.get("reason", "")),
+                }
+        except Exception as exc:
+            return {"satisfied": True, "reason": f"assess-skipped:{exc}"}
+        return {"satisfied": True, "reason": "assess-parse-failed"}
+
+    async def _finalize_tool_success(
+        self, tool, args: Dict[str, Any], result: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        if not result.get("success") or not self._should_assess_tool_result(tool):
+            return result
+
+        preview = result.get("result", "") or ""
+        assessment = await self._assess_tool_result_satisfies_question(
+            tool.name, preview, tool_args=args
+        )
+
+        if assessment.get("satisfied"):
+            return result
+
+        self.thinking_log.append(
+            f"  工具 [{tool.name}] 结果质检未通过: {assessment.get('reason', '')[:200]}"
+        )
+        fallback = await self._try_nl2sql_fallback(tool, args)
+        if fallback and fallback.get("success"):
+            self.thinking_log.append("  质检失败后已通过 nl2sql_query 重新查询")
+            return fallback
+
+        return {
+            "success": False,
+            "error": (
+                f"工具返回未满足用户问题: {assessment.get('reason', '')}"
+                f"；原始返回: {preview[:500]}"
+            ),
+        }
+
+    def _resolve_nl2sql_question(self, args: Dict[str, Any]) -> str:
+        explicit = (args.get("question") or "").strip()
+        if explicit:
+            return explicit
+        raw = (args.get("query") or "").strip()
+        if raw and not raw.lower().startswith(("select", "with")):
+            return raw
+        return (self.user_message or "").strip()
+
+    async def _try_nl2sql_fallback(self, failed_tool, args: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if not self._is_sqlite_mcp_tool(failed_tool):
+            return None
+        nl2sql_tool = next((t for t in self.available_tools if t.name == "nl2sql_query"), None)
+        if not nl2sql_tool:
+            return None
+        question = self._resolve_nl2sql_question(args)
+        if not question:
+            return None
+
+        from services.tool_service import tool_execution_service
+
+        self.thinking_log.append(
+            f"  SQLite 工具 [{failed_tool.name}] 失败，自动切换 nl2sql_query 分析: {question[:120]}"
+        )
+        return await tool_execution_service.execute_tool(
+            nl2sql_tool,
+            {"question": question, "session_id": self.session.session_id},
+            timeout_seconds=self.step_timeout,
+        )
+
     async def _execute_tool_with_retry(self, tool, args: Dict[str, Any]) -> Dict[str, Any]:
         # SGL-CFG-06: HITL 拦截 - 工具调用前检查 require_approval
         tool_id = getattr(tool, "tool_id", None) or tool.name
@@ -1008,12 +1158,37 @@ class AgentLoop:
                 result = await tool_execution_service.execute_tool(
                     tool, args, timeout_seconds=self.step_timeout
                 )
-                return result
+                if result.get("success"):
+                    return await self._finalize_tool_success(tool, args, result)
+
+                last_error = result.get("error") or result.get("result") or "工具执行失败"
+                self.thinking_log.append(
+                    f"  工具 [{tool.name}] 第 {attempt + 1} 次返回失败: {str(last_error)[:200]}"
+                )
+
+                fallback = await self._try_nl2sql_fallback(tool, args)
+                if fallback and fallback.get("success"):
+                    self.thinking_log.append("  已通过 nl2sql_query 降级查询成功")
+                    return fallback
+                if fallback and not fallback.get("success"):
+                    self.thinking_log.append(
+                        f"  nl2sql_query 降级也失败: {str(fallback.get('error', ''))[:200]}"
+                    )
+
+                if attempt < self.tool_retry_count:
+                    if self.tool_retry_backoff == "exponential":
+                        backoff = (2 ** attempt) * 1.0
+                        self.thinking_log.append(f"  指数退避 {backoff}s 后重试...")
+                        await asyncio.sleep(backoff)
+                    continue
+                return {"success": False, "error": last_error}
             except Exception as e:
                 last_error = str(e)
-                self.thinking_log.append(f"  工具 [{tool.name}] 第 {attempt + 1} 次执行失败: {last_error[:200]}")
+                self.thinking_log.append(f"  工具 [{tool.name}] 第 {attempt + 1} 次执行异常: {last_error[:200]}")
+                fallback = await self._try_nl2sql_fallback(tool, args)
+                if fallback and fallback.get("success"):
+                    return fallback
                 if attempt < self.tool_retry_count:
-                    # SGL-CFG-04: 退避策略
                     if self.tool_retry_backoff == "exponential":
                         backoff = (2 ** attempt) * 1.0
                         self.thinking_log.append(f"  指数退避 {backoff}s 后重试...")

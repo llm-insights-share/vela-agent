@@ -11,6 +11,25 @@ from database import SessionLocal
 
 
 class ToolExecutionService:
+    _MCP_ERROR_PATTERNS = (
+        "database error:",
+        "error:",
+        "no such table",
+        "syntax error",
+        "sql error",
+        "only select queries are allowed",
+        "permission denied",
+        "access denied",
+    )
+
+    @staticmethod
+    def _mcp_result_indicates_failure(result: Dict[str, Any], text: str) -> bool:
+        if result.get("isError"):
+            return True
+        low = (text or "").strip().lower()
+        if not low:
+            return False
+        return any(pat in low for pat in ToolExecutionService._MCP_ERROR_PATTERNS)
 
     async def execute_tool(
         self, tool: Tool, parameters: Dict[str, Any], timeout_seconds: int = 60
@@ -167,6 +186,14 @@ class ToolExecutionService:
                 return {"success": False, "error": f"MCP 调用失败: {call_data['error']}"}
 
             result = call_data.get("result", {})
+            if result.get("isError"):
+                err_text = ""
+                for item in result.get("content", []):
+                    if isinstance(item, dict) and item.get("type") == "text":
+                        err_text = item.get("text", "")
+                        break
+                return {"success": False, "error": err_text or "MCP 工具返回错误"}
+
             content = result.get("content", [])
             text_parts = []
             for item in content:
@@ -175,9 +202,13 @@ class ToolExecutionService:
                 elif isinstance(item, str):
                     text_parts.append(item)
 
+            result_text = "\n".join(text_parts) if text_parts else json.dumps(result)
+            if self._mcp_result_indicates_failure(result, result_text):
+                return {"success": False, "error": result_text}
+
             return {
                 "success": True,
-                "result": "\n".join(text_parts) if text_parts else json.dumps(result),
+                "result": result_text,
             }
 
         except asyncio.TimeoutError:

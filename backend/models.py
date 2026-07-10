@@ -400,6 +400,20 @@ class DataQueryExecutionLog(Base):
     created_at = Column(DateTime, default=now_utc)
 
 
+class DataTableDictionary(Base):
+    __tablename__ = "dataquery_table_dictionary"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    dq_agent_id = Column(String, ForeignKey("dataquery_agents.dq_agent_id"), nullable=False, index=True)
+    datasource_id = Column(String(128), nullable=False, index=True)
+    table_name = Column(String(128), nullable=False, index=True)
+    business_name = Column(String(256), default="")
+    description = Column(Text, default="")
+    synonyms = Column(JSON, default=list)
+    created_at = Column(DateTime, default=now_utc)
+    updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)
+
+
 class DataDictionaryItem(Base):
     __tablename__ = "dataquery_dictionary_items"
 

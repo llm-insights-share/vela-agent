@@ -10,10 +10,81 @@ from schemas import (
     DataQueryDictionaryCreate,
     DataQueryDictionaryResponse,
     DataQueryDictionaryUpdate,
+    DataSchemaColumnBatchUpsert,
+    DataSchemaColumnItem,
+    DataSchemaTableItem,
+    DataTableDictionaryResponse,
+    DataTableDictionaryUpsert,
     PaginatedResponse,
 )
+from services.dataquery_service import dataquery_service
 
 router = APIRouter(prefix="/api/v1/dataquery-agents/{dq_agent_id}/metadata", tags=["dataquery-metadata"])
+
+
+@router.get("/schema/tables", response_model=list[DataSchemaTableItem])
+def list_schema_tables(
+    dq_agent_id: str,
+    datasource_id: str = Query(...),
+    db: Session = Depends(get_db),
+):
+    try:
+        items = dataquery_service.list_schema_tables(db, dq_agent_id, datasource_id)
+        return [DataSchemaTableItem.model_validate(x) for x in items]
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"读取数据源表结构失败: {str(e)}")
+
+
+@router.get("/schema/tables/{table_name}/columns", response_model=list[DataSchemaColumnItem])
+def list_schema_columns(
+    dq_agent_id: str,
+    table_name: str,
+    datasource_id: str = Query(...),
+    db: Session = Depends(get_db),
+):
+    try:
+        items = dataquery_service.list_schema_columns(db, dq_agent_id, datasource_id, table_name)
+        return [DataSchemaColumnItem.model_validate(x) for x in items]
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"读取表字段失败: {str(e)}")
+
+
+@router.put("/table-dictionary", response_model=DataTableDictionaryResponse)
+def upsert_table_dictionary(
+    dq_agent_id: str,
+    payload: DataTableDictionaryUpsert,
+    db: Session = Depends(get_db),
+):
+    item = dataquery_service.upsert_table_dictionary(
+        db=db,
+        dq_agent_id=dq_agent_id,
+        datasource_id=payload.datasource_id,
+        table_name=payload.table_name,
+        business_name=payload.business_name,
+        description=payload.description,
+        synonyms=payload.synonyms,
+    )
+    return DataTableDictionaryResponse.model_validate(item)
+
+
+@router.put("/dictionary/batch")
+def batch_upsert_dictionary(
+    dq_agent_id: str,
+    payload: DataSchemaColumnBatchUpsert,
+    db: Session = Depends(get_db),
+):
+    count = dataquery_service.batch_upsert_column_dictionary(
+        db=db,
+        dq_agent_id=dq_agent_id,
+        datasource_id=payload.datasource_id,
+        table_name=payload.table_name,
+        columns=[c.model_dump() for c in payload.columns],
+    )
+    return {"success": True, "updated": count}
 
 
 @router.get("/dictionary", response_model=PaginatedResponse)

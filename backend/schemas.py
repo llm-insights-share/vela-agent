@@ -484,6 +484,55 @@ class DataQueryTestQueryRequest(BaseModel):
     session_id: Optional[str] = None
 
 
+class DataTableDictionaryUpsert(BaseModel):
+    datasource_id: str
+    table_name: str
+    business_name: str = ""
+    description: str = ""
+    synonyms: List[str] = Field(default_factory=list)
+
+
+class DataTableDictionaryResponse(BaseModel):
+    id: int
+    dq_agent_id: str
+    datasource_id: str
+    table_name: str
+    business_name: str = ""
+    description: str = ""
+    synonyms: List[str] = []
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+class DataSchemaTableItem(BaseModel):
+    table_name: str
+    db_comment: str = ""
+    business_name: str = ""
+    description: str = ""
+    synonyms: List[str] = Field(default_factory=list)
+
+
+class DataSchemaColumnItem(BaseModel):
+    column_name: str
+    db_type: str = ""
+    db_comment: str = ""
+    business_name: str = ""
+    description: str = ""
+
+
+class DataSchemaColumnBatchItem(BaseModel):
+    column_name: str
+    description: str = ""
+
+
+class DataSchemaColumnBatchUpsert(BaseModel):
+    datasource_id: str
+    table_name: str
+    columns: List[DataSchemaColumnBatchItem] = Field(default_factory=list)
+
+
 class DataQueryDictionaryCreate(BaseModel):
     datasource_id: str
     table_name: str

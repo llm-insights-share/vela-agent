@@ -43,6 +43,7 @@ def create_example(dq_agent_id: str, payload: DataQueryExampleCreate, db: Sessio
     db.add(item)
     db.commit()
     db.refresh(item)
+    dataquery_service.invalidate_example_index(dq_agent_id)
     return DataQueryExampleResponse.model_validate(item)
 
 
@@ -59,6 +60,7 @@ def update_example(dq_agent_id: str, example_id: str, payload: DataQueryExampleU
         setattr(item, k, v)
     db.commit()
     db.refresh(item)
+    dataquery_service.invalidate_example_index(dq_agent_id)
     return DataQueryExampleResponse.model_validate(item)
 
 
@@ -72,6 +74,7 @@ def delete_example(dq_agent_id: str, example_id: str, db: Session = Depends(get_
         raise HTTPException(status_code=404, detail="样例不存在")
     db.delete(item)
     db.commit()
+    dataquery_service.invalidate_example_index(dq_agent_id)
     return {"success": True}
 
 

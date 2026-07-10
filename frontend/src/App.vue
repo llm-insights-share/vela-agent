@@ -35,10 +35,6 @@
           <BookOutlined />
           <span>知识库</span>
         </a-menu-item>
-        <a-menu-item key="/settings">
-          <SettingOutlined />
-          <span>系统配置</span>
-        </a-menu-item>
         <a-menu-item key="/data-access">
           <DatabaseOutlined />
           <span>数据访问</span>
@@ -46,6 +42,10 @@
         <a-menu-item key="/tools">
           <ToolOutlined />
           <span>工具</span>
+        </a-menu-item>
+        <a-menu-item key="/settings">
+          <SettingOutlined />
+          <span>系统配置</span>
         </a-menu-item>
       </a-menu>
     </a-layout-sider>
