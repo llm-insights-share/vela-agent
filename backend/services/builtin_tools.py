@@ -535,7 +535,22 @@ async def _execute_tavily_search(args: Dict[str, Any]) -> Dict[str, Any]:
 
     max_results = min(int(args.get("max_results", 5)), 10)
     search_depth = args.get("search_depth", "basic")
+    if search_depth not in ("basic", "advanced"):
+        search_depth = "basic"
     include_answer = args.get("include_answer", True)
+    # 规范化 include_answer：模型可能传入字符串，Tavily 只接受 bool / 'basic' / 'advanced'
+    if isinstance(include_answer, str):
+        low = include_answer.strip().lower()
+        if low in ("true", "1", "yes"):
+            include_answer = True
+        elif low in ("false", "0", "no"):
+            include_answer = False
+        elif low in ("basic", "advanced"):
+            include_answer = low
+        else:
+            include_answer = True
+    elif not isinstance(include_answer, bool):
+        include_answer = True
 
     request_body = {
         "api_key": api_key,

@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent记忆闭环系统设计 · Vela·织帆</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;600;700;900&family=Noto+Sans+SC:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --night:#0a0e1a; --surface:#111830; --surface-2:#151d3a; --surface-3:#0d1226;
+    --border:rgba(140,165,230,0.14); --border-strong:rgba(140,165,230,0.28);
+    --text:#e8ecf5; --text-muted:#8b93ab; --text-faint:#5c6482;
+    --blue:#1a6fff; --cyan:#00c4ff; --gold:#f5c842;
+    --font-display:'Noto Serif SC', serif; --font-body:'Noto Sans SC', sans-serif; --font-mono:'JetBrains Mono', monospace;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  html{scroll-behavior:smooth;}
+  body{background:var(--night); color:var(--text); font-family:var(--font-body); font-size:15.5px; line-height:1.75; -webkit-font-smoothing:antialiased;}
+  ::selection{background:rgba(26,111,255,0.35); color:#fff;}
+  a{color:var(--cyan); text-decoration:none;} a:hover{text-decoration:underline;}
+  code,.mono{font-family:var(--font-mono);}
+
+  .hero{position:relative; padding:70px 32px 50px; overflow:hidden; border-bottom:1px solid var(--border);
+    background:radial-gradient(ellipse 900px 420px at 15% -10%, rgba(26,111,255,0.22), transparent 60%),
+               radial-gradient(ellipse 700px 380px at 100% 0%, rgba(0,196,255,0.14), transparent 55%), var(--night);}
+  .hero-inner{max-width:900px; margin:0 auto;}
+  .eyebrow{display:inline-flex; align-items:center; gap:8px; font-family:var(--font-mono); font-size:12px; letter-spacing:0.14em; color:var(--cyan); text-transform:uppercase; margin-bottom:22px;}
+  .eyebrow::before{content:''; width:22px; height:1px; background:var(--cyan);}
+  .hero h1{font-family:var(--font-display); font-weight:700; color:#fff; font-size:clamp(26px,4vw,40px); line-height:1.3; margin-bottom:16px;}
+  .hero h1 em{font-style:normal; color:transparent; background:linear-gradient(90deg,var(--cyan),var(--blue)); -webkit-background-clip:text; background-clip:text;}
+  .hero p.lede{font-size:16px; color:var(--text-muted); max-width:660px; margin-bottom:22px;}
+  .hero-meta{display:flex; flex-wrap:wrap; gap:10px 22px; font-family:var(--font-mono); font-size:12.5px; color:var(--text-faint); padding-top:20px; border-top:1px solid var(--border);}
+  .hero-meta b{color:var(--text-muted); font-weight:500;}
+
+  .layout{display:flex; max-width:1280px; margin:0 auto;}
+  .sidebar{width:250px; flex-shrink:0; position:sticky; top:0; align-self:flex-start; height:100vh; overflow-y:auto; padding:28px 18px 60px 32px; border-right:1px solid var(--border);}
+  .sidebar a{display:block; padding:7px 10px; font-size:13.5px; color:var(--text-muted); border-left:2px solid transparent; border-radius:2px; margin-bottom:2px;}
+  .sidebar a:hover{color:var(--text); background:var(--surface); text-decoration:none;}
+  .sidebar a.active{color:#fff; border-left-color:var(--cyan); background:var(--surface);}
+  .sidebar .snum{font-family:var(--font-mono); color:var(--gold); margin-right:6px;}
+
+  .nav-toggle-checkbox{display:none;} .nav-toggle-btn,.mobile-topbar{display:none;}
+
+  main{flex:1; min-width:0; padding:52px 44px 100px;}
+  section{margin-bottom:64px; scroll-margin-top:20px;}
+  section h2{font-family:var(--font-display); font-weight:700; color:#fff; font-size:25px; margin-bottom:6px; display:flex; align-items:baseline; gap:12px;}
+  section .h2-tag{font-family:var(--font-mono); font-size:11px; color:var(--blue); background:rgba(26,111,255,0.12); border:1px solid rgba(26,111,255,0.3); padding:3px 8px; border-radius:20px; font-weight:600;}
+  section .h2-sub{color:var(--text-muted); font-size:14.5px; margin:10px 0 24px; max-width:720px;}
+  h3{font-family:var(--font-display); font-size:17.5px; color:var(--text); margin:26px 0 10px; font-weight:600;}
+  h4{font-size:14.5px; color:var(--cyan); margin:20px 0 8px; font-weight:600; font-family:var(--font-mono);}
+  p{margin-bottom:14px; color:#c9d0e3; max-width:760px;}
+  strong{color:var(--text); font-weight:600;}
+  ul,ol{margin:0 0 16px 22px; max-width:740px;}
+  li{margin-bottom:7px; color:#c9d0e3;}
+  li::marker{color:var(--cyan);}
+
+  .callout{background:var(--surface); border:1px solid var(--border-strong); border-left:3px solid var(--gold); border-radius:6px; padding:18px 20px; margin:18px 0 22px; max-width:760px;}
+  .callout h4{margin-top:0; color:var(--gold);}
+  .callout ul{margin-bottom:0;}
+  .callout p:last-child{margin-bottom:0;}
+
+  .table-scroll{overflow-x:auto; margin:18px 0 26px; border:1px solid var(--border); border-radius:8px;}
+  table{border-collapse:collapse; width:100%; min-width:760px; font-size:12.8px;}
+  thead th{background:var(--surface-2); color:var(--gold); text-align:left; padding:10px 13px; font-weight:600; font-family:var(--font-mono); font-size:11px; white-space:nowrap; border-bottom:1px solid var(--border-strong);}
+  tbody td{padding:10px 13px; border-bottom:1px solid var(--border); color:#c9d0e3; vertical-align:top;}
+  tbody tr:last-child td{border-bottom:none;}
+  tbody td:first-child{color:#fff; font-weight:600;}
+  tbody tr:hover td{background:rgba(26,111,255,0.05);}
+  .yes{color:var(--cyan); font-weight:700;} .no{color:var(--text-faint);}
+  .row-excluded td:first-child{color:var(--text-muted); font-weight:500;}
+
+  pre{background:var(--surface-3); border:1px solid var(--border); border-radius:8px; padding:16px 18px; overflow-x:auto; margin:14px 0 22px; max-width:820px;}
+  pre code{font-family:var(--font-mono); font-size:12.3px; line-height:1.65; color:#d6dcee;}
+  .kw{color:var(--cyan);} .st{color:var(--gold);} .cm{color:var(--text-faint); font-style:italic;} .fn{color:#9ecbff;}
+
+  .loop-wrap{background:var(--surface-3); border:1px solid var(--border); border-radius:10px; padding:22px 20px 16px; margin:22px 0 28px; max-width:920px; overflow-x:auto;}
+  .loop-svg{width:100%; min-width:640px; height:auto; display:block;}
+  .svg-node{fill:var(--surface); stroke:var(--border-strong); stroke-width:1;}
+  .svg-console{fill:rgba(245,200,66,0.07); stroke:rgba(245,200,66,0.5); stroke-width:1.2;}
+  .svg-title{font-family:'Noto Serif SC',serif; font-size:17px; font-weight:700; fill:#fff;}
+  .svg-sub{font-family:'JetBrains Mono',monospace; font-size:10.5px; fill:var(--text-faint);}
+  .svg-arc-label,.svg-small-label{font-family:'JetBrains Mono',monospace; font-size:10px; fill:var(--text-faint);}
+
+  .quad-grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:14px; margin:20px 0 26px; max-width:960px;}
+  .quad-card{background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:16px 18px;}
+  .quad-card .tag{font-family:var(--font-mono); font-size:10.5px; color:var(--night); background:var(--cyan); display:inline-block; padding:2px 7px; border-radius:3px; font-weight:700; margin-bottom:8px;}
+  .quad-card.console .tag{background:var(--gold);}
+  .quad-card h5{font-size:14px; color:#fff; margin-bottom:5px; font-weight:600;}
+  .quad-card p{font-size:12.8px; color:var(--text-muted); margin:0;}
+
+  .scenario{background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:18px 20px; margin:16px 0; max-width:820px;}
+  .scenario h5{font-family:var(--font-mono); font-size:11.5px; color:var(--gold); text-transform:uppercase; letter-spacing:0.05em; margin-bottom:10px;}
+  .scenario p{margin-bottom:0; font-size:13.6px;}
+  .scenario .step{color:var(--cyan); font-weight:600;}
+
+  footer{border-top:1px solid var(--border); padding:32px 44px 60px; max-width:1280px; margin:0 auto; font-family:var(--font-mono); font-size:12px; color:var(--text-faint); display:flex; justify-content:space-between; flex-wrap:wrap; gap:10px;}
+
+  @media (max-width:900px){
+    .layout{flex-direction:column;}
+    .mobile-topbar{display:flex; align-items:center; justify-content:space-between; position:sticky; top:0; z-index:40; background:rgba(10,14,26,0.96); backdrop-filter:blur(6px); border-bottom:1px solid var(--border); padding:14px 20px;}
+    .mobile-topbar .brand{font-family:var(--font-mono); font-size:12.5px; color:var(--cyan);}
+    .nav-toggle-btn{display:inline-flex; align-items:center; gap:6px; font-family:var(--font-mono); font-size:12px; color:var(--text); border:1px solid var(--border-strong); padding:7px 12px; border-radius:20px; cursor:pointer;}
+    .sidebar{position:fixed; top:0; left:-100%; width:82%; max-width:300px; height:100vh; background:var(--night); z-index:60; transition:left .28s ease; border-right:1px solid var(--border-strong); padding-top:70px;}
+    .nav-backdrop{display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55); z-index:50;}
+    .nav-toggle-checkbox:checked ~ .sidebar{left:0;}
+    .nav-toggle-checkbox:checked ~ .nav-backdrop{display:block;}
+    main{padding:32px 20px 80px;}
+    .hero{padding:40px 20px 32px;}
+    footer{padding:26px 20px 50px; flex-direction:column;}
+  }
+</style>
+</head>
+<body>
+
+<input type="checkbox" id="nav-toggle" class="nav-toggle-checkbox">
+<div class="mobile-topbar"><span class="brand">VELA · 织帆</span><label for="nav-toggle" class="nav-toggle-btn">☰ 目录</label></div>
+<label for="nav-toggle" class="nav-backdrop"></label>
+
+<header class="hero">
+  <div class="hero-inner">
+    <div class="eyebrow">Vela · 织帆 · 技术参考文档</div>
+    <h1>Agent记忆<em>闭环系统设计</em><br>自我记录 · 自我处理 · 自我检索 · 用户查询与修改</h1>
+    <p class="lede">承接此前梳理的25项记忆清单,本设计先筛选出真正需要Agent自动写入、自动使用的部分,构建一个不依赖人工触发的闭环;其余需要人工审批或仅供审计使用的记忆,由独立的"用户查询与修改"通道承载——两条通道共用同一套 MemoryGateway / HitlGate / PermissionChecker / AuditLogger 治理组件。</p>
+    <div class="hero-meta">
+      <span><b>承接文档:</b> 智能体记忆系统实现指南 · Agent记忆清单(25项)</span>
+      <span><b>版本:</b> v1.0</span>
+      <span><b>更新:</b> 2026-07</span>
+    </div>
+  </div>
+</header>
+
+<div class="layout">
+  <nav class="sidebar">
+    <a href="#scope"><span class="snum">01</span>范围界定:哪些记忆项进入闭环</a>
+    <a href="#architecture"><span class="snum">02</span>总体架构:四个子系统</a>
+    <a href="#record"><span class="snum">03</span>自我记录 Self-Record</a>
+    <a href="#process"><span class="snum">04</span>自我处理 Self-Process</a>
+    <a href="#retrieve"><span class="snum">05</span>自我检索 Self-Retrieval</a>
+    <a href="#console"><span class="snum">06</span>用户查询与修改</a>
+    <a href="#walkthrough"><span class="snum">07</span>端到端闭环示例</a>
+  </nav>
+
+  <main>
+
+    <section id="scope">
+      <h2><span class="h2-tag">01</span>范围界定:哪些记忆项进入闭环</h2>
+      <p class="h2-sub">判定标准是两个条件同时成立:<strong>自动记录</strong>(写入不需要人工审批或人工创作)与<strong>自动使用</strong>(检索/消费由Agent自身或其自动化子系统完成,而非主要面向人工)。只满足其中一个条件的记忆项,不进入闭环,转由第06节的用户查询与修改通道承载。</p>
+
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>记忆项</th><th>层级</th><th>自动记录</th><th>自动使用</th><th>纳入闭环</th><th>排除原因(如适用)</th></tr></thead>
+          <tbody>
+            <tr><td>任务目标与执行计划</td><td>L0</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td><td>—</td></tr>
+            <tr><td>会话消息缓冲区</td><td>L0</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td><td>—</td></tr>
+            <tr><td>工具调用栈与中间结果</td><td>L0</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td><td>—</td></tr>
+            <tr class="row-excluded"><td>草稿态记忆提案</td><td>L0</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td><td>存在目的即为人工复核,非Agent自用</td></tr>
+            <tr class="row-excluded"><td>待处理HITL请求上下文</td><td>L0</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td><td>面向人工审批界面</td></tr>
+            <tr><td>完整交互转录</td><td>L1</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td><td>自动供自我处理消费,非直接注入prompt</td></tr>
+            <tr><td>工具调用日志</td><td>L1</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td><td>—</td></tr>
+            <tr><td>用户反馈/纠错事件</td><td>L1</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td><td>—</td></tr>
+            <tr class="row-excluded"><td>任务执行轨迹快照</td><td>L1</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td><td>仅供人工调试与审计回放</td></tr>
+            <tr><td>异常与失败事件</td><td>L1</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td><td>自动聚合入工具画像;告警面向人工为附带效果</td></tr>
+            <tr><td>用户偏好档案</td><td>L2</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td><td>—</td></tr>
+            <tr><td>组织与业务实体图谱</td><td>L2</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td><td>个别高敏感实例仍可能升级HITL,不改变整体分类</td></tr>
+            <tr class="row-excluded"><td>领域知识事实(制度/规则库)</td><td>L2</td><td class="no">✗</td><td class="yes">✓</td><td class="no">✗</td><td>写入强制HITL审批</td></tr>
+            <tr><td>项目/任务上下文摘要</td><td>L2</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td><td>—</td></tr>
+            <tr><td>工具能力与成功模式</td><td>L2</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td><td>—</td></tr>
+            <tr><td>历史结论与经验摘要</td><td>L2</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td><td>—</td></tr>
+            <tr class="row-excluded"><td>系统提示词/角色设定</td><td>L3</td><td class="no">✗</td><td class="yes">✓</td><td class="no">✗</td><td>人工设计与审批后生效</td></tr>
+            <tr class="row-excluded"><td>反思蒸馏规则</td><td>L3</td><td class="no">✗</td><td class="yes">✓</td><td class="no">✗</td><td>候选自动生成,提交需HITL复核</td></tr>
+            <tr class="row-excluded"><td>经审核示例库</td><td>L3</td><td class="no">✗</td><td class="yes">✓</td><td class="no">✗</td><td>人工标注复核后纳入</td></tr>
+            <tr class="row-excluded"><td>工作流/SOP模板</td><td>L3</td><td class="no">✗</td><td class="yes">✓</td><td class="no">✗</td><td>人工录入并审批生效</td></tr>
+            <tr class="row-excluded"><td>记忆操作审计日志</td><td>L4</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td><td>仅供审计查询,不参与Agent检索</td></tr>
+            <tr class="row-excluded"><td>访问控制决策记录</td><td>L4</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td><td>供安全团队分析,不参与Agent检索</td></tr>
+            <tr class="row-excluded"><td>凭证签发引用记录</td><td>L4</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td><td>仅供安全审计,不参与Agent检索</td></tr>
+            <tr class="row-excluded"><td>HITL复核结论</td><td>L4</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td><td>供合规报告,不直接参与Agent推理</td></tr>
+            <tr><td>溯源链记录</td><td>L4</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td><td>—</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout">
+        <h4>三个边界判断的依据</h4>
+        <ul>
+          <li><strong>完整交互转录</strong>:虽不直接注入prompt,但被自我处理管线自动消费蒸馏,"自动使用"不要求是实时推理输入,自动化内部消费同样算数。</li>
+          <li><strong>异常与失败事件</strong>:兼具面向人工的告警与面向自动聚合(工具能力画像)双重用途,只要后者存在且自动运行,即计入闭环。</li>
+          <li><strong>组织与业务实体图谱</strong>:多数实例走自动提交,少数高敏感属性变更(如关联交易关系)在同一处理流程内部升级HITL——这是风险分级的正常分支,不代表整个记忆项需要被排除。</li>
+        </ul>
+      </div>
+      <p><strong>结果:13/25 项进入自动闭环</strong>,其余12项要么写入必须经人工创作/审批,要么消费主要面向人工审计——这12项由第06节的用户查询与修改通道统一承载。</p>
+    </section>
+
+    <section id="architecture">
+      <h2><span class="h2-tag">02</span>总体架构:四个子系统</h2>
+      <p class="h2-sub">自我记录→自我处理→自我检索构成一个不依赖人工触发的闭环,检索结果又会影响下一轮交互产生新的记录,如此循环;用户查询与修改是与之并行的独立通道,面向全部25项记忆,任何修改都复用同一条 MemoryGateway.write() 治理管线,只是发起方(actor)从Agent换成人类。</p>
+
+      <div class="loop-wrap">
+        <svg class="loop-svg" viewBox="0 0 900 400" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <marker id="arrow-c" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="var(--cyan)"></path>
+            </marker>
+          </defs>
+
+          <path d="M 605 90 C 605 18, 105 18, 105 90" fill="none" stroke="var(--cyan)" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#arrow-c)"></path>
+          <text x="355" y="30" text-anchor="middle" class="svg-arc-label">反馈影响下一轮自我记录</text>
+
+          <line x1="200" y1="130" x2="258" y2="130" stroke="var(--cyan)" stroke-width="1.6" marker-end="url(#arrow-c)"></line>
+          <text x="229" y="118" text-anchor="middle" class="svg-small-label">候选生成</text>
+          <line x1="450" y1="130" x2="508" y2="130" stroke="var(--cyan)" stroke-width="1.6" marker-end="url(#arrow-c)"></line>
+          <text x="479" y="118" text-anchor="middle" class="svg-small-label">触发检索</text>
+
+          <rect x="10" y="90" width="190" height="80" rx="10" class="svg-node"></rect>
+          <text x="105" y="122" text-anchor="middle" class="svg-title">自我记录</text>
+          <text x="105" y="144" text-anchor="middle" class="svg-sub">Self-Record</text>
+
+          <rect x="260" y="90" width="190" height="80" rx="10" class="svg-node"></rect>
+          <text x="355" y="122" text-anchor="middle" class="svg-title">自我处理</text>
+          <text x="355" y="144" text-anchor="middle" class="svg-sub">Self-Process</text>
+
+          <rect x="510" y="90" width="190" height="80" rx="10" class="svg-node"></rect>
+          <text x="605" y="122" text-anchor="middle" class="svg-title">自我检索</text>
+          <text x="605" y="144" text-anchor="middle" class="svg-sub">Self-Retrieval</text>
+
+          <line x1="355" y1="170" x2="355" y2="258" stroke="var(--gold)" stroke-width="1.4" stroke-dasharray="3 4"></line>
+          <line x1="605" y1="170" x2="605" y2="258" stroke="var(--gold)" stroke-width="1.4" stroke-dasharray="3 4"></line>
+
+          <rect x="260" y="260" width="440" height="82" rx="10" class="svg-console"></rect>
+          <text x="480" y="293" text-anchor="middle" class="svg-title" fill="var(--gold)">用户查询与修改</text>
+          <text x="480" y="316" text-anchor="middle" class="svg-sub">复核候选 · 修正结论 · 全量审计查阅</text>
+        </svg>
+      </div>
+
+      <div class="quad-grid">
+        <div class="quad-card"><span class="tag">03</span><h5>自我记录</h5><p>无条件捕获原始交互事件,不做语义判断,对应13项中的L0/L1部分。</p></div>
+        <div class="quad-card"><span class="tag">04</span><h5>自我处理</h5><p>按记忆项类型分派到对应策略,产出候选;提交是否自动取决于风险分级,与处理本身是否自动运行是两回事。</p></div>
+        <div class="quad-card"><span class="tag">05</span><h5>自我检索</h5><p>只读取已提交(自动或经人工批准)的内容,按触发条件决定何时检索,避免每步都全量召回。</p></div>
+        <div class="quad-card console"><span class="tag">06</span><h5>用户查询与修改</h5><p>面向全部25项的人工通道,复用同一治理管线,修改已提交事实遵循"旧事实失效、新事实写入"。</p></div>
+      </div>
+    </section>
+
+    <section id="record">
+      <h2><span class="h2-tag">03</span>自我记录 Self-Record</h2>
+      <p class="h2-sub">自我记录只负责无条件捕获,不判断内容是否重要、是否会被后续使用——这一层不做任何语义决策,只保证"发生过的事情不丢失"。</p>
+
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>记忆项</th><th>触发事件</th><th>写入模式</th></tr></thead>
+          <tbody>
+            <tr><td>任务目标与执行计划</td><td>ReActEngine完成任务分解</td><td>同步写入工作记忆状态</td></tr>
+            <tr><td>会话消息缓冲区</td><td>每一轮用户/Agent消息产生</td><td>同步追加</td></tr>
+            <tr><td>工具调用栈与中间结果</td><td>MCP/A2A工具调用发起与返回</td><td>同步写入调用栈</td></tr>
+            <tr><td>完整交互转录</td><td>会话/任务结束</td><td>异步归档(不阻塞主循环)</td></tr>
+            <tr><td>工具调用日志</td><td>每次工具调用完成</td><td>异步落盘</td></tr>
+            <tr><td>用户反馈/纠错事件</td><td>用户纠正/点赞点踩/修改输出</td><td>同步捕获,异步落盘</td></tr>
+            <tr><td>任务执行轨迹快照</td><td>每个Thought/Action/Observation节点</td><td>异步归档(仅供调试,不进入下游处理)</td></tr>
+            <tr><td>异常与失败事件</td><td>工具失败/LLM拒绝/超时/策略拒绝</td><td>同步捕获并同步触发告警,异步落盘</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h4>MemoryRecorder(伪代码)</h4>
+      <pre><code><span class="kw">class</span> <span class="fn">MemoryRecorder</span>:
+    <span class="cm">"""自我记录:监听运行时事件,无条件写入L0/L1,不做语义判断"""</span>
+
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, episode_store: EpisodeStore, working_state: WorkingMemoryStore):
+        self.episode_store = episode_store
+        self.working_state = working_state
+        <span class="cm"># 事件类型 -> 处理函数 的静态映射;新增记忆项只需注册,不改动分发逻辑</span>
+        self._routes = {
+            EventType.TASK_PLANNED:     self._to_working(<span class="st">"任务目标与执行计划"</span>),
+            EventType.MESSAGE_TURN:     self._to_working(<span class="st">"会话消息缓冲区"</span>),
+            EventType.TOOL_INVOKED:     self._to_working(<span class="st">"工具调用栈与中间结果"</span>),
+            EventType.SESSION_CLOSED:   self._archive(<span class="st">"完整交互转录"</span>),
+            EventType.TOOL_COMPLETED:   self._append_log(<span class="st">"工具调用日志"</span>),
+            EventType.USER_CORRECTED:   self._append_log(<span class="st">"用户反馈/纠错事件"</span>),
+            EventType.STEP_COMPLETED:   self._append_log(<span class="st">"任务执行轨迹快照"</span>),
+            EventType.EXCEPTION_RAISED: self._append_log(<span class="st">"异常与失败事件"</span>),
+        }
+
+    <span class="kw">def</span> <span class="fn">on_event</span>(self, event: RuntimeEvent) -> <span class="kw">None</span>:
+        handler = self._routes.get(event.type)
+        <span class="kw">if</span> handler:
+            handler(event)  <span class="cm"># 工作记忆同步写入;情景日志异步落盘,不阻塞主循环</span></code></pre>
+    </section>
+
+    <section id="process">
+      <h2><span class="h2-tag">04</span>自我处理 Self-Process</h2>
+      <p class="h2-sub"><strong>处理与提交是两个独立环节</strong>:自我处理对所有记忆类型统一自动运行,产出候选;候选是否自动提交还是需要人工复核,由 MemoryGateway.write() 内部的风险分级决定,与"处理这一步是否自动"无关——这正是"反思蒸馏规则""领域知识事实"这类项目虽然处理过程自动、却仍不计入闭环的原因。</p>
+
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>原始输入</th><th>处理策略类型</th><th>处理逻辑概述</th><th>输出记忆项</th><th>提交路径</th></tr></thead>
+          <tbody>
+            <tr><td>会话缓冲区+交互转录</td><td>实体抽取</td><td>LLM从多轮对话中识别稳定偏好表达</td><td>用户偏好档案(L2)</td><td>低风险,自动提交</td></tr>
+            <tr><td>交互转录+工具日志</td><td>实体抽取</td><td>识别新出现的组织/业务实体及关系</td><td>组织与业务实体图谱(L2)</td><td>自动提交(高敏感属性个例升级HITL)</td></tr>
+            <tr><td>完整交互转录</td><td>任务级摘要</td><td>任务/阶段结束时对目标里程碑做摘要压缩</td><td>项目/任务上下文摘要(L2)</td><td>自动提交</td></tr>
+            <tr><td>推理链+结论</td><td>任务级摘要</td><td>提炼可复用的问题-方案-结论三元组</td><td>历史结论与经验摘要(L2)</td><td>自动提交</td></tr>
+            <tr><td>工具日志+异常事件</td><td>统计聚合</td><td>周期性统计各工具在不同条件下的成功率/耗时</td><td>工具能力与成功模式(L2)</td><td>自动提交(纯统计,无语义歧义)</td></tr>
+            <tr><td>交互转录+纠错事件</td><td>模式蒸馏</td><td>检测重复失败模式,草拟候选规则</td><td>反思蒸馏规则(L3草稿)</td><td>候选自动生成,提交路由HITL</td></tr>
+            <tr><td>领域文件/专家标注</td><td>结构化抽取</td><td>抽取制度条款及适用范围</td><td>领域知识事实(L2草稿)</td><td>强制HITL审批(不论来源)</td></tr>
+            <tr><td>L2事实生成事件</td><td>指针维护</td><td>自动记录事实与来源情景的映射关系</td><td>溯源链记录(L4)</td><td>自动提交(无实质内容判断)</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h4>MemoryProcessor(伪代码)</h4>
+      <pre><code><span class="kw">class</span> <span class="fn">MemoryProcessor</span>:
+    <span class="cm">"""自我处理:按记忆项类型分派到对应策略,统一产出候选后交给
+    MemoryGateway.write() 做风险分级与提交路由——自动提交还是HITL复核
+    由write()内部判定,处理策略本身不关心提交路径,保持关注点分离"""</span>
+
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, gateway: MemoryGateway):
+        self.gateway = gateway
+        self._strategies: dict[str, ProcessingStrategy] = {
+            <span class="st">"用户偏好档案"</span>:       EntityExtractionStrategy(target=<span class="st">"user_pref"</span>),
+            <span class="st">"组织与业务实体图谱"</span>:  EntityExtractionStrategy(target=<span class="st">"org_graph"</span>),
+            <span class="st">"项目/任务上下文摘要"</span>: TaskSummarizationStrategy(),
+            <span class="st">"历史结论与经验摘要"</span>:  TaskSummarizationStrategy(),
+            <span class="st">"工具能力与成功模式"</span>:  StatisticalAggregationStrategy(),
+            <span class="st">"反思蒸馏规则"</span>:       PatternDistillationStrategy(),   <span class="cm"># 结果强制走HITL</span>
+            <span class="st">"领域知识事实"</span>:       EntityExtractionStrategy(target=<span class="st">"domain_rule"</span>),  <span class="cm"># 结果强制走HITL</span>
+            <span class="st">"溯源链记录"</span>:         ProvenanceLinkStrategy(),
+        }
+
+    <span class="kw">def</span> <span class="fn">run</span>(self, trigger: ProcessTrigger) -> <span class="kw">None</span>:
+        <span class="cm"># 由MemoryScheduler周期调度,或由SESSION_CLOSED等关键事件触发</span>
+        <span class="kw">for</span> item_name, strategy <span class="kw">in</span> self._strategies.items():
+            raw = self._collect_raw_since_last_run(item_name, trigger)
+            <span class="kw">if not</span> raw:
+                <span class="kw">continue</span>
+            <span class="kw">for</span> candidate <span class="kw">in</span> strategy.process(raw):
+                self.gateway.write(candidate, actor=SYSTEM_PRINCIPAL)</code></pre>
+    </section>
+
+    <section id="retrieve">
+      <h2><span class="h2-tag">05</span>自我检索 Self-Retrieval</h2>
+      <p class="h2-sub">自我检索只面向已经离开活跃上下文窗口的内容——工作记忆(L0)本身就在当前上下文里,不需要"检索"。它按触发条件决定何时查询,而不是每一步都全量召回,避免拖慢主链路延迟。</p>
+
+      <ul>
+        <li><strong>会话开始时</strong>:预加载用户偏好档案与近期项目上下文摘要。</li>
+        <li><strong>识别到已知实体提及时</strong>:检索组织与业务实体图谱、历史结论与经验摘要。</li>
+        <li><strong>即将调用工具时</strong>:检索工具能力与成功模式,辅助工具选型。</li>
+        <li><strong>输出中带有事实引用时</strong>:检索溯源链记录,附加引用来源。</li>
+      </ul>
+
+      <h4>RetrievalTrigger / SelfRetriever(伪代码)</h4>
+      <pre><code><span class="kw">class</span> <span class="fn">RetrievalTrigger</span>:
+    <span class="cm">"""决定ReAct循环的哪个节点需要自动触发检索,大多数步骤无需检索,
+    直接复用工作记忆即可,以此控制延迟"""</span>
+
+    <span class="kw">def</span> <span class="fn">plan</span>(self, step: ReasoningStep) -> Optional[RetrievalPlan]:
+        <span class="kw">if</span> step.is_session_start:
+            <span class="kw">return</span> RetrievalPlan(items=[<span class="st">"用户偏好档案"</span>, <span class="st">"项目/任务上下文摘要"</span>], top_k=5)
+        <span class="kw">if</span> step.mentions_known_entity():
+            <span class="kw">return</span> RetrievalPlan(items=[<span class="st">"组织与业务实体图谱"</span>, <span class="st">"历史结论与经验摘要"</span>], top_k=8)
+        <span class="kw">if</span> step.about_to_invoke_tool():
+            <span class="kw">return</span> RetrievalPlan(items=[<span class="st">"工具能力与成功模式"</span>], top_k=3)
+        <span class="kw">if</span> step.about_to_cite_facts():
+            <span class="kw">return</span> RetrievalPlan(items=[<span class="st">"溯源链记录"</span>], top_k=len(step.cited_facts))
+        <span class="kw">return None</span>
+
+<span class="kw">class</span> <span class="fn">SelfRetriever</span>:
+    <span class="kw">def</span> <span class="fn">maybe_retrieve</span>(self, step: ReasoningStep) -> Optional[MemoryContext]:
+        plan = self.trigger.plan(step)
+        <span class="kw">if</span> plan <span class="kw">is None</span>:
+            <span class="kw">return None</span>
+        <span class="cm"># gateway.read()已包含RBAC/ABAC前置过滤 + 混合检索 + 可信度重排,此处直接复用</span>
+        <span class="kw">return</span> self.gateway.read(MemoryQuery.from_plan(plan), actor=step.agent_principal)</code></pre>
+    </section>
+
+    <section id="console">
+      <h2><span class="h2-tag">06</span>用户查询与修改</h2>
+      <p class="h2-sub">这是与自动闭环并行的独立通道,查询范围覆盖全部25项(含仅供审计、需人工审批的12项);任何修改都复用与Agent写入完全相同的 MemoryGateway.write() 管线,只是 actor 换成人类身份,风险分级会据此重新评估。</p>
+
+      <ul>
+        <li><strong>复核候选</strong>:批准/驳回/修改自我处理产出但被路由至HITL的候选(反思蒸馏规则、领域知识事实)。</li>
+        <li><strong>直接创作</strong>:系统提示词、经审核示例库、工作流/SOP模板等本就需要人工撰写的内容。</li>
+        <li><strong>修正已提交事实</strong>:对L2已提交内容(如某条历史结论)提出修改,遵循"旧事实失效、新事实写入"而非物理覆盖。</li>
+        <li><strong>只读审计查阅</strong>:浏览记忆操作审计日志、访问控制决策记录、凭证签发引用记录、HITL复核结论,用于合规检查。</li>
+      </ul>
+
+      <h4>MemoryConsole(伪代码)</h4>
+      <pre><code><span class="kw">class</span> <span class="fn">MemoryConsole</span>:
+    <span class="cm">"""用户查询与修改:面向人类的接口层,与Agent自身的自动闭环解耦"""</span>
+
+    <span class="kw">def</span> <span class="fn">query</span>(self, filters: ConsoleQuery, actor: Principal) -> list[MemoryRecord]:
+        <span class="cm"># 按人类调用方自身角色鉴权,而非代表Agent的权限集合</span>
+        scope = self.permission_checker.resolve_scope(actor)
+        <span class="kw">return</span> self.store.search(filters, scope=scope)  <span class="cm"># 可查草稿/已提交事实/审计日志</span>
+
+    <span class="kw">def</span> <span class="fn">propose_edit</span>(self, target_id: str, patch: MemoryPatch, actor: Principal) -> WriteResult:
+        candidate = MemoryCandidate.from_patch(target_id, patch, writer=actor.id)
+        <span class="cm"># 与Agent写入路径完全一致:脱敏->冲突检测->策略门->风险分级->双时态提交->审计追加</span>
+        <span class="kw">return</span> self.gateway.write(candidate, actor=actor)
+
+    <span class="kw">def</span> <span class="fn">approve_pending</span>(self, proposal_id: str, actor: Principal) -> WriteResult:
+        <span class="kw">return</span> self.hitl_gate.resolve(proposal_id, outcome=Outcome.APPROVED, reviewer=actor)</code></pre>
+    </section>
+
+    <section id="walkthrough">
+      <h2><span class="h2-tag">07</span>端到端闭环示例</h2>
+      <p class="h2-sub">两条路径共用同一套治理组件,区别只在于提交是否需要人工确认。</p>
+
+      <div class="scenario">
+        <h5>场景A · 自动闭环</h5>
+        <p><span class="step">①</span> 用户提到"下午4点后不要安排会议" → <span class="step">②</span> MemoryRecorder在消息事件中写入会话缓冲区,会话结束后归档进交互转录 → <span class="step">③</span> MemoryProcessor的实体抽取策略在下一次调度周期识别出稳定偏好,生成候选 → <span class="step">④</span> MemoryGateway.write()判定低风险,自动双时态提交至用户偏好档案,AuditLogger同步追加一条记录 → <span class="step">⑤</span> 两周后新会话开始,RetrievalTrigger自动触发检索,该偏好被召回并注入系统prompt,Agent据此主动避开该时段——全程无人工介入。</p>
+      </div>
+
+      <div class="scenario">
+        <h5>场景B · 人工修改闭环</h5>
+        <p><span class="step">①</span> 审计人员在Console中发现某条历史结论关于供应商资质的判断已过时 → <span class="step">②</span> 通过query()定位到目标记录 → <span class="step">③</span> 调用propose_edit()提交修正 → <span class="step">④</span> 因目标是已提交的L2事实且涉及资质判断,风险评分判定为中风险,自动路由至HitlGate → <span class="step">⑤</span> 另一位有权限的审核人在复核队列中查看该提议连同来源情景与旧结论对比,调用approve_pending()确认 → <span class="step">⑥</span> 旧结论被标记valid_to失效(非删除),新结论写入并携带修改人身份,AuditLogger追加一条与原链条哈希相连的修改事件。</p>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<footer>
+  <span>Vela · 织帆 —— 内部技术参考文档,非对外发布材料</span>
+  <span>生成时间:2026-07-10</span>
+</footer>
+
+<script>
+  try{
+    const links = Array.from(document.querySelectorAll('.sidebar a'));
+    const map = new Map(links.map(a => [a.getAttribute('href').slice(1), a]));
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        const link = map.get(entry.target.id);
+        if(!link) return;
+        if(entry.isIntersecting){
+          links.forEach(l => l.classList.remove('active'));
+          link.classList.add('active');
+        }
+      });
+    }, { rootMargin: '-20% 0px -70% 0px' });
+    document.querySelectorAll('main section[id]').forEach(s => observer.observe(s));
+    const toggle = document.getElementById('nav-toggle');
+    links.forEach(a => a.addEventListener('click', () => { if(toggle) toggle.checked = false; }));
+  }catch(e){}
+</script>
+
+</body>
+</html>

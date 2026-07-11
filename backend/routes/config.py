@@ -1,8 +1,13 @@
 import os
 import yaml
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from typing import Optional
+from typing import List
+from sqlalchemy.orm import Session
+
+from database import get_db
+from models import Agent, AgentStatus
+from schemas import MemoryAgentMountUpdate, MemoryAgentMountResponse
 
 router = APIRouter(prefix="/api/v1/config", tags=["config"])
 
@@ -62,3 +67,37 @@ def tavily_status():
     config = _load_config()
     api_key = (config.get("tools", {}).get("tavily", {}).get("api_key", "")) or ""
     return {"configured": bool(api_key), "api_key_set": bool(api_key)}
+
+
+@router.get("/memory/agents", response_model=List[MemoryAgentMountResponse])
+def list_memory_agent_mounts(db: Session = Depends(get_db)):
+    agents = (
+        db.query(Agent)
+        .filter(Agent.status != AgentStatus.DELETED)
+        .order_by(Agent.name.asc())
+        .all()
+    )
+    return [
+        MemoryAgentMountResponse(
+            agent_id=a.agent_id,
+            name=a.name,
+            status=a.status.value if hasattr(a.status, "value") else str(a.status),
+            memory_enabled=bool(getattr(a, "memory_enabled", False)),
+        )
+        for a in agents
+    ]
+
+
+@router.put("/memory/agents")
+def update_memory_agent_mounts(data: MemoryAgentMountUpdate, db: Session = Depends(get_db)):
+    if not data.items:
+        return {"message": "无变更", "updated": 0}
+    updated = 0
+    for item in data.items:
+        agent = db.query(Agent).filter(Agent.agent_id == item.agent_id).first()
+        if not agent or agent.status == AgentStatus.DELETED:
+            continue
+        agent.memory_enabled = bool(item.memory_enabled)
+        updated += 1
+    db.commit()
+    return {"message": "记忆模块挂载配置已保存", "updated": updated}

@@ -145,6 +145,8 @@ class Agent(Base):
     max_repeat_threshold = Column(Integer, default=3)
     # SGL-CFG-07: 单次调用 Token 上限
     single_call_token_limit = Column(Integer, default=8192)
+    # 记忆模块：是否挂载闭环记忆（自我记录/处理/检索）
+    memory_enabled = Column(Boolean, default=False)
     created_at = Column(DateTime, default=now_utc)
     updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)
 
@@ -503,3 +505,36 @@ class DataQueryQualityStats(Base):
     avg_duration_ms = Column(Float, default=0.0)
     avg_feedback_score = Column(Float, default=0.0)
     updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)
+
+
+class MemoryEpisode(Base):
+    """L1 情景记忆：原始交互事件归档"""
+    __tablename__ = "memory_episodes"
+
+    episode_id = Column(String, primary_key=True, default=gen_uuid)
+    agent_id = Column(String, ForeignKey("agents.agent_id"), nullable=False, index=True)
+    session_id = Column(String, index=True, default="")
+    user_id = Column(String(128), default="", index=True)
+    event_type = Column(String(64), nullable=False, index=True)
+    payload = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=now_utc, index=True)
+
+
+class MemoryRecord(Base):
+    """L2/溯源语义记忆：双时态提交"""
+    __tablename__ = "memory_records"
+
+    record_id = Column(String, primary_key=True, default=gen_uuid)
+    agent_id = Column(String, ForeignKey("agents.agent_id"), nullable=False, index=True)
+    user_id = Column(String(128), default="", index=True)
+    # user_pref | task_summary | experience | tool_profile | provenance
+    memory_type = Column(String(32), nullable=False, index=True)
+    content = Column(Text, nullable=False, default="")
+    meta = Column("metadata", JSON, default=dict)
+    source_episode_ids = Column(JSON, default=list)
+    status = Column(String(16), default="active", index=True)  # active | superseded
+    valid_from = Column(DateTime, default=now_utc)
+    valid_to = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=now_utc)
+    updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)
+    created_by = Column(String(128), default="system")

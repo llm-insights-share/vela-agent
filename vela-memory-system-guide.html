@@ -1,0 +1,770 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>智能体记忆系统实现指南 · Vela·织帆</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;600;700;900&family=Noto+Sans+SC:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --night:#0a0e1a;
+    --surface:#111830;
+    --surface-2:#151d3a;
+    --surface-3:#0d1226;
+    --border:rgba(140,165,230,0.14);
+    --border-strong:rgba(140,165,230,0.28);
+    --text:#e8ecf5;
+    --text-muted:#8b93ab;
+    --text-faint:#5c6482;
+    --blue:#1a6fff;
+    --cyan:#00c4ff;
+    --gold:#f5c842;
+    --font-display:'Noto Serif SC', serif;
+    --font-body:'Noto Sans SC', sans-serif;
+    --font-mono:'JetBrains Mono', monospace;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  html{scroll-behavior:smooth;}
+  body{
+    background:var(--night);
+    color:var(--text);
+    font-family:var(--font-body);
+    font-size:15.5px;
+    line-height:1.75;
+    -webkit-font-smoothing:antialiased;
+  }
+  ::selection{background:rgba(26,111,255,0.35); color:#fff;}
+
+  a{color:var(--cyan); text-decoration:none;}
+  a:hover{text-decoration:underline;}
+  code, .mono{font-family:var(--font-mono);}
+
+  /* ---------- HERO ---------- */
+  .hero{
+    position:relative;
+    padding:76px 32px 56px;
+    overflow:hidden;
+    border-bottom:1px solid var(--border);
+    background:
+      radial-gradient(ellipse 900px 420px at 15% -10%, rgba(26,111,255,0.22), transparent 60%),
+      radial-gradient(ellipse 700px 380px at 100% 0%, rgba(0,196,255,0.14), transparent 55%),
+      var(--night);
+  }
+  .hero-inner{max-width:900px; margin:0 auto;}
+  .eyebrow{
+    display:inline-flex; align-items:center; gap:8px;
+    font-family:var(--font-mono); font-size:12px; letter-spacing:0.14em;
+    color:var(--cyan); text-transform:uppercase; margin-bottom:22px;
+  }
+  .eyebrow::before{content:''; width:22px; height:1px; background:var(--cyan);}
+  .hero h1{
+    font-family:var(--font-display); font-weight:700; color:#fff;
+    font-size:clamp(28px,4.4vw,44px); line-height:1.28; letter-spacing:0.01em;
+    margin-bottom:16px;
+  }
+  .hero h1 em{
+    font-style:normal; color:transparent;
+    background:linear-gradient(90deg,var(--cyan),var(--blue));
+    -webkit-background-clip:text; background-clip:text;
+  }
+  .hero p.lede{
+    font-size:16.5px; color:var(--text-muted); max-width:640px; margin-bottom:28px;
+  }
+  .hero-meta{
+    display:flex; flex-wrap:wrap; gap:10px 22px;
+    font-family:var(--font-mono); font-size:12.5px; color:var(--text-faint);
+    padding-top:22px; border-top:1px solid var(--border);
+  }
+  .hero-meta b{color:var(--text-muted); font-weight:500;}
+
+  /* ---------- LAYOUT ---------- */
+  .layout{display:flex; max-width:1280px; margin:0 auto;}
+  .sidebar{
+    width:272px; flex-shrink:0;
+    position:sticky; top:0; align-self:flex-start;
+    height:100vh; overflow-y:auto;
+    padding:28px 18px 60px 32px;
+    border-right:1px solid var(--border);
+  }
+  .sidebar::-webkit-scrollbar{width:4px;}
+  .sidebar::-webkit-scrollbar-thumb{background:var(--border-strong); border-radius:2px;}
+  .nav-part{margin-bottom:22px;}
+  .nav-part-label{
+    font-family:var(--font-mono); font-size:11px; letter-spacing:0.1em;
+    color:var(--gold); text-transform:uppercase; margin-bottom:8px; padding-left:10px;
+  }
+  .sidebar a{
+    display:block; padding:6px 10px; font-size:13.5px; color:var(--text-muted);
+    border-left:2px solid transparent; border-radius:2px;
+  }
+  .sidebar a:hover{color:var(--text); text-decoration:none; background:var(--surface);}
+  .sidebar a.active{color:#fff; border-left-color:var(--cyan); background:var(--surface);}
+
+  .nav-toggle-checkbox{display:none;}
+  .nav-toggle-btn, .mobile-topbar{display:none;}
+
+  main{flex:1; min-width:0; padding:52px 44px 100px;}
+  section{margin-bottom:64px; scroll-margin-top:20px;}
+  section h2{
+    font-family:var(--font-display); font-weight:700; color:#fff;
+    font-size:26px; margin-bottom:6px; display:flex; align-items:baseline; gap:12px;
+  }
+  section .h2-tag{
+    font-family:var(--font-mono); font-size:11px; color:var(--blue);
+    background:rgba(26,111,255,0.12); border:1px solid rgba(26,111,255,0.3);
+    padding:3px 8px; border-radius:20px; font-weight:600; letter-spacing:0.04em;
+  }
+  section .h2-sub{color:var(--text-muted); font-size:14.5px; margin:10px 0 26px; max-width:720px;}
+  h3{font-family:var(--font-display); font-size:18.5px; color:var(--text); margin:30px 0 12px; font-weight:600;}
+  h4{font-size:15px; color:var(--cyan); margin:20px 0 8px; font-weight:600; font-family:var(--font-mono); letter-spacing:0.01em;}
+  p{margin-bottom:14px; color:#c9d0e3; max-width:760px;}
+  strong{color:var(--text); font-weight:600;}
+  ul, ol{margin:0 0 16px 22px; max-width:740px;}
+  li{margin-bottom:8px; color:#c9d0e3;}
+  li::marker{color:var(--cyan);}
+
+  .part-divider{
+    display:flex; align-items:center; gap:18px; margin:80px 0 40px;
+  }
+  .part-divider .num{
+    font-family:var(--font-display); font-size:42px; font-weight:700;
+    color:transparent; -webkit-text-stroke:1.5px var(--border-strong);
+  }
+  .part-divider .txt{font-family:var(--font-mono); font-size:12px; letter-spacing:0.14em; color:var(--gold); text-transform:uppercase;}
+  .part-divider .line{flex:1; height:1px; background:var(--border);}
+
+  /* ---------- CALLOUT / CARDS ---------- */
+  .callout{
+    background:var(--surface); border:1px solid var(--border-strong);
+    border-left:3px solid var(--gold);
+    border-radius:6px; padding:20px 22px; margin:22px 0; max-width:760px;
+  }
+  .callout h4{margin-top:0; color:var(--gold);}
+  .callout p:last-child{margin-bottom:0;}
+
+  .gap-grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:14px; margin:20px 0 28px; max-width:900px;}
+  .gap-card{
+    background:var(--surface); border:1px solid var(--border);
+    border-radius:8px; padding:16px 18px;
+  }
+  .gap-card .tag{font-family:var(--font-mono); font-size:10.5px; color:var(--night); background:var(--cyan); display:inline-block; padding:2px 7px; border-radius:3px; font-weight:700; margin-bottom:9px;}
+  .gap-card h5{font-size:14px; color:#fff; margin-bottom:6px; font-weight:600;}
+  .gap-card p{font-size:13px; color:var(--text-muted); margin:0;}
+
+  /* ---------- PIPELINE (signature element) ---------- */
+  .pipeline-wrap{
+    background:var(--surface-3); border:1px solid var(--border);
+    border-radius:10px; padding:28px 22px 22px; margin:24px 0 28px; max-width:920px;
+    overflow-x:auto;
+  }
+  .pipeline-label{font-family:var(--font-mono); font-size:11px; color:var(--text-faint); margin-bottom:18px; letter-spacing:0.05em;}
+  .pipeline{display:flex; align-items:stretch; gap:0; min-width:760px;}
+  .p-node{
+    flex:1; text-align:center; padding:14px 8px; position:relative;
+    border-radius:8px; background:var(--surface); border:1px solid var(--border);
+  }
+  .p-node .k{font-family:var(--font-mono); font-size:10px; color:var(--text-faint); display:block; margin-bottom:5px;}
+  .p-node .t{font-size:13px; color:var(--text); font-weight:500;}
+  .p-node.gate{
+    background:linear-gradient(160deg, rgba(245,200,66,0.14), rgba(245,200,66,0.03));
+    border-color:rgba(245,200,66,0.45);
+    box-shadow:0 0 22px rgba(245,200,66,0.08);
+  }
+  .p-node.gate .t{color:var(--gold); font-weight:700;}
+  .p-arrow{
+    flex:0 0 22px; display:flex; align-items:center; justify-content:center;
+    color:var(--text-faint); font-size:14px;
+  }
+  .pipeline-note{margin-top:16px; font-size:12.5px; color:var(--text-faint);}
+  .pipeline-note .dot{display:inline-block; width:8px; height:8px; border-radius:2px; background:var(--gold); margin-right:6px; vertical-align:1px;}
+
+  /* ---------- TABLE ---------- */
+  .table-scroll{overflow-x:auto; margin:20px 0 28px; border:1px solid var(--border); border-radius:8px;}
+  table{border-collapse:collapse; width:100%; min-width:820px; font-size:13px;}
+  thead th{
+    background:var(--surface-2); color:var(--gold); text-align:left;
+    padding:11px 14px; font-weight:600; font-family:var(--font-mono); font-size:11.5px;
+    letter-spacing:0.02em; white-space:nowrap; border-bottom:1px solid var(--border-strong);
+  }
+  tbody td{padding:11px 14px; border-bottom:1px solid var(--border); color:#c9d0e3; vertical-align:top;}
+  tbody tr:last-child td{border-bottom:none;}
+  tbody td:first-child{color:#fff; font-weight:600; white-space:nowrap;}
+  tbody tr:hover td{background:rgba(26,111,255,0.05);}
+
+  /* ---------- CODE ---------- */
+  pre{
+    background:var(--surface-3); border:1px solid var(--border);
+    border-radius:8px; padding:18px 20px; overflow-x:auto; margin:16px 0 24px; max-width:820px;
+  }
+  pre code{font-family:var(--font-mono); font-size:12.5px; line-height:1.65; color:#d6dcee;}
+  .kw{color:var(--cyan);} .st{color:var(--gold);} .cm{color:var(--text-faint); font-style:italic;} .fn{color:#9ecbff;}
+
+  /* ---------- PRACTICE CARDS ---------- */
+  .practice-grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:16px; margin:22px 0 28px; max-width:1000px;}
+  .practice-card{background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:18px 20px;}
+  .practice-card h5{font-size:14.5px; color:#fff; margin-bottom:8px; font-weight:600;}
+  .practice-card p{font-size:13.3px; color:var(--text-muted); margin:0;}
+  .practice-card .src{display:block; margin-top:10px; font-family:var(--font-mono); font-size:11px; color:var(--text-faint);}
+
+  /* ---------- ACADEMIC TREND BLOCKS ---------- */
+  .trend{border-top:1px solid var(--border); padding:24px 0;}
+  .trend:first-of-type{border-top:none; padding-top:8px;}
+  .trend-head{display:flex; align-items:center; gap:12px; margin-bottom:10px;}
+  .trend-badge{
+    font-family:var(--font-mono); font-size:11px; color:var(--night); background:var(--cyan);
+    padding:3px 9px; border-radius:3px; font-weight:700; flex-shrink:0;
+  }
+  .trend h3{margin:0;}
+  .stat-row{display:flex; flex-wrap:wrap; gap:10px; margin:12px 0 4px;}
+  .stat{
+    background:var(--surface); border:1px solid var(--border); border-radius:6px;
+    padding:8px 13px; font-family:var(--font-mono); font-size:12px; color:var(--text-muted);
+  }
+  .stat b{color:var(--gold); font-size:14px;}
+
+  /* ---------- ROADMAP ---------- */
+  .roadmap{display:flex; flex-direction:column; gap:0; max-width:820px; margin:22px 0 28px;}
+  .rstep{display:flex; gap:18px; padding:16px 0; border-top:1px solid var(--border);}
+  .rstep:first-child{border-top:none;}
+  .rphase{
+    flex-shrink:0; width:88px; font-family:var(--font-mono); font-size:12px; color:var(--blue); font-weight:700; padding-top:2px;
+  }
+  .rstep h5{font-size:14.5px; color:#fff; margin-bottom:5px; font-weight:600;}
+  .rstep p{font-size:13.3px; margin:0; color:var(--text-muted);}
+
+  /* ---------- REFERENCES ---------- */
+  .ref-group{margin-bottom:26px;}
+  .ref-group-title{font-family:var(--font-mono); font-size:11.5px; color:var(--gold); text-transform:uppercase; letter-spacing:0.08em; margin-bottom:10px;}
+  .ref-item{font-size:13px; color:var(--text-muted); margin-bottom:10px; padding-left:16px; border-left:2px solid var(--border); max-width:820px;}
+  .ref-item .rt{color:#c9d0e3; font-style:italic;}
+  .ref-item .ra{display:block; font-size:12px; color:var(--text-faint); margin-top:2px;}
+
+  footer{
+    border-top:1px solid var(--border); padding:32px 44px 60px; max-width:1280px; margin:0 auto;
+    font-family:var(--font-mono); font-size:12px; color:var(--text-faint); display:flex; justify-content:space-between; flex-wrap:wrap; gap:10px;
+  }
+
+  /* ---------- RESPONSIVE ---------- */
+  @media (max-width:900px){
+    .layout{flex-direction:column;}
+    .mobile-topbar{
+      display:flex; align-items:center; justify-content:space-between;
+      position:sticky; top:0; z-index:40; background:rgba(10,14,26,0.96); backdrop-filter:blur(6px);
+      border-bottom:1px solid var(--border); padding:14px 20px;
+    }
+    .mobile-topbar .brand{font-family:var(--font-mono); font-size:12.5px; color:var(--cyan); letter-spacing:0.04em;}
+    .nav-toggle-btn{
+      display:inline-flex; align-items:center; gap:6px;
+      font-family:var(--font-mono); font-size:12px; color:var(--text);
+      border:1px solid var(--border-strong); padding:7px 12px; border-radius:20px; cursor:pointer;
+    }
+    .sidebar{
+      position:fixed; top:0; left:-100%; width:82%; max-width:320px; height:100vh;
+      background:var(--night); z-index:60; transition:left .28s ease; border-right:1px solid var(--border-strong);
+      padding-top:70px;
+    }
+    .nav-backdrop{
+      display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55); z-index:50;
+    }
+    .nav-toggle-checkbox:checked ~ .sidebar{left:0;}
+    .nav-toggle-checkbox:checked ~ .nav-backdrop{display:block;}
+    main{padding:34px 20px 80px;}
+    .hero{padding:44px 20px 36px;}
+    footer{padding:26px 20px 50px; flex-direction:column;}
+  }
+</style>
+</head>
+<body>
+
+<input type="checkbox" id="nav-toggle" class="nav-toggle-checkbox">
+
+<div class="mobile-topbar">
+  <span class="brand">VELA · 织帆</span>
+  <label for="nav-toggle" class="nav-toggle-btn">☰ 目录</label>
+</div>
+<label for="nav-toggle" class="nav-backdrop"></label>
+
+<header class="hero">
+  <div class="hero-inner">
+    <div class="eyebrow">Vela · 织帆 · 技术参考文档</div>
+    <h1>智能体记忆系统<em>实现指南</em><br>架构方案 · 业界最佳实践 · 学术前沿综述</h1>
+    <p class="lede">面向 Vela·织帆企业级 Agent 运行时的记忆子系统设计:如何在 Mem0 / Zep·Graphiti / Letta / LangMem / MemOS 已验证的工程范式之上,补齐大型国央企私有化部署所要求的 RBAC/ABAC 作用域检索、Vault/KMS 凭证隔离、HITL 审计留痕与双时态溯源。</p>
+    <div class="hero-meta">
+      <span><b>技术栈:</b> FastAPI · LangGraph · Milvus · Neo4j · Qwen/DeepSeek · MCP/A2A</span>
+      <span><b>版本:</b> v1.0</span>
+      <span><b>更新:</b> 2026-07</span>
+    </div>
+  </div>
+</header>
+
+<div class="layout">
+  <nav class="sidebar">
+    <div class="nav-part">
+      <div class="nav-part-label">Part 01 · 实现方案</div>
+      <a href="#overview">设计前提与四个缺口</a>
+      <a href="#taxonomy">记忆分层与总体架构</a>
+      <a href="#lifecycle">写-管-读生命周期</a>
+      <a href="#rbac">RBAC/ABAC 作用域检索</a>
+      <a href="#credential">凭证隔离(Vault/KMS)</a>
+      <a href="#hitl">HITL 审计门与留痕</a>
+      <a href="#bitemporal">双时态溯源</a>
+      <a href="#components">组件映射与伪代码</a>
+    </div>
+    <div class="nav-part">
+      <div class="nav-part-label">Part 02 · 业界最佳实践</div>
+      <a href="#comparison">五大框架横向对比</a>
+      <a href="#practices">可复用的六个模式</a>
+    </div>
+    <div class="nav-part">
+      <div class="nav-part-label">Part 03 · 学术前沿</div>
+      <a href="#academic">六个关键动向(2025–2026)</a>
+    </div>
+    <div class="nav-part">
+      <div class="nav-part-label">Part 04 · 落地</div>
+      <a href="#roadmap">分阶段路线图</a>
+      <a href="#references">参考文献</a>
+    </div>
+  </nav>
+
+  <main>
+
+    <!-- ============ PART 01 ============ -->
+
+    <section id="overview">
+      <h2><span class="h2-tag">01</span>设计前提与四个缺口</h2>
+      <p class="h2-sub">LLM 的上下文窗口是有限且无状态的,Agent 要跨会话、跨任务保持连贯性与可进化性,必须依赖外部记忆系统。但主流生产级框架几乎都把优化目标定在"召回准不准、延迟低不低",而不是"这条记忆谁能看、谁批准写入、出了问题能不能查"——这恰恰是 Vela 面向大型国央企私有化部署时无法回避的部分。</p>
+
+      <p>综合对 Mem0、Zep/Graphiti、Letta、LangMem、MemOS 五个代表性框架的复核,以及 2025–2026 年新发表的十余篇学术综述,可以确认:<strong>目前没有一个主流开源记忆框架把访问控制、凭证隔离、审计留痕和双时态溯源当作原生的一等能力</strong>,它们大多假设"单租户、可信环境、只优化召回质量"。这是 Vela 记忆子系统需要自研补齐,而不能直接照搬开源方案的核心原因。本指南据此提出实现方案,并在此基础上给出业界与学术两方面的依据。</p>
+
+      <div class="gap-grid">
+        <div class="gap-card">
+          <span class="tag">缺口 1</span>
+          <h5>RBAC/ABAC 作用域检索</h5>
+          <p>现有框架普遍以 user_id/namespace 做隔离,能防串号,但无法表达"该 Agent 仅在代表某用户执行某工作流时才可访问某数据集"这类组织级、属性级、链路级的权限语义。</p>
+        </div>
+        <div class="gap-card">
+          <span class="tag">缺口 2</span>
+          <h5>Vault/KMS 凭证隔离</h5>
+          <p>会话转录被摘要蒸馏进语义记忆是标准流程,但几乎没有框架在这一步之前内置凭证/密钥的扫描与剥离,存在秘密经摘要"渗出"进长期记忆的风险。</p>
+        </div>
+        <div class="gap-card">
+          <span class="tag">缺口 3</span>
+          <h5>HITL 审计留痕</h5>
+          <p>记忆的增/删/改多为 LLM 自主决策后静默提交,少数框架有异步整理机制,但普遍缺少风险分级的人工复核门与可核验的留痕链条。</p>
+        </div>
+        <div class="gap-card">
+          <span class="tag">缺口 4</span>
+          <h5>双时态溯源</h5>
+          <p>仅 Zep/Graphiti 原生支持双时态(valid time + system time),其余框架多为单一时间戳或干脆物理覆盖旧事实,难以满足审计回放"当时系统知道什么"的要求。</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="taxonomy">
+      <h2>记忆分层与总体架构</h2>
+      <p class="h2-sub">在 Mem0/Zep/Letta/LangMem 常见的三层认知记忆分类(情景/语义/程序)之上,Vela 增加第四层"治理记忆",使访问控制与审计成为独立于内容存储的基础设施,而不是散落在各处的附加逻辑。</p>
+
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>层级</th><th>对应概念</th><th>存储载体</th><th>关键特性</th></tr></thead>
+          <tbody>
+            <tr><td>L0 工作记忆</td><td>会话内活跃上下文</td><td>LangGraph Checkpointer(线程级状态)</td><td>随线程结束"冷却",转录进入 L1 供后续蒸馏</td></tr>
+            <tr><td>L1 情景记忆</td><td>原始交互轨迹</td><td>Postgres / 对象存储,只增不改</td><td>所有下游记忆的事实源(ground truth episode),携带完整来源指针</td></tr>
+            <tr><td>L2 语义记忆</td><td>蒸馏后的实体/事实/偏好</td><td>Neo4j(双时态图谱)+ Milvus(向量索引)</td><td>Graphiti 式旧事实失效而非覆盖,支持混合检索</td></tr>
+            <tr><td>L3 程序记忆</td><td>固化的技能/规则/Prompt</td><td>版本化配置存储</td><td>候选态→生效态必须经 HitlGate 批准</td></tr>
+            <tr><td>L4 治理记忆</td><td>不可篡改的操作审计日志</td><td>独立的哈希链日志存储</td><td>覆盖 L0–L3 的每一次写/改/失效/删/访问,与内容存储解耦</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p>这一分层直接对应学术界近期综述提出的"写-管-读"(write-manage-read)三阶段循环<sup>[1]</sup>,以及"存储-反思-经验"三段式演化路径<sup>[2]</sup>——L1 对应存储/写入,后台整理任务对应反思/管理,L2/L3 的检索利用对应经验/读取。区别在于 Vela 在每个阶段都显式插入了策略与审计钩子,而不是把治理当作事后补丁。</p>
+    </section>
+
+    <section id="lifecycle">
+      <h2>写-管-读生命周期</h2>
+      <p class="h2-sub">下图是记忆写入路径的核心流水线。两个金色节点(策略门、HITL 门)是本方案与开源框架的主要差异所在:治理逻辑被前置在流水线内部,而不是检索后再做过滤。</p>
+
+      <div class="pipeline-wrap">
+        <div class="pipeline-label">写入路径 · Write Path</div>
+        <div class="pipeline">
+          <div class="p-node"><span class="k">01</span><span class="t">Capture<br>轨迹捕获</span></div>
+          <div class="p-arrow">→</div>
+          <div class="p-node"><span class="k">02</span><span class="t">Extract<br>候选抽取</span></div>
+          <div class="p-arrow">→</div>
+          <div class="p-node"><span class="k">03</span><span class="t">Conflict<br>冲突检测</span></div>
+          <div class="p-arrow">→</div>
+          <div class="p-node gate"><span class="k">GATE</span><span class="t">策略门<br>ABAC+脱敏</span></div>
+          <div class="p-arrow">→</div>
+          <div class="p-node gate"><span class="k">GATE</span><span class="t">HITL 门<br>风险分级复核</span></div>
+          <div class="p-arrow">→</div>
+          <div class="p-node"><span class="k">06</span><span class="t">Commit<br>双时态提交</span></div>
+          <div class="p-arrow">→</div>
+          <div class="p-node"><span class="k">07</span><span class="t">Audit<br>审计追加</span></div>
+        </div>
+        <div class="pipeline-note"><span class="dot"></span>金色节点为治理插入点:策略门做 ABAC 校验与凭证脱敏,HITL 门按风险分级路由人工复核 —— 二者都在"提交"之前,而非提交后再补救。</div>
+      </div>
+
+      <h3>三条路径的职责划分</h3>
+      <ul>
+        <li><strong>写入路径</strong>:候选记忆先过秘密扫描器剥离凭证类文本,再与既有 L2 事实做语义 diff(时态失效而非物理覆盖),经策略门与 HITL 门后双时态提交,最后追加进哈希链审计日志。</li>
+        <li><strong>管理路径</strong>:后台异步的"整理"任务——借鉴 Letta 的 sleep-time agents 与近期 MAGMA 论文的快慢双流设计<sup>[3]</sup>——完成情景→语义的摘要蒸馏、矛盾检测与衰减策略。"遗忘"是一等公民的可治理操作:默认软删除(标记 invalid_at,保留审计线索),仅在合规强制(如个人信息删除请求)时才触发单独审批的物理清除流程。</li>
+        <li><strong>读取路径</strong>:检索前先解析调用方(用户或代表用户行事的 Agent)的有效权限集合并与记忆的访问控制信封求交集,再执行向量 + 关键词 + 图遍历的混合检索(参考 Zep/Graphiti 的三路融合<sup>[4]</sup>),最后按新鲜度与可信度重排,抑制可疑或存在冲突的条目被优先召回——这是抵御记忆投毒的第一道防线。</li>
+      </ul>
+    </section>
+
+    <section id="rbac">
+      <h2>RBAC/ABAC 作用域检索</h2>
+      <p class="h2-sub">纯 RBAC 或纯 ABAC 都不足以覆盖多智能体场景:近期研究指出,二者都把每次访问当作独立决策,无法表达"这个 Agent 只有在代表某工作流执行时才能访问某资源"这类跨步骤的委托链条<sup>[5]</sup>。</p>
+
+      <ul>
+        <li>每条记忆(不论 L1/L2/L3)携带访问控制信封:<code>owner_id</code>、<code>org_unit</code>、<code>sensitivity_label</code>(对应信创环境常见的密级划分)、<code>allowed_roles</code>、<code>allowed_attributes</code>。</li>
+        <li>检索请求必须先经过一个独立于记忆存储本身的策略决策点(PDP)解析出调用方的有效权限,再与记忆的访问控制信封求交集——避免策略判断散落进每个存储适配器,这与微软近期提出的"Authorization Fabric"模式一致:PDP 统一评估 RBAC + ABAC + 审批策略,输出 ALLOW / DENY / REQUIRE_APPROVAL / MASK 四种结果<sup>[6]</sup>。</li>
+        <li>多智能体协作下,仅有访问控制点还不够,还需要"作用域检索 + 策略化传播"原语,防止 A 智能体为某任务写入的记忆未经允许就悄悄进入 B 智能体的上下文——这正是 2026 年新发表的 MemClaw/ArgusFleet 论文所定义的四个失败模式之一(未授权泄露、陈旧传播、矛盾持久化、溯源断裂)<sup>[7]</sup>。</li>
+        <li>默认引入"个人记忆 / 项目记忆 / 组织记忆"三级可见性,对应私有/共享两层模型,并把贡献者、访问资源、时间戳写成不可变的溯源属性,支持事后追溯核验<sup>[8]</sup>。</li>
+      </ul>
+    </section>
+
+    <section id="credential">
+      <h2>凭证隔离(Vault/KMS)</h2>
+      <p class="h2-sub">铁律:任何凭证与密钥都不应以明文形式进入记忆存储——理想情况下完全不落入任何一层记忆。</p>
+      <ul>
+        <li>Agent 在工具执行沙箱内通过短时任务令牌,按需向 Vault(或 Vela 自建的 CredentialBroker)换取动态凭证;令牌只存活在执行沙箱内,不会进入会后要被摘要蒸馏进记忆的会话转录。</li>
+        <li>动态、短生命周期凭证是行业公认的实践:每个请求签发唯一凭证,过期自动失效,即使泄露也只在极窄的时间窗口内有效<sup>[9]</sup>。</li>
+        <li>在候选记忆进入抽取 LLM 之前,先过一道秘密扫描器——正则规则 + 信息熵检测 + LLM 分类器的多层防御——避免密钥通过摘要"渗出"进语义记忆,这一点在近期"可信 Agentic AI"综述中被明确列为记忆治理的必需环节,而非可选加固<sup>[10]</sup>。</li>
+        <li>记忆存储静态加密使用 KMS 包裹的信封密钥,尤其是 L1 原始转录——它离原始工具 I/O 最近,是风险最高的一层。</li>
+      </ul>
+    </section>
+
+    <section id="hitl">
+      <h2>HITL 审计门与留痕</h2>
+      <p class="h2-sub">近期"memorywire"论文把这一模式规范化为 Co-memorize 的"diff-and-approve":Agent 提出记忆变更提案,系统生成结构化差异,人工复核后才提交<sup>[11]</sup>。</p>
+
+      <ul>
+        <li>Agent 对 L2/L3 提出结构化变更提案(增/改/失效/删)→ HitlGate 按风险打分 → 低风险自动提交,中/高风险进入人工复核队列,附带来源情景、冲突中的既有事实与策略依据 → 审批/驳回/修改本身也是一条被记录在案的审计事件。</li>
+        <li>风险分级可采用置信度路由:高置信度决策自动执行,中/低置信度升级为人工复核,在自动化收益与人工把控之间取得平衡<sup>[12]</sup>,可复用 LangGraph 的 <code>interrupt()</code> 机制实现暂停-恢复。</li>
+        <li>审计记录需要能回答"发生了什么、为什么这么做、谁批准的、看到了什么上下文"——只记录事件本身不够,必须包含推理依据与复核结论<sup>[13]</sup>。</li>
+        <li>敏感 payload 以哈希/指针形式被引用,而非整段写入日志本体,兼顾可审计性与数据最小化;审计日志本身按留存策略脱敏、限制访问<sup>[14]</sup>。</li>
+      </ul>
+
+      <div class="callout">
+        <h4>审计记录 Schema</h4>
+        <p><code>event_id · ts · actor(user/agent/system) · operation · target_memory_id · before_hash · after_hash · source_episode_ref · policy_basis · reviewer · rationale</code> —— 只增不改,每条记录内含上一条记录的哈希,形成防篡改链条,满足大型企业内控审计对留痕完整性的要求。</p>
+      </div>
+    </section>
+
+    <section id="bitemporal">
+      <h2>双时态溯源</h2>
+      <p class="h2-sub">对齐 Graphiti 的双时态模型<sup>[4]</sup>:每条语义事实携带两条独立时间线,分别回答"世界上何时为真"与"系统何时知道"。</p>
+      <ul>
+        <li><code>valid_from</code> / <code>valid_to</code>(世界时间):事实在现实中何时成立、何时被取代。</li>
+        <li><code>created_at</code> / <code>expired_at</code>(系统/摄入时间):记忆何时被写入图谱、何时被标记失效。</li>
+        <li>被新事实取代的旧事实只失效(设置 <code>valid_to</code>),不删除;物理删除保留给单独的、受法务门控的"清除"流程。</li>
+        <li>每条事实回溯到产生它的情景记忆,情景记忆回溯到原始事件(工具调用/文档/对话轮次),形成完整的溯源链——这同时满足"当时 Agent 依据什么做出决策"的审计回放需求,与"实体最新状态是什么"的业务查询需求。</li>
+      </ul>
+
+      <h4>BiTemporalFact 数据结构</h4>
+      <pre><code><span class="kw">@dataclass</span>
+<span class="kw">class</span> <span class="fn">BiTemporalFact</span>:
+    <span class="cm"># 世界时间:事实何时在现实中开始/停止成立</span>
+    id: str
+    subject: str
+    predicate: str
+    object: str
+    valid_from: datetime
+    valid_to: Optional[datetime]      <span class="cm"># None = 当前仍然有效</span>
+
+    <span class="cm"># 系统时间:摄入与失效的时间戳,非物理删除</span>
+    created_at: datetime
+    expired_at: Optional[datetime]
+
+    <span class="cm"># 溯源与访问控制信封</span>
+    source_episode: str               <span class="cm"># 指向 L1 原始情景记忆</span>
+    writer: str                       <span class="cm"># 写入者身份(用户 / Agent)</span>
+    sensitivity: SensitivityLabel
+    allowed_roles: List[str]
+    allowed_attributes: Dict[str, str]</code></pre>
+    </section>
+
+    <section id="components">
+      <h2>组件映射与伪代码</h2>
+      <p class="h2-sub">新增的记忆子系统组件与既有 SDD 中的 HitlGate、PermissionChecker、AuditLogger、HybridRetriever 直接复用,不重新发明治理逻辑。</p>
+
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>新增组件</th><th>职责</th><th>复用的既有组件</th></tr></thead>
+          <tbody>
+            <tr><td>MemoryGateway</td><td>读写唯一入口,禁止绕过直连底层存储</td><td>PermissionChecker · HitlGate · AuditLogger</td></tr>
+            <tr><td>EpisodeStore</td><td>L1 情景记忆,只增不改的事实源</td><td>—</td></tr>
+            <tr><td>SemanticGraphStore</td><td>L2 双时态图谱(Neo4j)+ 向量索引(Milvus)</td><td>HybridRetriever</td></tr>
+            <tr><td>MemoryScheduler</td><td>后台异步整理:摘要蒸馏、冲突检测、衰减策略</td><td>LLMRouter</td></tr>
+            <tr><td>CredentialBroker</td><td>Vault 对接,签发短时动态凭证,不落记忆</td><td>—</td></tr>
+            <tr><td>SecretScanner</td><td>写入前的凭证/密钥脱敏</td><td>—</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h4>MemoryGateway 核心方法(伪代码)</h4>
+      <pre><code><span class="kw">class</span> <span class="fn">MemoryGateway</span>:
+    <span class="cm">"""记忆系统统一入口:所有读写必须经过此网关"""</span>
+
+    <span class="kw">def</span> <span class="fn">write</span>(self, candidate: MemoryCandidate, actor: Principal) -> WriteResult:
+        <span class="cm"># 1. 秘密扫描:凭证类文本在进入抽取 LLM 前被剥离</span>
+        candidate = self.secret_scanner.redact(candidate)
+
+        <span class="cm"># 2. 冲突检测:与既有语义事实做时态 diff(失效而非覆盖)</span>
+        conflicts = self.semantic_graph.find_conflicts(candidate)
+
+        <span class="cm"># 3. 策略门:ABAC 校验 + 敏感度分级</span>
+        policy = self.permission_checker.check_write(candidate, actor)
+        <span class="kw">if not</span> policy.allowed:
+            <span class="kw">raise</span> MemoryWriteDenied(policy.reason)
+
+        <span class="cm"># 4. 风险分级路由:中/高风险触发人工复核</span>
+        risk = self.hitl_gate.score(candidate, conflicts)
+        <span class="kw">if</span> risk.level <span class="kw">in</span> (RiskLevel.MEDIUM, RiskLevel.HIGH):
+            decision = self.hitl_gate.request_review(
+                diff=candidate.as_diff(conflicts),
+                context={<span class="st">"source_episode"</span>: candidate.episode_ref,
+                         <span class="st">"policy_basis"</span>: policy.basis})
+            <span class="kw">if</span> decision.outcome != Outcome.APPROVED:
+                self.audit_logger.append(actor, <span class="st">"write_rejected"</span>, candidate, decision)
+                <span class="kw">return</span> WriteResult(committed=<span class="kw">False</span>, reason=decision.rationale)
+            candidate = decision.apply_modifications(candidate)
+
+        <span class="cm"># 5. 双时态提交 + 向量索引同步</span>
+        fact = self.semantic_graph.commit(
+            candidate, created_at=now(), writer=actor.id,
+            source_episode=candidate.episode_ref)
+        self.vector_index.upsert(fact.embedding_view())
+
+        <span class="cm"># 6. 审计追加(哈希链,防篡改)</span>
+        self.audit_logger.append(
+            actor, <span class="st">"write_committed"</span>, fact,
+            prev_hash=self.audit_logger.tail_hash())
+        <span class="kw">return</span> WriteResult(committed=<span class="kw">True</span>, fact_id=fact.id)
+
+    <span class="kw">def</span> <span class="fn">read</span>(self, query: MemoryQuery, actor: Principal) -> MemoryContext:
+        <span class="cm"># 1. 前置作用域过滤:先解析权限,再检索,而非检索后过滤</span>
+        scope = self.permission_checker.resolve_scope(actor)
+
+        <span class="cm"># 2. 混合检索(向量 + 关键词 + 图遍历)+ RRF 融合</span>
+        candidates = self.vector_index.search(query, scope=scope) \
+            + self.semantic_graph.traverse(query, scope=scope)
+        fused = reciprocal_rank_fusion(candidates)
+
+        <span class="cm"># 3. 重排:新鲜度 + 可信度打分,压低可疑/矛盾条目权重</span>
+        ranked = trust_aware_rerank(fused, trust=self.compute_trust(fused))
+
+        <span class="cm"># 4. 拼装带溯源与时态标注的上下文</span>
+        <span class="kw">return</span> MemoryContext.assemble(ranked[:query.top_k])</code></pre>
+    </section>
+
+    <!-- ============ PART 02 ============ -->
+    <div class="part-divider"><span class="num">02</span><span class="txt">Industry Best Practice · 业界最佳实践</span><span class="line"></span></div>
+
+    <section id="comparison">
+      <h2>五大框架横向对比</h2>
+      <p class="h2-sub">Mem0、Zep/Graphiti、Letta(MemGPT)、LangMem、MemOS 是目前公开资料最完整的五个代表性方案,分别代表了五种不同的核心抽象。</p>
+
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>维度</th><th>Mem0</th><th>Zep / Graphiti</th><th>Letta(MemGPT)</th><th>LangMem</th><th>MemOS</th></tr></thead>
+          <tbody>
+            <tr><td>核心抽象</td><td>抽取-更新两阶段流水线,可选图模式 Mem0ᵍ</td><td>双时态知识图谱,情景(episode)为摄入单元</td><td>OS 式虚拟上下文分页,Agent 自主调用工具编辑记忆</td><td>三类记忆的 SDK 层,构建于 LangGraph BaseStore 之上</td><td>MemCube 统一异构记忆抽象,OS 级调度治理</td></tr>
+            <tr><td>记忆类型</td><td>语义事实 +(可选)关系图</td><td>情景节点/语义实体-事实/社区摘要三层</td><td>核心记忆/归档记忆/回忆记忆三级</td><td>语义/情景/程序三类</td><td>参数记忆/激活记忆/明文记忆三类</td></tr>
+            <tr><td>存储后端</td><td>向量库(后端无关)+ 可选图存储</td><td>Neo4j / FalkorDB,或 Zep 托管 Context Graph Engine</td><td>PostgreSQL + pgvector</td><td>任意向量库/KV/Postgres,原生对接 LangGraph Store</td><td>MemScheduler 调度层,可对接多种底层存储</td></tr>
+            <tr><td>检索机制</td><td>ANN 近似最近邻,图模式下子图遍历</td><td>余弦相似度 + BM25 + 图遍历,RRF/MMR/交叉编码器重排</td><td>Agent 工具调用驱动的主动检索,非被动召回</td><td>语义相似度检索,支持后台批量抽取</td><td>MemScheduler 统一调度跨模态记忆调用</td></tr>
+            <tr><td>时态处理</td><td>图模式下支持基础时态推理</td><td>原生双时态(valid_at/invalid_at + 系统时间)</td><td>无原生时态语义,依赖归档时间戳</td><td>无原生双时态,依赖命名空间 + 时间过滤</td><td>聚焦记忆版本演化,非细粒度双时态</td></tr>
+            <tr><td>隔离/多租户</td><td>按 user_id 分区</td><td>企业级 Context Lake 支持治理化检索</td><td>单 Agent 作用域,无原生多租户</td><td>按 user_id/team_id/app_id 命名空间隔离</td><td>面向单模型实例,多租户需自行叠加</td></tr>
+            <tr><td>企业治理原生支持</td><td>未原生提供,需自行叠加</td><td>未原生提供,需自行叠加</td><td>未原生提供,需自行叠加</td><td>未原生提供,需自行叠加</td><td>提供权限控制/异常处理框架雏形,非细粒度 ABAC</td></tr>
+            <tr><td>公开基准(多为自评)</td><td>LoCoMo 92.5 / LongMemEval 94.4(2026 新算法,自评)<sup>[15]</sup></td><td>DMR 基准 94.8% vs MemGPT 93.4%<sup>[16]</sup></td><td>社区评测 LoCoMo ≈74%(GPT-4o mini)<sup>[17]</sup></td><td>未见系统性发布</td><td>未见系统性发布,论文侧重架构而非基准</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p style="font-size:12.5px; color:var(--text-faint); max-width:820px;">注:表中基准数字多为厂商或社区自评,评测集与实现细节不完全可比,仅供架构选型参考,不构成严格意义上的性能排名。</p>
+    </section>
+
+    <section id="practices">
+      <h2>可复用的六个模式</h2>
+      <p class="h2-sub">跨越五个框架反复出现、且被多篇 2026 年论文验证有效的工程模式,是比框架本身更值得复用的部分。</p>
+
+      <div class="practice-grid">
+        <div class="practice-card">
+          <h5>热路径与冷路径分离</h5>
+          <p>同步、低延迟的会话内操作与异步、批量的后台整理(摘要蒸馏、冲突检测、衰减)分离——Letta 的 sleep-time agents、MAGMA 的快慢双流、LangMem 的 hot-path/background 都是同一模式的不同实现<sup>[3][18]</sup>。</p>
+        </div>
+        <div class="practice-card">
+          <h5>混合检索优于单一方法</h5>
+          <p>向量语义检索 + 关键词全文检索 + 图遍历三路融合,再做重排,在时态推理与多跳问题上明显优于纯向量检索——Zep/Graphiti 是这一模式的参考实现<sup>[4]</sup>。</p>
+        </div>
+        <div class="practice-card">
+          <h5>命名空间隔离是底线而非终点</h5>
+          <p>按 user_id/team_id 做命名空间隔离(LangMem、AWS AgentCore)能防止最基本的串号,但无法覆盖多智能体委托链条,企业场景需要在此之上叠加 ABAC 与作用域传播策略<sup>[19]</sup>。</p>
+        </div>
+        <div class="practice-card">
+          <h5>溯源即构建,而非事后补充</h5>
+          <p>每条派生记忆在生成时就绑定来源指针(Graphiti 的 episode、Collaborative Memory 的 provenance 属性、MemClaw 的溯源追踪),而不是事后再去反查——2026 年多篇论文将其列为不可再退让的基础设施而非可选加固<sup>[7][8]</sup>。</p>
+        </div>
+        <div class="practice-card">
+          <h5>遗忘是治理动作</h5>
+          <p>"mnemonic sovereignty"综述明确把"哪些状态可以被遗忘"列为记忆治理需要显式回答的问题之一,而不是缓存淘汰的自然副作用<sup>[20]</sup>。</p>
+        </div>
+        <div class="practice-card">
+          <h5>基准分数不等于治理就绪</h5>
+          <p>LoCoMo/LongMemEval/BEAM/MemBench 检验的是召回与推理质量,不涉及访问控制或可审计性——框架在这些基准上得分高,不代表满足企业合规要求,这是选型时容易忽略的盲区。</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ PART 03 ============ -->
+    <div class="part-divider"><span class="num">03</span><span class="txt">Academic Frontier · 学术前沿</span><span class="line"></span></div>
+
+    <section id="academic">
+      <h2>六个关键动向(2025–2026)</h2>
+      <p class="h2-sub">下述动向均来自过去 12 个月内发表或修订的论文,反映学术界正从"记忆能不能召回"转向"记忆能不能被治理"。</p>
+
+      <div class="trend">
+        <div class="trend-head"><span class="trend-badge">趋势 1</span><h3>分类法开始收敛</h3></div>
+        <p>三篇独立的 2026 年综述——《Memory for Autonomous LLM Agents》<sup>[1]</sup>、ACL Findings 2026 的《From Storage to Experience》<sup>[2]</sup>、OpenReview 的"统一表示-管理视角"综述<sup>[21]</sup>——分别提出"写-管-读"循环、"存储-反思-经验"三阶段、"自然语言token/中间表示/参数"三范式,彼此高度呼应。同时,Letta 团队的论文重申了一个务实立场:LLM 是"输入token到输出token"的函数而非大脑,过度拟人化的认知类比会误导架构设计,因此采用"消息缓冲区/核心记忆块/归档记忆"这种偏工程实现的分类法可能比照搬情景/语义/程序更利于落地<sup>[22]</sup>。</p>
+      </div>
+
+      <div class="trend">
+        <div class="trend-head"><span class="trend-badge">趋势 2</span><h3>2026 成为"记忆变成攻击面"的转折年</h3></div>
+        <p>OWASP 在 2026 年 Agentic AI Top 10 中新增 <strong>ASI06:记忆与上下文投毒</strong>,并规定输入审核、带溯源的记忆脱敏、可信度感知检索、行为监控、取证能力五层防御<sup>[23]</sup>。多项攻击研究显示朴素记忆管线的脆弱性相当显著:</p>
+        <div class="stat-row">
+          <div class="stat">AgentPoison 后门攻击 <b>&gt;80%</b> 成功率 @ &lt;0.1% 投毒率<sup>[24]</sup></div>
+          <div class="stat">MINJA 纯查询注入 <b>95%~98%</b> 注入成功率<sup>[25]</sup></div>
+          <div class="stat">Agent Security Bench 平均攻击成功率 <b>84.3%</b><sup>[26]</sup></div>
+        </div>
+        <p>2026 年新发表的长期记忆安全综述<sup>[27][20]</sup>共同得出一个结论:治理不能在检索或执行阶段"打补丁",必须从存储那一刻起就锚定溯源、版本与留存策略——这与本方案把策略门、HITL 门前置在写入路径中的设计思路完全一致。</p>
+      </div>
+
+      <div class="trend">
+        <div class="trend-head"><span class="trend-badge">趋势 3</span><h3>多智能体共享记忆治理成为独立子方向</h3></div>
+        <p>2026 年 6 月发表的 MemClaw/ArgusFleet 论文<sup>[7]</sup>正式定义了"舰队记忆"(fleet-memory)问题,并给出四个失败模式与对应的系统原语(作用域检索、时态替代、溯源追踪、策略化传播);其生产评测显示,四层深度的溯源链可以 100% 正确重建写入者身份,单跳延迟保持在亚秒级。同期的 Collaborative Memory 论文<sup>[8]</sup>提出私有/共享双层记忆与二部图访问控制模型,每个记忆片段携带不可变的贡献者与访问记录,支持事后追溯核验。这两篇论文是目前学术界与 Vela 的四个缺口最接近的对应研究。</p>
+      </div>
+
+      <div class="trend">
+        <div class="trend-head"><span class="trend-badge">趋势 4</span><h3>"良性持久化"风险被单独提出</h3></div>
+        <p>"mnemonic sovereignty"综述<sup>[20]</sup>提出一个容易被忽视的观点:记忆系统即便在没有任何攻击者的情况下也会因正常运作而失效——跨用户的静默数据污染、把个人画像事实过度套用到不再适用的场景、记忆引发的谄媚倾向,都属于"良性持久化"风险。这为 Vela 在完全可信的内部部署环境下仍需要冲突检测与策略门(而不仅是面向外部攻击的防御)提供了学术依据。</p>
+      </div>
+
+      <div class="trend">
+        <div class="trend-head"><span class="trend-badge">趋势 5</span><h3>基准测试仍未覆盖治理维度</h3></div>
+        <p>LoCoMo<sup>[28]</sup>、LongMemEval<sup>[29]</sup>、BEAM、MemBench<sup>[30]</sup>等主流基准评测的都是信息抽取、多跳推理、知识更新、时态推理等召回与推理能力,没有一个把访问控制正确性或可审计完整性纳入评测维度——这是当前学术界公认但尚未被填补的空白,也意味着"基准分数高"不能作为企业选型的治理证明。</p>
+      </div>
+
+      <div class="trend">
+        <div class="trend-head"><span class="trend-badge">趋势 6</span><h3>"记忆即操作系统资源"的系统级范式</h3></div>
+        <p>MemOS<sup>[31]</sup>提出用 MemCube 统一参数记忆、激活记忆与明文记忆,并通过 MemScheduler、分层机制与治理模块把记忆当作可调度、可审计、可追踪的一等操作系统资源,是目前学术界到生产系统之间架构野心最大的桥梁。但其公开材料的重心仍在跨模态记忆的统一表示与调度上,对企业级多租户 ABAC 着墨有限——这进一步印证了 Vela 要补的四个缺口即便放在最新文献中仍然存在。</p>
+      </div>
+    </section>
+
+    <!-- ============ PART 04 ============ -->
+    <div class="part-divider"><span class="num">04</span><span class="txt">Roadmap & References · 落地路线图</span><span class="line"></span></div>
+
+    <section id="roadmap">
+      <h2>分阶段路线图</h2>
+      <p class="h2-sub">按回滚成本从高到低排序:凭证隔离与情景记忆的基础设施一旦补救成本最高,应最先落地;多智能体传播策略依赖前几阶段的信封与审计能力,放在最后。</p>
+
+      <div class="roadmap">
+        <div class="rstep">
+          <div class="rphase">Phase 1</div>
+          <div><h5>EpisodeStore + 基础 ABAC 信封 + SecretScanner</h5><p>先把 L1 只增不改的存储与凭证脱敏做对——这是事后补救成本最高的两块基础设施,后续所有层级都依赖其正确性。</p></div>
+        </div>
+        <div class="rstep">
+          <div class="rphase">Phase 2</div>
+          <div><h5>双时态 L2 图谱 + HybridRetriever 融合检索</h5><p>在 Neo4j 落地 Graphiti 式双时态 schema,接入 Milvus 做语义召回,实现向量 + 图遍历的融合排序。</p></div>
+        </div>
+        <div class="rstep">
+          <div class="rphase">Phase 3</div>
+          <div><h5>HitlGate diff-and-approve + 哈希链审计日志</h5><p>接入风险分级路由与人工复核队列,落地不可篡改的审计记录 schema。</p></div>
+        </div>
+        <div class="rstep">
+          <div class="rphase">Phase 4</div>
+          <div><h5>多智能体作用域传播 + 受控遗忘/清除工作流</h5><p>补齐 MemClaw 式的策略化传播原语,以及合规强制删除的独立审批链路。</p></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="references">
+      <h2>参考文献</h2>
+
+      <div class="ref-group">
+        <div class="ref-group-title">综述与分类法</div>
+        <div class="ref-item">[1] <span class="rt">Memory for Autonomous LLM Agents: Mechanisms, Evaluation, and Emerging Frontiers</span><span class="ra">arXiv:2603.07670, 2026</span></div>
+        <div class="ref-item">[2] Luo, J. et al. <span class="rt">From Storage to Experience: A Survey on the Evolution of LLM Agent Memory Mechanisms</span><span class="ra">ACL Findings 2026</span></div>
+        <div class="ref-item">[21] <span class="rt">LLM Agent Memory: A Survey from a Unified Representation–Management Perspective</span><span class="ra">OpenReview, 2026</span></div>
+        <div class="ref-item">[22] <span class="rt">1. Introduction(引用 Packer et al. 对拟人化记忆分类法的工程批判)</span><span class="ra">arXiv:2603.04740, 2026</span></div>
+      </div>
+
+      <div class="ref-group">
+        <div class="ref-group-title">生产级记忆框架</div>
+        <div class="ref-item">[15] Chhikara, P. et al. <span class="rt">Mem0: Building Production-Ready AI Agents with Scalable Long-Term Memory</span><span class="ra">arXiv:2504.19413, ECAI 2025;及 mem0.ai 2026 年基准博客</span></div>
+        <div class="ref-item">[16][4] Rasmussen, P. et al. <span class="rt">Zep: A Temporal Knowledge Graph Architecture for Agent Memory</span><span class="ra">arXiv:2501.13956, 2025</span></div>
+        <div class="ref-item">[17] Packer, C. et al. <span class="rt">MemGPT: Towards LLMs as Operating Systems</span><span class="ra">arXiv:2310.08560;项目现名 Letta</span></div>
+        <div class="ref-item">[18] <span class="rt">langchain-ai/langmem 项目文档与 LangGraph Memory 概念指南</span><span class="ra">langchain.com, 2026</span></div>
+        <div class="ref-item">[31] Li, Z., Chen, K. et al. <span class="rt">MemOS: An Operating System for Memory-Augmented Generation (MAG) in Large Language Models</span><span class="ra">arXiv:2505.22101 / arXiv:2507.03724, 2025</span></div>
+        <div class="ref-item">[3] <span class="rt">Self-Aware Vector Embeddings for RAG(MAGMA 快慢双流架构综述部分)</span><span class="ra">arXiv:2604.20598, 2026</span></div>
+      </div>
+
+      <div class="ref-group">
+        <div class="ref-group-title">安全与治理</div>
+        <div class="ref-item">[27] Lin, Z. et al. <span class="rt">A Survey on Long-Term Memory Security in LLM Agents: Attacks, Defenses, and Governance Across the Memory Lifecycle</span><span class="ra">arXiv:2604.16548, 2026</span></div>
+        <div class="ref-item">[20] <span class="rt">A Survey on the Security of Long-Term Memory in LLM Agents: Toward Mnemonic Sovereignty</span><span class="ra">arXiv, 2026</span></div>
+        <div class="ref-item">[24] <span class="rt">AgentPoison:面向 RAG 型 Agent 的后门投毒攻击</span><span class="ra">NeurIPS 2024, arXiv:2407.12784</span></div>
+        <div class="ref-item">[25] <span class="rt">MINJA:仅凭查询访问的记忆注入攻击</span><span class="ra">arXiv:2503.03704</span></div>
+        <div class="ref-item">[23] <span class="rt">OWASP Top 10 for Agentic Applications 2026 — ASI06 Memory & Context Poisoning</span><span class="ra">owasp.org, 2026</span></div>
+        <div class="ref-item">[26] <span class="rt">Taxonomy and Consistency Analysis of Safety Benchmarks for AI Agents</span><span class="ra">arXiv:2605.16282, 2026</span></div>
+        <div class="ref-item">[5] <span class="rt">Authorization Propagation in Multi-Agent AI Systems: Identity Governance as Infrastructure</span><span class="ra">arXiv:2605.05440, 2026</span></div>
+        <div class="ref-item">[6] <span class="rt">Authorization and Governance for AI Agents: Runtime Authorization Beyond Identity at Scale</span><span class="ra">Microsoft Community Hub, 2026</span></div>
+        <div class="ref-item">[9][10] <span class="rt">AI Agent 凭证保险库最佳实践;Towards Trustworthy Agentic AI: A Comprehensive Survey</span><span class="ra">arXiv:2605.23989,2026;及行业实践博客</span></div>
+        <div class="ref-item">[11] <span class="rt">memorywire: A Vendor-Neutral Wire Format for Agent Memory Operations(Co-memorize diff-and-approve 模式)</span><span class="ra">arXiv:2606.01138, 2026</span></div>
+        <div class="ref-item">[12][13][14] <span class="rt">Human-in-the-Loop AI Agents 相关行业实践(审批路由、审计留痕、脱敏与留存策略)</span><span class="ra">2026 年多篇行业技术博客</span></div>
+      </div>
+
+      <div class="ref-group">
+        <div class="ref-group-title">多智能体共享记忆 · 基准测试</div>
+        <div class="ref-item">[7] Margalit, Y. et al. <span class="rt">Governed Shared Memory for Multi-Agent LLM Systems(MemClaw / ArgusFleet)</span><span class="ra">arXiv:2606.24535, 2026</span></div>
+        <div class="ref-item">[8] <span class="rt">Collaborative Memory: Multi-User Memory Sharing in LLM Agents with Dynamic Access Control</span><span class="ra">arXiv:2505.18279, 2025</span></div>
+        <div class="ref-item">[19] <span class="rt">Building Multi-Tenant Agents with Amazon Bedrock AgentCore</span><span class="ra">AWS Machine Learning Blog, 2026</span></div>
+        <div class="ref-item">[28] Maharana, A. et al. <span class="rt">Evaluating Very Long-Term Conversational Memory of LLM Agents(LoCoMo)</span><span class="ra">ACL 2024</span></div>
+        <div class="ref-item">[29] Wu, D. et al. <span class="rt">LongMemEval:面向长期记忆能力的多会话评测基准</span><span class="ra">2024–2025</span></div>
+        <div class="ref-item">[30] Tan, Y. et al. <span class="rt">MemBench:面向 Agent 记忆的多维度评测</span><span class="ra">2025</span></div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<footer>
+  <span>Vela · 织帆 —— 内部技术参考文档,非对外发布材料</span>
+  <span>生成时间:2026-07-10</span>
+</footer>
+
+<script>
+  // 滚动时高亮当前所在章节对应的目录项(渐进增强,失败不影响可读性)
+  try{
+    const links = Array.from(document.querySelectorAll('.sidebar a'));
+    const map = new Map(links.map(a => [a.getAttribute('href').slice(1), a]));
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        const link = map.get(entry.target.id);
+        if(!link) return;
+        if(entry.isIntersecting){
+          links.forEach(l => l.classList.remove('active'));
+          link.classList.add('active');
+        }
+      });
+    }, { rootMargin: '-20% 0px -70% 0px' });
+    document.querySelectorAll('main section[id]').forEach(s => observer.observe(s));
+
+    // 移动端点击目录项后自动收起抽屉
+    const toggle = document.getElementById('nav-toggle');
+    links.forEach(a => a.addEventListener('click', () => { if(toggle) toggle.checked = false; }));
+  }catch(e){ /* 忽略,不影响静态内容阅读 */ }
+</script>
+
+</body>
+</html>

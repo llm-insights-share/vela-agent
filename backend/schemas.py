@@ -238,6 +238,7 @@ class AgentResponse(BaseModel):
     agent_type: str = "SINGLE"
     composition_config: Dict[str, Any] = {}
     workflow_definition: Dict[str, Any] = {}
+    memory_enabled: bool = False
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -755,3 +756,56 @@ class PaginatedResponse(BaseModel):
     page: int = 1
     page_size: int = 20
     items: List[Any] = []
+
+
+# ─── Memory ──────────────────────────────────────────────────────────────────
+
+class MemoryRecordResponse(BaseModel):
+    record_id: str
+    agent_id: str
+    user_id: str = ""
+    memory_type: str
+    content: str
+    metadata: Dict[str, Any] = {}
+    source_episode_ids: List[str] = []
+    status: str = "active"
+    valid_from: Optional[datetime] = None
+    valid_to: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    created_by: str = "system"
+
+    model_config = {"from_attributes": True}
+
+
+class MemoryRecordUpdate(BaseModel):
+    content: str = Field(..., min_length=1)
+    metadata: Optional[Dict[str, Any]] = None
+
+
+class MemoryEpisodeResponse(BaseModel):
+    episode_id: str
+    agent_id: str
+    session_id: str = ""
+    user_id: str = ""
+    event_type: str
+    payload: Dict[str, Any] = {}
+    created_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+class MemoryAgentMountItem(BaseModel):
+    agent_id: str
+    memory_enabled: bool
+
+
+class MemoryAgentMountUpdate(BaseModel):
+    items: List[MemoryAgentMountItem]
+
+
+class MemoryAgentMountResponse(BaseModel):
+    agent_id: str
+    name: str
+    status: str = "DRAFT"
+    memory_enabled: bool = False

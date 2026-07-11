@@ -37,6 +37,38 @@
         </a-collapse-panel>
       </a-collapse>
     </a-card>
+
+    <a-card title="记忆模块" style="margin-bottom: 24px;">
+      <div class="field-hint" style="margin-bottom: 16px;">
+        为各 Agent 开关记忆闭环（自我记录 / 自我处理 / 自我检索）。开启后，对话过程会自动写入情景事件，会话关闭时蒸馏语义记忆，并在后续对话中自动召回。
+      </div>
+      <a-table
+        :columns="memoryColumns"
+        :data-source="memoryAgents"
+        :loading="memoryLoading"
+        row-key="agent_id"
+        :pagination="false"
+        size="middle"
+      >
+        <template #bodyCell="{ column, record }">
+          <template v-if="column.key === 'status'">
+            <a-tag>{{ record.status }}</a-tag>
+          </template>
+          <template v-else-if="column.key === 'memory_enabled'">
+            <a-switch
+              :checked="record.memory_enabled"
+              @change="(checked) => onMemoryToggle(record, checked)"
+            />
+          </template>
+        </template>
+      </a-table>
+      <div style="margin-top: 16px;">
+        <a-button type="primary" :loading="memorySaving" @click="saveMemoryMounts">
+          保存挂载配置
+        </a-button>
+        <a-button style="margin-left: 12px;" @click="fetchMemoryAgents">刷新</a-button>
+      </div>
+    </a-card>
   </div>
 </template>
 
@@ -57,6 +89,15 @@ const tavilyStatus = reactive({
 const tavilyForm = reactive({
   api_key: '',
 })
+
+const memoryAgents = ref([])
+const memoryLoading = ref(false)
+const memorySaving = ref(false)
+const memoryColumns = [
+  { title: 'Agent', dataIndex: 'name' },
+  { title: '状态', key: 'status', dataIndex: 'status', width: 120 },
+  { title: '挂载记忆', key: 'memory_enabled', width: 120 },
+]
 
 async function fetchConfig() {
   try {
@@ -109,7 +150,42 @@ async function testTavily() {
   }
 }
 
-onMounted(fetchConfig)
+async function fetchMemoryAgents() {
+  memoryLoading.value = true
+  try {
+    memoryAgents.value = await configApi.listMemoryAgents()
+  } catch (e) {
+    message.error(e.message)
+  } finally {
+    memoryLoading.value = false
+  }
+}
+
+function onMemoryToggle(record, checked) {
+  record.memory_enabled = checked
+}
+
+async function saveMemoryMounts() {
+  memorySaving.value = true
+  try {
+    const items = memoryAgents.value.map((a) => ({
+      agent_id: a.agent_id,
+      memory_enabled: !!a.memory_enabled,
+    }))
+    const res = await configApi.updateMemoryAgents(items)
+    message.success(res.message || '记忆模块挂载配置已保存')
+    await fetchMemoryAgents()
+  } catch (e) {
+    message.error(e.message)
+  } finally {
+    memorySaving.value = false
+  }
+}
+
+onMounted(async () => {
+  await fetchConfig()
+  await fetchMemoryAgents()
+})
 </script>
 
 <style scoped>

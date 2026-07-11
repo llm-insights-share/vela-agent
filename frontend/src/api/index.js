@@ -112,6 +112,17 @@ export const configApi = {
   getToolConfig: () => api.get('/config/tools'),
   updateTavily: (data) => api.put('/config/tools/tavily', data),
   getTavilyStatus: () => api.get('/config/tools/tavily/status'),
+  listMemoryAgents: () => api.get('/config/memory/agents'),
+  updateMemoryAgents: (items) => api.put('/config/memory/agents', { items }),
+}
+
+export const memoryApi = {
+  listRecords: (params) => api.get('/memory/records', { params }),
+  getRecord: (id) => api.get(`/memory/records/${id}`),
+  updateRecord: (id, data) => api.put(`/memory/records/${id}`, data),
+  deleteRecord: (id) => api.delete(`/memory/records/${id}`),
+  listEpisodes: (params) => api.get('/memory/episodes', { params }),
+  processSession: (sessionId) => api.post(`/memory/process/${sessionId}`),
 }
 
 export const compositionApi = {

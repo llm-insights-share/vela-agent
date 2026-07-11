@@ -681,6 +681,8 @@ class AgentService:
             }
         except Exception as e:
             traceback.print_exc()
+            if loop and getattr(loop, "memory_enabled", False):
+                loop._memory_record_exception(str(e))
             thinking_log = loop.thinking_log if loop else []
             return {
                 "success": False,
@@ -750,6 +752,28 @@ class AgentLoop:
             if b.require_approval:
                 self.tool_require_approval[b.tool_id] = True
 
+        # 记忆闭环：仅当 Agent 挂载记忆模块时启用
+        self.memory_enabled = bool(getattr(agent, "memory_enabled", False))
+        self._memory_context = ""
+        if self.memory_enabled:
+            try:
+                from services.memory.retriever import SelfRetriever
+                retriever = SelfRetriever(db)
+                parts = []
+                # 每轮重建 system prompt，持续注入偏好与近期摘要
+                parts.append(retriever.on_session_start(
+                    agent_id=agent.agent_id,
+                    user_id=session.caller_id or "",
+                ))
+                if available_tools:
+                    parts.append(retriever.before_tool_invoke(
+                        agent_id=agent.agent_id,
+                        tool_names=[t.name for t in available_tools],
+                    ))
+                self._memory_context = "".join(p for p in parts if p)
+            except Exception as e:
+                print(f"[AgentLoop] 记忆检索失败，跳过: {e}")
+
         self.output_dir = os.path.join(
             os.path.dirname(os.path.dirname(__file__)), "data", "outputs", session.session_id
         )
@@ -783,6 +807,16 @@ class AgentLoop:
 
     def _build_system_prompt(self) -> str:
         system_prompt = self.agent.system_prompt or "你是一个智能助手。"
+        # 注入当前日期，避免模型将「今天」误判为错误年份
+        from datetime import datetime
+        today = datetime.now().strftime("%Y-%m-%d")
+        weekday_map = ["一", "二", "三", "四", "五", "六", "日"]
+        weekday = weekday_map[datetime.now().weekday()]
+        system_prompt += (
+            f"\n\n当前日期：{today}（星期{weekday}）。"
+            "理解「今天/本周/本月/今年」时必须以该日期为准；"
+            "搜索新闻或时效信息时，查询关键词应使用正确的公历年份，不要使用过时年份。"
+        )
         if self.knowledge_context:
             system_prompt += self.knowledge_context
         if self.skill_context:
@@ -790,6 +824,8 @@ class AgentLoop:
             if len(truncated) > self.SKILL_MAX_CHARS:
                 truncated = truncated[:self.SKILL_MAX_CHARS] + "\n\n[Skill 内容过长，已截断，请关注核心指令]"
             system_prompt += truncated
+        if self._memory_context:
+            system_prompt += self._memory_context
         return system_prompt
 
     def _build_initial_messages(self) -> List[Dict[str, Any]]:
@@ -1144,11 +1180,14 @@ class AgentLoop:
             )
             raise HITLPendingError(approval.approval_id, tool.name)
 
+        result: Dict[str, Any]
         if isinstance(tool, BuiltinTool):
             try:
-                return await execute_builtin_tool(tool.name, args, self.output_dir)
+                result = await execute_builtin_tool(tool.name, args, self.output_dir)
             except Exception as e:
-                return {"success": False, "error": f"内置工具执行失败: {str(e)}"}
+                result = {"success": False, "error": f"内置工具执行失败: {str(e)}"}
+            self._memory_record_tool(tool.name, args, result)
+            return result
 
         from services.tool_service import tool_execution_service
 
@@ -1159,7 +1198,9 @@ class AgentLoop:
                     tool, args, timeout_seconds=self.step_timeout
                 )
                 if result.get("success"):
-                    return await self._finalize_tool_success(tool, args, result)
+                    finalized = await self._finalize_tool_success(tool, args, result)
+                    self._memory_record_tool(tool.name, args, finalized)
+                    return finalized
 
                 last_error = result.get("error") or result.get("result") or "工具执行失败"
                 self.thinking_log.append(
@@ -1169,6 +1210,7 @@ class AgentLoop:
                 fallback = await self._try_nl2sql_fallback(tool, args)
                 if fallback and fallback.get("success"):
                     self.thinking_log.append("  已通过 nl2sql_query 降级查询成功")
+                    self._memory_record_tool(tool.name, args, fallback)
                     return fallback
                 if fallback and not fallback.get("success"):
                     self.thinking_log.append(
@@ -1181,12 +1223,15 @@ class AgentLoop:
                         self.thinking_log.append(f"  指数退避 {backoff}s 后重试...")
                         await asyncio.sleep(backoff)
                     continue
-                return {"success": False, "error": last_error}
+                fail_result = {"success": False, "error": last_error}
+                self._memory_record_tool(tool.name, args, fail_result)
+                return fail_result
             except Exception as e:
                 last_error = str(e)
                 self.thinking_log.append(f"  工具 [{tool.name}] 第 {attempt + 1} 次执行异常: {last_error[:200]}")
                 fallback = await self._try_nl2sql_fallback(tool, args)
                 if fallback and fallback.get("success"):
+                    self._memory_record_tool(tool.name, args, fallback)
                     return fallback
                 if attempt < self.tool_retry_count:
                     if self.tool_retry_backoff == "exponential":
@@ -1195,7 +1240,56 @@ class AgentLoop:
                         await asyncio.sleep(backoff)
                     continue
 
-        return {"success": False, "error": last_error or "工具执行失败"}
+        fail_result = {"success": False, "error": last_error or "工具执行失败"}
+        self._memory_record_tool(tool.name, args, fail_result)
+        return fail_result
+
+    def _memory_record_tool(self, tool_name: str, args: Dict[str, Any], result: Dict[str, Any]):
+        if not self.memory_enabled:
+            return
+        try:
+            from services.memory.recorder import MemoryRecorder
+            MemoryRecorder(self.db).record_tool_completed(
+                agent_id=self.agent.agent_id,
+                session_id=self.session.session_id,
+                user_id=self.session.caller_id or "",
+                tool_name=tool_name,
+                success=bool(result.get("success")),
+                args=args,
+                result_preview=str(result.get("result", ""))[:500],
+                error=str(result.get("error", "") or ""),
+            )
+        except Exception as e:
+            print(f"[AgentLoop] 记忆记录工具调用失败: {e}")
+
+    def _memory_record_turn(self, assistant_content: str = ""):
+        if not self.memory_enabled:
+            return
+        try:
+            from services.memory.recorder import MemoryRecorder
+            MemoryRecorder(self.db).record_message_turn(
+                agent_id=self.agent.agent_id,
+                session_id=self.session.session_id,
+                user_id=self.session.caller_id or "",
+                user_message=self.user_message,
+                assistant_message=assistant_content or "",
+            )
+        except Exception as e:
+            print(f"[AgentLoop] 记忆记录消息轮次失败: {e}")
+
+    def _memory_record_exception(self, error: str):
+        if not self.memory_enabled:
+            return
+        try:
+            from services.memory.recorder import MemoryRecorder
+            MemoryRecorder(self.db).record_exception(
+                agent_id=self.agent.agent_id,
+                session_id=self.session.session_id,
+                user_id=self.session.caller_id or "",
+                error=error,
+            )
+        except Exception as e:
+            print(f"[AgentLoop] 记忆记录异常失败: {e}")
 
     def _create_hitl_approval(self, tool_name: str, tool_args: dict, pending_kind: str = "tool_call"):
         """SGL-CFG-06: 创建 HITL 审批工单并挂起 session"""
@@ -1556,6 +1650,9 @@ class AgentLoop:
         self.session.messages = messages
         flag_modified(self.session, "messages")
         self.db.commit()
+
+        # 自我记录：消息轮次
+        self._memory_record_turn(assistant_content=content or "")
         return result
 
     def _replace_file_references(self, content: str) -> str:

@@ -386,6 +386,7 @@ def _agent_to_dict(agent: Agent, db: Session) -> dict:
         "agent_type": agent.agent_type.value if agent.agent_type else "SINGLE",
         "composition_config": agent.composition_config or {},
         "workflow_definition": agent.workflow_definition or {},
+        "memory_enabled": bool(getattr(agent, "memory_enabled", False)),
         "created_at": agent.created_at,
         "updated_at": agent.updated_at,
     }

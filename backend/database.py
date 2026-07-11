@@ -37,6 +37,7 @@ def init_db():
         DataQueryAgent, DataQueryDatasourceBinding, DataQueryExecutionLog,
         DataTableDictionary, DataDictionaryItem, DataCodeMapping, DataQueryExample, DataTermMapping,
         DataQueryFeedback, DataQueryQualityStats,
+        MemoryEpisode, MemoryRecord,
     )
     Base.metadata.create_all(bind=engine)
     _migrate_db()
@@ -64,6 +65,7 @@ def _migrate_db():
         ("agent_type", "VARCHAR(16) DEFAULT 'SINGLE'"),
         ("composition_config", "TEXT DEFAULT '{}'"),
         ("workflow_definition", "TEXT DEFAULT '{}'"),
+        ("memory_enabled", "BOOLEAN DEFAULT 0"),
     ]
 
     for col_name, col_def in new_columns:

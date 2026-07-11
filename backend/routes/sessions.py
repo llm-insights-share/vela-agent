@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from typing import Optional
 from database import get_db
@@ -7,6 +7,15 @@ from schemas import SessionCreate, SessionChatRequest, SessionResponse, Paginate
 from services.agent_service import agent_service, _ensure_files_for_session
 
 router = APIRouter(prefix="/api/v1/sessions", tags=["sessions"])
+
+
+def _run_memory_process(session_id: str):
+    import asyncio
+    from services.memory.processor import process_session_background
+    try:
+        asyncio.run(process_session_background(session_id))
+    except Exception as e:
+        print(f"[sessions.close] 记忆处理失败: {e}")
 
 
 @router.get("", response_model=PaginatedResponse)
@@ -100,7 +109,11 @@ async def chat(session_id: str, data: SessionChatRequest, db: Session = Depends(
 
 
 @router.post("/{session_id}/close")
-def close_session(session_id: str, db: Session = Depends(get_db)):
+def close_session(
+    session_id: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
     session = db.query(SessionModel).filter(
         SessionModel.session_id == session_id
     ).first()
@@ -108,6 +121,23 @@ def close_session(session_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="会话不存在")
     session.status = SessionStatus.CLOSED
     db.commit()
+
+    # 记忆闭环：归档 + 后台自我处理
+    try:
+        from models import Agent
+        agent = db.query(Agent).filter(Agent.agent_id == session.agent_id).first()
+        if agent and getattr(agent, "memory_enabled", False):
+            from services.memory.recorder import MemoryRecorder
+            MemoryRecorder(db).archive_session(
+                agent_id=session.agent_id,
+                session_id=session_id,
+                user_id=session.caller_id or "",
+                messages=session.messages or [],
+            )
+            background_tasks.add_task(_run_memory_process, session_id)
+    except Exception as e:
+        print(f"[sessions.close] 记忆处理调度失败: {e}")
+
     return {"message": "会话已关闭"}
 
 

@@ -35,6 +35,10 @@
           <BookOutlined />
           <span>知识库</span>
         </a-menu-item>
+        <a-menu-item key="/memory">
+          <BulbOutlined />
+          <span>记忆管理</span>
+        </a-menu-item>
         <a-menu-item key="/data-access">
           <DatabaseOutlined />
           <span>数据访问</span>
@@ -72,6 +76,7 @@ import {
   DatabaseOutlined,
   ToolOutlined,
   SettingOutlined,
+  BulbOutlined,
 } from '@ant-design/icons-vue'
 
 const router = useRouter()

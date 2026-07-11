@@ -67,6 +67,11 @@ const routes = [
     component: () => import('../views/knowledge/KnowledgeDetail.vue'),
   },
   {
+    path: '/memory',
+    name: 'MemoryManage',
+    component: () => import('../views/memory/MemoryManage.vue'),
+  },
+  {
     path: '/tools',
     name: 'ToolList',
     component: () => import('../views/tools/ToolList.vue'),
