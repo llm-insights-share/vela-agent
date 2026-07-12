@@ -239,6 +239,7 @@ class AgentResponse(BaseModel):
     composition_config: Dict[str, Any] = {}
     workflow_definition: Dict[str, Any] = {}
     memory_enabled: bool = False
+    query_rewrite_enabled: bool = False
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -809,3 +810,29 @@ class MemoryAgentMountResponse(BaseModel):
     name: str
     status: str = "DRAFT"
     memory_enabled: bool = False
+
+
+class QueryRewriteAgentMountItem(BaseModel):
+    agent_id: str
+    query_rewrite_enabled: bool
+
+
+class QueryRewriteAgentMountUpdate(BaseModel):
+    items: List[QueryRewriteAgentMountItem]
+
+
+class QueryRewriteAgentMountResponse(BaseModel):
+    agent_id: str
+    name: str
+    status: str = "DRAFT"
+    query_rewrite_enabled: bool = False
+
+
+class QueryRewritePreviewRequest(BaseModel):
+    agent_id: str
+    query: str
+    history: Optional[List[Dict[str, Any]]] = None
+
+
+class QueryRewritePreviewResponse(BaseModel):
+    rewrite: Dict[str, Any]

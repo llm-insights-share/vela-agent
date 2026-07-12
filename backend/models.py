@@ -147,6 +147,8 @@ class Agent(Base):
     single_call_token_limit = Column(Integer, default=8192)
     # 记忆模块：是否挂载闭环记忆（自我记录/处理/检索）
     memory_enabled = Column(Boolean, default=False)
+    # Query 改写引擎：是否在检索/工具前按需改写用户输入
+    query_rewrite_enabled = Column(Boolean, default=False)
     created_at = Column(DateTime, default=now_utc)
     updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)
 

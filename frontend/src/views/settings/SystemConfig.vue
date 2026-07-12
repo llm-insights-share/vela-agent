@@ -69,6 +69,38 @@
         <a-button style="margin-left: 12px;" @click="fetchMemoryAgents">刷新</a-button>
       </div>
     </a-card>
+
+    <a-card title="Query 改写引擎" style="margin-bottom: 24px;">
+      <div class="field-hint" style="margin-bottom: 16px;">
+        为各 Agent 开关 Query 改写引擎。开启后，对话进入检索 / 工具前会自动判断是否需要改写，并按 T0 透传 / T1 规则 / T2 LLM 路由执行。
+      </div>
+      <a-table
+        :columns="rewriteColumns"
+        :data-source="rewriteAgents"
+        :loading="rewriteLoading"
+        row-key="agent_id"
+        :pagination="false"
+        size="middle"
+      >
+        <template #bodyCell="{ column, record }">
+          <template v-if="column.key === 'status'">
+            <a-tag>{{ record.status }}</a-tag>
+          </template>
+          <template v-else-if="column.key === 'query_rewrite_enabled'">
+            <a-switch
+              :checked="record.query_rewrite_enabled"
+              @change="(checked) => onRewriteToggle(record, checked)"
+            />
+          </template>
+        </template>
+      </a-table>
+      <div style="margin-top: 16px;">
+        <a-button type="primary" :loading="rewriteSaving" @click="saveRewriteMounts">
+          保存挂载配置
+        </a-button>
+        <a-button style="margin-left: 12px;" @click="fetchRewriteAgents">刷新</a-button>
+      </div>
+    </a-card>
   </div>
 </template>
 
@@ -97,6 +129,15 @@ const memoryColumns = [
   { title: 'Agent', dataIndex: 'name' },
   { title: '状态', key: 'status', dataIndex: 'status', width: 120 },
   { title: '挂载记忆', key: 'memory_enabled', width: 120 },
+]
+
+const rewriteAgents = ref([])
+const rewriteLoading = ref(false)
+const rewriteSaving = ref(false)
+const rewriteColumns = [
+  { title: 'Agent', dataIndex: 'name' },
+  { title: '状态', key: 'status', dataIndex: 'status', width: 120 },
+  { title: '挂载改写', key: 'query_rewrite_enabled', width: 120 },
 ]
 
 async function fetchConfig() {
@@ -182,9 +223,42 @@ async function saveMemoryMounts() {
   }
 }
 
+async function fetchRewriteAgents() {
+  rewriteLoading.value = true
+  try {
+    rewriteAgents.value = await configApi.listQueryRewriteAgents()
+  } catch (e) {
+    message.error(e.message)
+  } finally {
+    rewriteLoading.value = false
+  }
+}
+
+function onRewriteToggle(record, checked) {
+  record.query_rewrite_enabled = checked
+}
+
+async function saveRewriteMounts() {
+  rewriteSaving.value = true
+  try {
+    const items = rewriteAgents.value.map((a) => ({
+      agent_id: a.agent_id,
+      query_rewrite_enabled: !!a.query_rewrite_enabled,
+    }))
+    const res = await configApi.updateQueryRewriteAgents(items)
+    message.success(res.message || 'Query改写引擎挂载配置已保存')
+    await fetchRewriteAgents()
+  } catch (e) {
+    message.error(e.message)
+  } finally {
+    rewriteSaving.value = false
+  }
+}
+
 onMounted(async () => {
   await fetchConfig()
   await fetchMemoryAgents()
+  await fetchRewriteAgents()
 })
 </script>
 

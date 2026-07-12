@@ -7,7 +7,12 @@ from sqlalchemy.orm import Session
 
 from database import get_db
 from models import Agent, AgentStatus
-from schemas import MemoryAgentMountUpdate, MemoryAgentMountResponse
+from schemas import (
+    MemoryAgentMountUpdate,
+    MemoryAgentMountResponse,
+    QueryRewriteAgentMountUpdate,
+    QueryRewriteAgentMountResponse,
+)
 
 router = APIRouter(prefix="/api/v1/config", tags=["config"])
 
@@ -101,3 +106,39 @@ def update_memory_agent_mounts(data: MemoryAgentMountUpdate, db: Session = Depen
         updated += 1
     db.commit()
     return {"message": "记忆模块挂载配置已保存", "updated": updated}
+
+
+@router.get("/query-rewrite/agents", response_model=List[QueryRewriteAgentMountResponse])
+def list_query_rewrite_agent_mounts(db: Session = Depends(get_db)):
+    agents = (
+        db.query(Agent)
+        .filter(Agent.status != AgentStatus.DELETED)
+        .order_by(Agent.name.asc())
+        .all()
+    )
+    return [
+        QueryRewriteAgentMountResponse(
+            agent_id=a.agent_id,
+            name=a.name,
+            status=a.status.value if hasattr(a.status, "value") else str(a.status),
+            query_rewrite_enabled=bool(getattr(a, "query_rewrite_enabled", False)),
+        )
+        for a in agents
+    ]
+
+
+@router.put("/query-rewrite/agents")
+def update_query_rewrite_agent_mounts(
+    data: QueryRewriteAgentMountUpdate, db: Session = Depends(get_db)
+):
+    if not data.items:
+        return {"message": "无变更", "updated": 0}
+    updated = 0
+    for item in data.items:
+        agent = db.query(Agent).filter(Agent.agent_id == item.agent_id).first()
+        if not agent or agent.status == AgentStatus.DELETED:
+            continue
+        agent.query_rewrite_enabled = bool(item.query_rewrite_enabled)
+        updated += 1
+    db.commit()
+    return {"message": "Query改写引擎挂载配置已保存", "updated": updated}

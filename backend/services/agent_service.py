@@ -578,6 +578,57 @@ class AgentService:
                 db, session, message, result
             )
 
+        original_message = message
+        rewrite_meta = None
+        if getattr(agent, "query_rewrite_enabled", False):
+            try:
+                from services.query_rewrite import QueryRewriteEngine
+
+                kb_ids = [
+                    b.kb_id
+                    for b in db.query(AgentKnowledgeBinding).filter(
+                        AgentKnowledgeBinding.agent_id == agent_id
+                    ).all()
+                ]
+                engine = QueryRewriteEngine(db=db, provider=provider, model_svc=model_svc)
+                rewrite_result = await engine.rewrite(
+                    message,
+                    messages=session.messages or [],
+                    agent_id=agent.agent_id,
+                    user_id=session.caller_id or "",
+                    memory_enabled=bool(getattr(agent, "memory_enabled", False)),
+                    kb_ids=kb_ids,
+                )
+                rewrite_meta = rewrite_result.to_dict()
+                rewrite_meta["_summary"] = rewrite_result.summary_line()
+                if rewrite_result.need_clarification and rewrite_result.clarification:
+                    # 记忆锚定无法确定时直接澄清，避免硬造检索式
+                    messages = session.messages or []
+                    messages.append({"role": "user", "content": original_message})
+                    messages.append({"role": "assistant", "content": rewrite_result.clarification})
+                    session.messages = messages
+                    session.last_active_at = now_utc()
+                    db.commit()
+                    return {
+                        "content": rewrite_result.clarification,
+                        "thinking": rewrite_result.summary_line(),
+                        "tokens_used": rewrite_result.tokens_used,
+                        "total_tokens": (session.token_used or 0) + rewrite_result.tokens_used,
+                        "execution_mode": "query_rewrite_clarify",
+                        "rewrite": rewrite_meta,
+                        "files": [],
+                    }
+                message = rewrite_result.query_for_downstream
+            except Exception as e:
+                print(f"[AgentService] Query改写失败，使用原文: {e}")
+                rewrite_meta = {
+                    "original": original_message,
+                    "rewritten": original_message,
+                    "tier": 0,
+                    "method": "pass_through",
+                    "fallback_reason": f"engine_error:{e}",
+                }
+
         knowledge_context = ""
         kb_bindings = db.query(AgentKnowledgeBinding).filter(
             AgentKnowledgeBinding.agent_id == agent_id
@@ -657,14 +708,30 @@ class AgentService:
             available_tools=available_tools,
             timeout_seconds=timeout_seconds,
             user_message=message,
+            original_user_message=original_message,
             active_skill_name=active_skill_name,
             knowledge_context=knowledge_context,
             skill_context=skill_context,
             skip_history=skip_history,
         )
+        if rewrite_meta:
+            loop.thinking_log.append(
+                rewrite_meta.get("_summary")
+                or f"[QueryRewrite] T{rewrite_meta.get('tier')}/{rewrite_meta.get('method')} "
+                   f"score={rewrite_meta.get('score', 0):.2f}"
+            )
+            if rewrite_meta.get("rewritten") and rewrite_meta.get("rewritten") != original_message:
+                loop.thinking_log.append(
+                    f"  原文: {original_message[:120]}\n  改写: {str(rewrite_meta.get('rewritten'))[:200]}"
+                )
 
         try:
             result = await loop.run(mode)
+            if rewrite_meta:
+                result["rewrite"] = rewrite_meta
+                rewrite_tokens = int(rewrite_meta.get("tokens_used") or 0)
+                if rewrite_tokens:
+                    result["tokens_used"] = (result.get("tokens_used") or 0) + rewrite_tokens
             return result
         except HITLPendingError as he:
             # SGL-CFG-06 / ScreenPilot GOV: 工具需人工审批，返回挂起响应
@@ -678,7 +745,7 @@ class AgentService:
                     preview_payload = approval.tool_args.get("preview_payload") or {}
             except Exception:
                 pass
-            return {
+            hitl_result = {
                 "content": f"⏸️ 工具 [{he.tool_name}] 需要人工审批后才能继续执行。\n审批工单 ID: `{he.approval_id}`\n\n请在审批中心处理后继续对话。",
                 "thinking": "\n".join(loop.thinking_log) if loop else "",
                 "tokens_used": 0,
@@ -690,6 +757,9 @@ class AgentService:
                 "preview_payload": preview_payload,
                 "session_status": "HITL_WAIT",
             }
+            if rewrite_meta:
+                hitl_result["rewrite"] = rewrite_meta
+            return hitl_result
         except Exception as e:
             traceback.print_exc()
             if loop and getattr(loop, "memory_enabled", False):
@@ -722,6 +792,7 @@ class AgentLoop:
         knowledge_context: str,
         skill_context: str,
         skip_history: bool = False,
+        original_user_message: Optional[str] = None,
     ):
         self.db = db
         self.agent = agent
@@ -731,6 +802,10 @@ class AgentLoop:
         self.available_tools = available_tools
         self.timeout_seconds = timeout_seconds
         self.user_message = user_message
+        # 会话历史保存原文；LLM / 检索使用可能已改写的 user_message
+        self.original_user_message = (
+            original_user_message if original_user_message is not None else user_message
+        )
         self.active_skill_name = active_skill_name
         self.knowledge_context = knowledge_context
         self.skill_context = skill_context
@@ -1343,7 +1418,7 @@ class AgentLoop:
             "tool_name": tool_name,
             "tool_args": tool_args,
             "approval_id": approval.approval_id,
-            "user_message": self.user_message,
+            "user_message": self.original_user_message,
         }
         self.session.last_active_at = now_utc()
         self.db.commit()
@@ -1367,7 +1442,7 @@ class AgentLoop:
         response_truncated = self._get_finish_reason(completion) == "length"
 
         history = self.session.messages or []
-        history.append({"role": "user", "content": self.user_message})
+        history.append({"role": "user", "content": self.original_user_message})
         history.append({"role": "assistant", "content": assistant_content})
         self._persist_session(history)
 
@@ -1493,14 +1568,14 @@ class AgentLoop:
 
             new_messages.append({"role": "assistant", "content": assistant_content})
 
-            history = (self.session.messages or []) + [{"role": "user", "content": self.user_message}] + new_messages
+            history = (self.session.messages or []) + [{"role": "user", "content": self.original_user_message}] + new_messages
             self._persist_session(history)
 
             self._extract_and_save_files_from_content(assistant_content, response_truncated=response_truncated)
 
             return self._build_result(assistant_content, reasoning_content, "react")
 
-        history = (self.session.messages or []) + [{"role": "user", "content": self.user_message}] + new_messages
+        history = (self.session.messages or []) + [{"role": "user", "content": self.original_user_message}] + new_messages
         if not new_messages:
             history.append({"role": "assistant", "content": "已达到最大迭代次数，任务未完成。"})
         self._persist_session(history)
@@ -1638,7 +1713,7 @@ class AgentLoop:
         self._extract_and_save_files_from_content(final_content, response_truncated=response_truncated)
 
         history = (self.session.messages or []) + [
-            {"role": "user", "content": self.user_message},
+            {"role": "user", "content": self.original_user_message},
             {"role": "assistant", "content": final_content},
         ]
         self._persist_session(history)

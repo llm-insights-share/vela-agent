@@ -387,6 +387,7 @@ def _agent_to_dict(agent: Agent, db: Session) -> dict:
         "composition_config": agent.composition_config or {},
         "workflow_definition": agent.workflow_definition or {},
         "memory_enabled": bool(getattr(agent, "memory_enabled", False)),
+        "query_rewrite_enabled": bool(getattr(agent, "query_rewrite_enabled", False)),
         "created_at": agent.created_at,
         "updated_at": agent.updated_at,
     }

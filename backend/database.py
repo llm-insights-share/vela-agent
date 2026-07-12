@@ -67,6 +67,7 @@ def _migrate_db():
         ("composition_config", "TEXT DEFAULT '{}'"),
         ("workflow_definition", "TEXT DEFAULT '{}'"),
         ("memory_enabled", "BOOLEAN DEFAULT 0"),
+        ("query_rewrite_enabled", "BOOLEAN DEFAULT 0"),
     ]
 
     for col_name, col_def in new_columns:

@@ -20,6 +20,7 @@ from routes.dataquery_metadata import router as dataquery_metadata_router
 from routes.dataquery_knowledge import router as dataquery_knowledge_router
 from routes.memory import router as memory_router
 from routes.screenpilot import router as screenpilot_router
+from routes.query_rewrite import router as query_rewrite_router
 
 app = FastAPI(
     title="Vela Agent Playground API",
@@ -51,6 +52,7 @@ app.include_router(dataquery_metadata_router)
 app.include_router(dataquery_knowledge_router)
 app.include_router(memory_router)
 app.include_router(screenpilot_router)
+app.include_router(query_rewrite_router)
 
 
 @app.on_event("startup")

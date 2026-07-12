@@ -114,6 +114,12 @@ export const configApi = {
   getTavilyStatus: () => api.get('/config/tools/tavily/status'),
   listMemoryAgents: () => api.get('/config/memory/agents'),
   updateMemoryAgents: (items) => api.put('/config/memory/agents', { items }),
+  listQueryRewriteAgents: () => api.get('/config/query-rewrite/agents'),
+  updateQueryRewriteAgents: (items) => api.put('/config/query-rewrite/agents', { items }),
+}
+
+export const queryRewriteApi = {
+  preview: (data) => api.post('/query-rewrite/preview', data),
 }
 
 export const memoryApi = {
