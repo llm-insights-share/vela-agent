@@ -56,21 +56,35 @@ const columns = [
   { title: '描述', dataIndex: 'description', key: 'description', ellipsis: true },
   { title: '步骤数', dataIndex: 'step_count', key: 'step_count', width: 80 },
   { title: 'Scope', dataIndex: 'scope', key: 'scope', width: 100 },
+  { title: '可见性', dataIndex: 'visibility', key: 'visibility', width: 90 },
   {
     title: '操作',
     key: 'action',
-    width: 100,
+    width: 160,
     customRender: ({ record }) =>
-      h(
-        'a',
-        {
-          onClick: (e) => {
-            e.preventDefault()
-            openDetail(record.skill_id)
+      h('span', {}, [
+        h(
+          'a',
+          {
+            style: { marginRight: '8px' },
+            onClick: (e) => {
+              e.preventDefault()
+              openDetail(record.skill_id)
+            },
           },
-        },
-        '详情'
-      ),
+          '详情'
+        ),
+        h(
+          'a',
+          {
+            onClick: (e) => {
+              e.preventDefault()
+              togglePublish(record)
+            },
+          },
+          record.visibility === 'PRIVATE' ? '发布' : '下架'
+        ),
+      ]),
   },
 ]
 
@@ -121,6 +135,21 @@ async function openDetail(skillId) {
   try {
     detail.value = await screenpilotApi.getSkill(skillId)
     detailOpen.value = true
+  } catch (e) {
+    message.error(e.message)
+  }
+}
+
+async function togglePublish(record) {
+  try {
+    if (record.visibility === 'PRIVATE') {
+      await screenpilotApi.publishSkill(record.skill_id, { visibility: 'DEPARTMENT' })
+      message.success('已发布到部门技能商店')
+    } else {
+      await screenpilotApi.unpublishSkill(record.skill_id)
+      message.success('已下架')
+    }
+    await loadSkills()
   } catch (e) {
     message.error(e.message)
   }

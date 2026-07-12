@@ -55,6 +55,10 @@
           <DesktopOutlined />
           <span>UI 技能</span>
         </a-menu-item>
+        <a-menu-item key="/screenpilot/shop">
+          <DesktopOutlined />
+          <span>技能商店</span>
+        </a-menu-item>
         <a-menu-item key="/settings">
           <SettingOutlined />
           <span>系统配置</span>

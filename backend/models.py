@@ -620,6 +620,9 @@ class UiSkill(Base):
     scope = Column(String(64), default="default", index=True)
     param_schema = Column(JSON, default=dict)
     status = Column(String(16), default="ACTIVE")
+    visibility = Column(String(16), default="PRIVATE", index=True)  # PRIVATE | DEPARTMENT | PUBLIC
+    publisher_id = Column(String(128), default="")
+    published_at = Column(DateTime, nullable=True)
     source_session_id = Column(String, default="")
     created_at = Column(DateTime, default=now_utc)
     updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)

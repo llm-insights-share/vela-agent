@@ -204,4 +204,12 @@ export const screenpilotApi = {
   compileSkill: (data) => api.post('/screenpilot/skills/compile', data),
   searchSkills: (data) => api.post('/screenpilot/skills/search', data),
   replaySkill: (data) => api.post('/screenpilot/skills/replay', data),
+  listSkillShop: (params) => api.get('/screenpilot/skills/shop', { params }),
+  publishSkill: (id, data) => api.post(`/screenpilot/skills/${id}/publish`, data),
+  unpublishSkill: (id) => api.post(`/screenpilot/skills/${id}/unpublish`),
+  importSkill: (id, data) => api.post(`/screenpilot/skills/${id}/import`, data),
+  reindexSkills: (scope) => api.post('/screenpilot/skills/reindex', null, { params: { scope } }),
+  analyzeRisk: (params) => api.get('/screenpilot/risk/analyze', { params }),
+  optimizeRisk: (data) => api.post('/screenpilot/risk/optimize', data),
+  gatewayStatus: () => api.get('/screenpilot/gateway/status'),
 }

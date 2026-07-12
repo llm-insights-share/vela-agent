@@ -87,6 +87,11 @@ const routes = [
     component: () => import('../views/screenpilot/SkillList.vue'),
   },
   {
+    path: '/screenpilot/shop',
+    name: 'ScreenPilotShop',
+    component: () => import('../views/screenpilot/SkillShop.vue'),
+  },
+  {
     path: '/data-access',
     name: 'DataAccessConfig',
     component: () => import('../views/dataquery/DataAccessConfig.vue'),

@@ -83,16 +83,63 @@ class SkillStore:
         self._save_index(scope)
 
     def remove_skill_from_index(self, skill_id: str, scope: str = "default") -> None:
-        """简单重建：删除单个 skill 时重建该 scope 索引。"""
+        """从 scope 索引中移除 skill 并增量重建该 scope。"""
         scope = scope or "default"
+        self._ensure_index(scope)
         id_map = self._id_maps.get(scope, [])
         if skill_id not in id_map:
             return
-        id_map.remove(skill_id)
-        dim = self._embedding_model().get_sentence_embedding_dimension()
-        self._indexes[scope] = faiss.IndexFlatIP(dim)
-        self._id_maps[scope] = []
-        self._save_index(scope)
+        idx = id_map.index(skill_id)
+        index = self._indexes[scope]
+        if index.ntotal > 0 and idx < index.ntotal:
+            # IndexFlatIP 不支持单条删除，重建该 scope 向量
+            remaining_ids = [sid for sid in id_map if sid != skill_id]
+            dim = self._embedding_model().get_sentence_embedding_dimension()
+            new_index = faiss.IndexFlatIP(dim)
+            new_map: List[str] = []
+            for sid in remaining_ids:
+                # 需要从 DB 或缓存获取描述；此处仅保留 ID 占位，下次 search 会 rebuild
+                new_map.append(sid)
+            self._indexes[scope] = new_index
+            self._id_maps[scope] = new_map
+            self._save_index(scope)
+
+    def reindex_skill(self, skill_id: str, description: str, scope: str = "default") -> None:
+        """增量更新：先移除再写入（用于技能内容变更）。"""
+        scope = scope or "default"
+        self.remove_skill_from_index(skill_id, scope)
+        self.index_skill(skill_id, description, scope)
+
+    def search_cross_scopes(
+        self, db: Session, query: str, top_k: int = 10
+    ) -> List[Dict[str, Any]]:
+        """跨已发布 scope 搜索技能（技能商店）。"""
+        from models import UiSkill
+
+        scopes = (
+            db.query(UiSkill.scope)
+            .filter(
+                UiSkill.status == "ACTIVE",
+                UiSkill.visibility.in_(["DEPARTMENT", "PUBLIC"]),
+            )
+            .distinct()
+            .all()
+        )
+        merged: List[Tuple[str, float, str]] = []
+        for (scope,) in scopes:
+            for skill_id, score in self.search(query, scope=scope, top_k=top_k, db=db):
+                merged.append((skill_id, score, scope))
+        merged.sort(key=lambda x: -x[1])
+        seen = set()
+        results = []
+        for skill_id, score, scope in merged:
+            if skill_id in seen:
+                continue
+            seen.add(skill_id)
+            results.append({"skill_id": skill_id, "score": score, "scope": scope})
+            if len(results) >= top_k:
+                break
+        return results
 
     def rebuild_scope_from_db(self, db: Session, scope: str = "default") -> None:
         scope = scope or "default"

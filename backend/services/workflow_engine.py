@@ -324,6 +324,9 @@ class WorkflowEngine:
                 "duration_ms": int((time.time() - start) * 1000),
             }
 
+        if ntype == "screenpilot":
+            return await self._run_screenpilot_node(node_id, data, state)
+
         return {"status": "failed", "error": f"不支持的节点类型: {ntype}"}
 
     async def _run_llm_node(self, data: Dict[str, Any], state: WorkflowState) -> tuple:
@@ -491,6 +494,79 @@ class WorkflowEngine:
         content = result.get("content", "")
         tokens = result.get("tokens_used", 0)
         return content, tokens
+
+    async def _run_screenpilot_node(
+        self, node_id: str, data: Dict[str, Any], state: WorkflowState
+    ) -> Dict[str, Any]:
+        """P2: ScreenPilot 工作流节点 — 直接调用驭屏服务。"""
+        from services.screenpilot.config import SCREENPILOT_ENABLED
+
+        if not SCREENPILOT_ENABLED:
+            return {"status": "failed", "error": "ScreenPilot 未启用 (SCREENPILOT_ENABLED=false)"}
+
+        from services.screenpilot.service import run_workflow_screenpilot
+
+        params_raw = data.get("parameters") or data.get("params") or "{}"
+        if isinstance(params_raw, str):
+            params = json.loads(self._resolve_template(params_raw, state) or "{}")
+        else:
+            params = {k: self._resolve_template(str(v), state) for k, v in params_raw.items()}
+
+        screen_session_id = self._resolve_template(
+            data.get("screen_session_id") or state.variables.get("__screen_session_id__", ""),
+            state,
+        )
+        operation = data.get("operation") or "navigate"
+
+        result = await run_workflow_screenpilot(
+            self.db,
+            operation=operation,
+            system_id=data.get("system_id") or "",
+            screen_session_id=screen_session_id,
+            skill_id=data.get("skill_id") or "",
+            params=params,
+            url=self._resolve_template(data.get("url") or "", state),
+            action=data.get("action") or "click",
+            target_ref=self._resolve_template(data.get("target_ref") or "", state),
+            value=self._resolve_template(data.get("value") or "", state),
+            vela_session_id=self.session.session_id,
+            agent_id=self.agent.agent_id,
+        )
+
+        if result.get("screen_session_id"):
+            state.variables["__screen_session_id__"] = result["screen_session_id"]
+
+        if result.get("hitl_pending"):
+            next_ids = self._get_next_node_ids(node_id)
+            next_node_id = next_ids[0] if next_ids else None
+            approval_id = result.get("approval_id", "")
+
+            self.session.status = SessionStatus.HITL_WAIT
+            self.session.pending_context = {
+                "kind": "workflow",
+                "workflow_state": state.to_dict(),
+                "approval_id": approval_id,
+                "screenpilot_node_id": node_id,
+                "next_node_id": next_node_id,
+            }
+            state.status = "hitl_wait"
+            state.next_node_id = next_node_id
+            state.current_node_id = node_id
+            self.db.commit()
+
+            return {
+                "hitl_pending": True,
+                "approval_id": approval_id,
+                "next_node_id": next_node_id,
+                "status": "hitl_wait",
+                "output": result.get("message", "ScreenPilot HITL 等待审批"),
+            }
+
+        if not result.get("success", True) and result.get("error"):
+            return {"status": "failed", "error": result.get("error", "ScreenPilot 执行失败")}
+
+        output = json.dumps(result, ensure_ascii=False)[:4000]
+        return {"status": "success", "output": output}
 
     def _get_next_node_ids(self, node_id: str) -> List[str]:
         edges = self.compiled.adjacency.get(node_id, [])

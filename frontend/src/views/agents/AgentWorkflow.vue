@@ -121,6 +121,16 @@
                 <Handle type="source" :position="Position.Bottom" />
               </div>
             </template>
+            <template #node-screenpilot="nodeProps">
+              <div class="wf-node wf-node-screenpilot" @click="onNodeClick({ node: nodeProps })">
+                <Handle type="target" :position="Position.Top" />
+                <div class="wf-node-label">
+                  <span>{{ nodeProps.data.label || '驭屏' }}</span>
+                  <span class="wf-node-id">{{ nodeProps.id }}</span>
+                </div>
+                <Handle type="source" :position="Position.Bottom" />
+              </div>
+            </template>
           </VueFlow>
         </div>
       </div>
@@ -207,6 +217,54 @@
           </a-form-item>
         </template>
 
+        <template v-if="selectedNode.type === 'screenpilot'">
+          <a-form-item label="操作类型">
+            <a-select v-model:value="selectedNode.data.operation">
+              <a-select-option value="navigate">navigate 导航</a-select-option>
+              <a-select-option value="observe">observe 观测</a-select-option>
+              <a-select-option value="replay">replay 重放技能</a-select-option>
+              <a-select-option value="extract">extract 提取文本</a-select-option>
+              <a-select-option value="act">act 原子动作</a-select-option>
+            </a-select>
+          </a-form-item>
+          <a-form-item label="目标系统">
+            <a-select v-model:value="selectedNode.data.system_id" placeholder="选择驭屏系统" allowClear>
+              <a-select-option v-for="s in screenSystems" :key="s.system_id" :value="s.system_id">
+                {{ s.name }}
+              </a-select-option>
+            </a-select>
+          </a-form-item>
+          <a-form-item v-if="selectedNode.data.operation === 'navigate'" label="URL">
+            <a-input v-model:value="selectedNode.data.url" placeholder="留空使用系统入口" />
+          </a-form-item>
+          <a-form-item v-if="selectedNode.data.operation === 'replay'" label="技能">
+            <a-select v-model:value="selectedNode.data.skill_id" placeholder="选择 UI 技能" allowClear>
+              <a-select-option v-for="sk in uiSkills" :key="sk.skill_id" :value="sk.skill_id">
+                {{ sk.name }}
+              </a-select-option>
+            </a-select>
+          </a-form-item>
+          <a-form-item label="浏览器会话 ID">
+            <a-input v-model:value="selectedNode.data.screen_session_id" placeholder="{{__screen_session_id__}} 或留空自动创建" />
+          </a-form-item>
+          <a-form-item v-if="selectedNode.data.operation === 'act'" label="动作">
+            <a-select v-model:value="selectedNode.data.action">
+              <a-select-option value="click">click</a-select-option>
+              <a-select-option value="type">type</a-select-option>
+              <a-select-option value="select">select</a-select-option>
+            </a-select>
+          </a-form-item>
+          <a-form-item v-if="selectedNode.data.operation === 'act'" label="SoM 编号">
+            <a-input v-model:value="selectedNode.data.target_ref" placeholder="[7]" />
+          </a-form-item>
+          <a-form-item v-if="selectedNode.data.operation === 'act'" label="值">
+            <a-input v-model:value="selectedNode.data.value" />
+          </a-form-item>
+          <a-form-item label="参数 (JSON)">
+            <a-textarea v-model:value="selectedNode.data.parameters" :rows="2" placeholder='{"key": "{{input}}"}' />
+          </a-form-item>
+        </template>
+
         <template v-if="selectedNode.type === 'end'">
           <a-form-item label="输出模板">
             <a-textarea v-model:value="selectedNode.data.output_template" :rows="2" placeholder="留空则使用上一节点输出" />
@@ -251,7 +309,7 @@ import { Controls } from '@vue-flow/controls'
 import '@vue-flow/core/dist/style.css'
 import '@vue-flow/core/dist/theme-default.css'
 import '@vue-flow/controls/dist/style.css'
-import { workflowApi, serviceApi, toolApi } from '../../api'
+import { workflowApi, serviceApi, toolApi, screenpilotApi } from '../../api'
 
 const route = useRoute()
 const router = useRouter()
@@ -264,6 +322,8 @@ const selectedNode = ref(null)
 const modelServices = ref([])
 const toolList = ref([])
 const candidates = ref([])
+const screenSystems = ref([])
+const uiSkills = ref([])
 
 const nodes = ref([])
 const edges = ref([])
@@ -273,7 +333,7 @@ const availableNodeVariables = computed(() => {
   const currentNodeId = selectedNode.value?.id
   if (!currentNodeId) return vars
 
-  const outputTypes = new Set(['llm', 'tool', 'condition', 'subgraph'])
+  const outputTypes = new Set(['llm', 'tool', 'condition', 'subgraph', 'screenpilot'])
   const incomingMap = new Map()
   for (const e of edges.value) {
     if (!e?.target || !e?.source) continue
@@ -309,6 +369,7 @@ const nodePalette = [
   { type: 'hitl', label: 'HITL 审批', color: '#eb2f96' },
   { type: 'cron', label: 'Cron 触发', color: '#13c2c2' },
   { type: 'subgraph', label: '子图 Agent', color: '#2f54eb' },
+  { type: 'screenpilot', label: '驭屏任务', color: '#08979c' },
   { type: 'end', label: '结束', color: '#f5222d' },
 ]
 
@@ -339,6 +400,20 @@ function defaultNodeData(type) {
   }
   if (type === 'subgraph') {
     return { ...base, child_agent_id: null, input_template: '{{input}}' }
+  }
+  if (type === 'screenpilot') {
+    return {
+      ...base,
+      operation: 'navigate',
+      system_id: null,
+      skill_id: null,
+      screen_session_id: '',
+      url: '',
+      action: 'click',
+      target_ref: '',
+      value: '',
+      parameters: '{}',
+    }
   }
   if (type === 'end') {
     return { label: '结束', output_template: '' }
@@ -453,6 +528,20 @@ onMounted(async () => {
     toolList.value = tools.items || []
     candidates.value = cands.candidates || []
 
+    try {
+      const spStatus = await screenpilotApi.status()
+      if (spStatus.enabled) {
+        const [systems, skills] = await Promise.all([
+          screenpilotApi.listSystems(),
+          screenpilotApi.listSkills(),
+        ])
+        screenSystems.value = systems || []
+        uiSkills.value = skills || []
+      }
+    } catch (_) {
+      /* ScreenPilot 未启用时忽略 */
+    }
+
     const def = wf.workflow_definition || {}
     if (def.nodes?.length) {
       nodes.value = def.nodes.map(n => ({
@@ -564,6 +653,7 @@ onMounted(async () => {
 .wf-node-hitl { border-color: #eb2f96; background: #fff0f6; }
 .wf-node-cron { border-color: #13c2c2; background: #e6fffb; }
 .wf-node-subgraph { border-color: #2f54eb; background: #f0f5ff; }
+.wf-node-screenpilot { border-color: #08979c; background: #e6fffb; }
 .wf-node-label {
   display: flex;
   align-items: baseline;

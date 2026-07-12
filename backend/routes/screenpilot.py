@@ -279,12 +279,42 @@ def list_skills(scope: Optional[str] = None, db: Session = Depends(get_db)):
                 "description": s.description,
                 "system_id": s.system_id,
                 "scope": s.scope,
+                "visibility": getattr(s, "visibility", "PRIVATE") or "PRIVATE",
                 "step_count": step_count,
                 "param_schema": s.param_schema,
                 "created_at": s.created_at.isoformat() if s.created_at else None,
             }
         )
     return out
+
+
+# --- P2: 技能商店（须在 /skills/{skill_id} 之前注册） ---
+
+
+class SkillPublishRequest(BaseModel):
+    visibility: str = Field(default="DEPARTMENT", pattern="^(DEPARTMENT|PUBLIC)$")
+    publisher_id: str = ""
+
+
+class SkillImportRequest(BaseModel):
+    target_scope: str = "default"
+    new_name: Optional[str] = None
+
+
+@router.get("/skills/shop")
+def list_skill_shop(
+    scope: Optional[str] = None,
+    visibility: Optional[str] = None,
+    query: Optional[str] = None,
+    top_k: int = 20,
+    db: Session = Depends(get_db),
+):
+    _require_enabled()
+    from services.screenpilot.skill_shop import list_shop_skills
+
+    return list_shop_skills(
+        db, scope=scope, visibility=visibility, query=query, top_k=top_k
+    )
 
 
 @router.get("/skills/{skill_id}")
@@ -352,3 +382,156 @@ async def replay_skill_api(body: SkillReplayRequest, db: Session = Depends(get_d
         vela_session_id=body.vela_session_id,
         agent_id=body.agent_id,
     )
+
+
+# --- P2: 技能商店 API ---
+
+
+@router.post("/skills/{skill_id}/publish")
+def publish_skill_api(skill_id: str, body: SkillPublishRequest, db: Session = Depends(get_db)):
+    _require_enabled()
+    from services.screenpilot.skill_shop import publish_skill
+
+    skill = publish_skill(
+        db, skill_id, visibility=body.visibility, publisher_id=body.publisher_id
+    )
+    if not skill:
+        raise HTTPException(status_code=404, detail="技能不存在")
+    return {
+        "skill_id": skill.skill_id,
+        "visibility": skill.visibility,
+        "published_at": skill.published_at.isoformat() if skill.published_at else None,
+    }
+
+
+@router.post("/skills/{skill_id}/unpublish")
+def unpublish_skill_api(skill_id: str, db: Session = Depends(get_db)):
+    _require_enabled()
+    from services.screenpilot.skill_shop import unpublish_skill
+
+    skill = unpublish_skill(db, skill_id)
+    if not skill:
+        raise HTTPException(status_code=404, detail="技能不存在")
+    return {"skill_id": skill.skill_id, "visibility": skill.visibility}
+
+
+@router.post("/skills/{skill_id}/import")
+def import_skill_api(skill_id: str, body: SkillImportRequest, db: Session = Depends(get_db)):
+    _require_enabled()
+    from services.screenpilot.skill_shop import import_skill_to_scope
+
+    skill = import_skill_to_scope(
+        db, skill_id, body.target_scope, new_name=body.new_name
+    )
+    if not skill:
+        raise HTTPException(status_code=404, detail="技能不存在或不可导入")
+    return {"skill_id": skill.skill_id, "name": skill.name, "scope": skill.scope}
+
+
+@router.post("/skills/reindex")
+def reindex_skills(scope: str = "default", db: Session = Depends(get_db)):
+    _require_enabled()
+    from services.screenpilot.skill_store import skill_store
+
+    skill_store.rebuild_scope_from_db(db, scope)
+    return {"success": True, "scope": scope, "message": "FAISS 索引已重建"}
+
+
+# --- P2: 风险策略优化 ---
+
+
+@router.get("/risk/analyze")
+def analyze_risk_strategy(limit: int = 500, db: Session = Depends(get_db)):
+    _require_enabled()
+    from services.screenpilot.risk_optimizer import analyze_audit_samples
+
+    return analyze_audit_samples(db, limit=limit)
+
+
+class RiskApplyRequest(BaseModel):
+    system_id: str
+    min_confidence: float = 0.7
+
+
+@router.post("/risk/optimize")
+def optimize_risk_rules(body: RiskApplyRequest, db: Session = Depends(get_db)):
+    _require_enabled()
+    from services.screenpilot.risk_optimizer import analyze_audit_samples, apply_suggestions_to_rules
+
+    system = db.query(ScreenSystem).filter(ScreenSystem.system_id == body.system_id).first()
+    if not system:
+        raise HTTPException(status_code=404, detail="系统不存在")
+
+    analysis = analyze_audit_samples(db)
+    new_rules = apply_suggestions_to_rules(
+        system.risk_rules or {},
+        analysis.get("suggestions") or [],
+        min_confidence=body.min_confidence,
+    )
+    system.risk_rules = new_rules
+    system.updated_at = now_utc()
+    db.commit()
+    return {
+        "system_id": system.system_id,
+        "risk_rules": new_rules,
+        "applied_suggestions": len(analysis.get("suggestions") or []),
+        "analysis": analysis,
+    }
+
+
+# --- P2: Integration Gateway ---
+
+
+@router.get("/gateway/status")
+async def gateway_status():
+    _require_enabled()
+    from services.screenpilot.integration_gateway import oauth_configured, get_access_token
+    from services.screenpilot.enterprise_approval import enterprise_approval_enabled
+
+    token_ok = False
+    if oauth_configured():
+        token = await get_access_token()
+        token_ok = bool(token)
+
+    return {
+        "oauth_configured": oauth_configured(),
+        "oauth_token_ok": token_ok,
+        "enterprise_approval_enabled": enterprise_approval_enabled(),
+    }
+
+
+# --- P2: 企业 OA 审批回调 ---
+
+
+class EnterpriseCallbackRequest(BaseModel):
+    approval_id: str
+    decision: str = Field(..., pattern="^(approved|rejected)$")
+    reviewer: str = ""
+    comment: str = ""
+
+
+@router.post("/enterprise/callback")
+async def enterprise_approval_callback(
+    body: EnterpriseCallbackRequest,
+    db: Session = Depends(get_db),
+):
+    """企业 OA 审批完成后回调，自动批准/拒绝平台 HITL 工单。"""
+    _require_enabled()
+    from models import HITLApproval, Session as AgentSession, SessionStatus
+    from schemas import HITLReview
+
+    approval = db.query(HITLApproval).filter(
+        HITLApproval.approval_id == body.approval_id,
+        HITLApproval.status == "PENDING",
+    ).first()
+    if not approval:
+        raise HTTPException(status_code=404, detail="审批工单不存在或已处理")
+
+    review = HITLReview(reviewer=body.reviewer or "enterprise_oa", comment=body.comment)
+
+    if body.decision == "approved":
+        from routes.hitl import approve_action
+        return approve_action(approval.session_id, body.approval_id, review, db)
+
+    from routes.hitl import reject_action
+    return reject_action(approval.session_id, body.approval_id, review, db)

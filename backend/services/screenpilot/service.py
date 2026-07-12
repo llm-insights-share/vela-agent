@@ -183,6 +183,30 @@ def create_hitl_for_ui_action(
 
     db.commit()
     db.refresh(approval)
+
+    # P2: T3 路由企业 OA 审批流（可选）
+    if risk_tier == "T3":
+        import asyncio
+        from services.screenpilot.enterprise_approval import submit_enterprise_approval
+
+        try:
+            ent_result = asyncio.get_event_loop().run_until_complete(
+                submit_enterprise_approval(approval, preview_payload=preview_payload, risk_tier=risk_tier)
+            )
+        except RuntimeError:
+            ent_result = asyncio.run(
+                submit_enterprise_approval(approval, preview_payload=preview_payload, risk_tier=risk_tier)
+            )
+        if ent_result.get("submitted"):
+            args = dict(approval.tool_args or {})
+            args["enterprise_ticket_id"] = ent_result.get("ticket_id", "")
+            args["enterprise_submitted"] = True
+            approval.tool_args = args
+            preview = dict(preview_payload)
+            preview["enterprise_ticket_id"] = ent_result.get("ticket_id", "")
+            preview["enterprise_approval"] = True
+            db.commit()
+
     return approval
 
 
@@ -537,6 +561,69 @@ async def execute_deferred_ui_act(db: Session, approval: HITLApproval) -> str:
         force_execute=True,
     )
     return json.dumps(result, ensure_ascii=False)
+
+
+async def run_workflow_screenpilot(
+    db: Session,
+    *,
+    operation: str,
+    system_id: str = "",
+    screen_session_id: str = "",
+    skill_id: str = "",
+    params: Optional[Dict[str, Any]] = None,
+    url: str = "",
+    action: str = "",
+    target_ref: str = "",
+    value: str = "",
+    vela_session_id: str = "",
+    agent_id: str = "",
+) -> Dict[str, Any]:
+    """Workflow ScreenPilot 节点：直接调用服务层（不经 MCP）。"""
+    op = (operation or "navigate").lower()
+    params = params or {}
+
+    if op == "navigate":
+        return await navigate_ui(
+            db,
+            system_id=system_id,
+            url=url,
+            screen_session_id=screen_session_id or None,
+            vela_session_id=vela_session_id,
+            agent_id=agent_id,
+        )
+    if op == "observe":
+        if not screen_session_id:
+            return {"success": False, "error": "observe 需要 screen_session_id"}
+        return await observe_session(db, screen_session_id)
+    if op == "extract":
+        if not screen_session_id:
+            return {"success": False, "error": "extract 需要 screen_session_id"}
+        return await extract_ui(db, screen_session_id)
+    if op == "replay":
+        if not skill_id or not screen_session_id:
+            return {"success": False, "error": "replay 需要 skill_id 与 screen_session_id"}
+        return await replay_skill(
+            db,
+            skill_id=skill_id,
+            screen_session_id=screen_session_id,
+            params=params,
+            vela_session_id=vela_session_id,
+            agent_id=agent_id,
+        )
+    if op == "act":
+        if not screen_session_id:
+            return {"success": False, "error": "act 需要 screen_session_id"}
+        return await act_ui(
+            db,
+            screen_session_id=screen_session_id,
+            action=action or "click",
+            target_ref=target_ref or None,
+            value=value or None,
+            vela_session_id=vela_session_id,
+            agent_id=agent_id,
+        )
+
+    return {"success": False, "error": f"未知 ScreenPilot 操作: {operation}"}
 
 
 TOOL_HANDLERS = {

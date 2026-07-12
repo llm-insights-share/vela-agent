@@ -94,5 +94,17 @@ def _migrate_db():
         if "content_hash" not in audit_cols:
             cursor.execute("ALTER TABLE ui_audit_logs ADD COLUMN content_hash VARCHAR(64) DEFAULT ''")
 
+    # ScreenPilot P2: ui_skills 技能商店字段
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='ui_skills'")
+    if cursor.fetchone():
+        cursor.execute("PRAGMA table_info(ui_skills)")
+        skill_cols = {row[1] for row in cursor.fetchall()}
+        if "visibility" not in skill_cols:
+            cursor.execute("ALTER TABLE ui_skills ADD COLUMN visibility VARCHAR(16) DEFAULT 'PRIVATE'")
+        if "publisher_id" not in skill_cols:
+            cursor.execute("ALTER TABLE ui_skills ADD COLUMN publisher_id VARCHAR(128) DEFAULT ''")
+        if "published_at" not in skill_cols:
+            cursor.execute("ALTER TABLE ui_skills ADD COLUMN published_at DATETIME")
+
     conn.commit()
     conn.close()
