@@ -13,6 +13,8 @@ class LiveSession:
     system_id: str
     context: Any
     page: Any
+    exec_mode: str = "browser"
+    desktop_macro: Dict[str, Any] = field(default_factory=dict)
     elements: List[Dict[str, Any]] = field(default_factory=list)
     last_screenshot: bytes = b""
     last_som_image: bytes = b""
@@ -32,10 +34,30 @@ async def _ensure_browser():
     return _browser
 
 
-async def create_live_session(screen_session_id: str, system_id: str) -> LiveSession:
+async def create_live_session(
+    screen_session_id: str,
+    system_id: str,
+    *,
+    exec_mode: str = "browser",
+    desktop_macro: Optional[Dict[str, Any]] = None,
+) -> LiveSession:
     async with _lock:
         if screen_session_id in _sessions:
             return _sessions[screen_session_id]
+
+        mode = (exec_mode or "browser").lower()
+        if mode == "desktop":
+            sess = LiveSession(
+                screen_session_id=screen_session_id,
+                system_id=system_id,
+                context=None,
+                page=None,
+                exec_mode="desktop",
+                desktop_macro=desktop_macro or {},
+            )
+            _sessions[screen_session_id] = sess
+            return sess
+
         browser = await _ensure_browser()
         context = await browser.new_context(viewport={"width": 1280, "height": 800})
         page = await context.new_page()
@@ -44,6 +66,7 @@ async def create_live_session(screen_session_id: str, system_id: str) -> LiveSes
             system_id=system_id,
             context=context,
             page=page,
+            exec_mode="browser",
         )
         _sessions[screen_session_id] = sess
         return sess

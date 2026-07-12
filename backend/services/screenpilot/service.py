@@ -67,6 +67,60 @@ async def observe_session(db: Session, screen_session_id: str) -> Dict[str, Any]
     if not live:
         return {"success": False, "error": f"浏览器会话不存在: {screen_session_id}"}
 
+    row = db.query(ScreenSession).filter(
+        ScreenSession.screen_session_id == screen_session_id
+    ).first()
+
+    if getattr(live, "exec_mode", "browser") == "desktop":
+        from services.screenpilot.layers.desktop import capture_screenshot_png, desktop_available
+
+        if not desktop_available():
+            return {"success": False, "error": "桌面模式需要 DISPLAY 或 Xvfb 环境"}
+        shot = capture_screenshot_png()
+        hotspots = (live.desktop_macro or {}).get("hotspots") or {}
+        elements = [
+            {
+                "ref": f"[{i + 1}]",
+                "role": "hotspot",
+                "label": name,
+                "box": {
+                    "x": int(hs.get("x", 0)),
+                    "y": int(hs.get("y", 0)),
+                    "width": int(hs.get("width", 20)),
+                    "height": int(hs.get("height", 20)),
+                },
+            }
+            for i, (name, hs) in enumerate(hotspots.items())
+        ]
+        live.elements = elements
+        live.last_screenshot = shot
+        live.last_som_image = shot
+
+        if row:
+            row.current_url = "desktop://"
+            row.updated_at = now_utc()
+            db.commit()
+
+        write_audit(
+            db,
+            screen_session_id=screen_session_id,
+            vela_session_id=row.vela_session_id if row else "",
+            agent_id=row.agent_id if row else "",
+            action="observe",
+            risk_tier="T0",
+            screenshot_png=shot,
+            payload={"mode": "desktop", "element_count": len(elements)},
+        )
+        return {
+            "success": True,
+            "screen_session_id": screen_session_id,
+            "url": "desktop://",
+            "exec_mode": "desktop",
+            "screenshot_b64": _b64(shot),
+            "som_image_b64": _b64(shot),
+            "elements": elements,
+        }
+
     shot, tree, url = await capture_page_state(live.page)
     som_img, elements = build_som(shot, tree)
     live.elements = elements
@@ -124,7 +178,18 @@ async def navigate_ui(
         agent_id=agent_id,
     )
     target_url = url or system.entry_url
-    live = await create_live_session(row.screen_session_id, system_id)
+    desktop_macro = (system.login_macro or {}).get("desktop") or {}
+    live = await create_live_session(
+        row.screen_session_id,
+        system_id,
+        exec_mode=system.exec_mode or "browser",
+        desktop_macro=desktop_macro,
+    )
+
+    if (system.exec_mode or "browser") == "desktop":
+        obs = await observe_session(db, row.screen_session_id)
+        obs["screen_session_id"] = row.screen_session_id
+        return obs
 
     allowed = system.allowed_domains or []
 
@@ -212,7 +277,14 @@ async def act_ui(
         ).first()
         if not row:
             return {"success": False, "error": f"浏览器会话不存在: {screen_session_id}"}
-        live = await create_live_session(screen_session_id, row.system_id)
+        system = _get_system(db, row.system_id)
+        desktop_macro = ((system.login_macro or {}).get("desktop") if system else {}) or {}
+        live = await create_live_session(
+            screen_session_id,
+            row.system_id,
+            exec_mode=(system.exec_mode if system else "browser") or "browser",
+            desktop_macro=desktop_macro,
+        )
 
     row = db.query(ScreenSession).filter(
         ScreenSession.screen_session_id == screen_session_id
@@ -220,6 +292,64 @@ async def act_ui(
     system = _get_system(db, row.system_id) if row else None
     allowed = (system.allowed_domains or []) if system else []
     risk_rules = (system.risk_rules or {}) if system else {}
+
+    if getattr(live, "exec_mode", "browser") == "desktop":
+        from services.screenpilot.layers.desktop import execute_desktop_action
+
+        target_label = target_ref or ""
+        if target_ref and live.elements:
+            el = find_element_by_ref(live.elements, target_ref)
+            if el:
+                target_label = el.get("label") or target_ref
+
+        risk_tier = classify_risk(action, target_label, risk_rules)
+        if requires_hitl(risk_tier) and not force_execute:
+            preview = {
+                "action": action,
+                "target_ref": target_ref,
+                "value": value,
+                "risk_tier": risk_tier,
+                "target_label": target_label,
+                "url": "desktop://",
+                "exec_mode": "desktop",
+            }
+            if live.last_screenshot:
+                preview["screenshot_b64"] = _b64(live.last_screenshot)
+            approval = create_hitl_for_ui_action(
+                db,
+                screen_session_id=screen_session_id,
+                vela_session_id=vela_session_id or (row.vela_session_id if row else ""),
+                agent_id=agent_id or (row.agent_id if row else ""),
+                tool_name="ui_act",
+                action_payload={"action": action, "target_ref": target_ref, "value": value},
+                preview_payload=preview,
+                risk_tier=risk_tier,
+            )
+            return {
+                "success": True,
+                "hitl_pending": True,
+                "approval_id": approval.approval_id,
+                "risk_tier": risk_tier,
+                "preview_payload": preview,
+                "message": f"桌面动作 [{action}] 风险 {risk_tier}，等待审批",
+            }
+
+        result = await execute_desktop_action(
+            action,
+            target_ref=target_ref,
+            value=value,
+            desktop_macro=live.desktop_macro,
+        )
+        if not result.get("success"):
+            return result
+        obs = await observe_session(db, screen_session_id)
+        return {
+            "success": True,
+            "risk_tier": risk_tier,
+            "exec_mode": "desktop",
+            "verification": result,
+            "observe": {"url": obs.get("url"), "elements": obs.get("elements")},
+        }
 
     target_label = ""
     if target_ref and live.elements:
@@ -350,6 +480,13 @@ async def extract_ui(db: Session, screen_session_id: str) -> Dict[str, Any]:
     live = get_live_session(screen_session_id)
     if not live:
         return {"success": False, "error": f"浏览器会话不存在: {screen_session_id}"}
+    if getattr(live, "exec_mode", "browser") == "desktop":
+        return {
+            "success": True,
+            "text": "",
+            "exec_mode": "desktop",
+            "message": "桌面模式暂不支持文本提取，请使用 observe 截图",
+        }
     text = await live.page.inner_text("body")
     return {"success": True, "text": (text or "")[:8000]}
 
@@ -374,15 +511,21 @@ async def replay_skill(
         return {"success": False, "error": "技能无步骤"}
 
     live = get_live_session(screen_session_id)
+    system = _get_system(db, skill.system_id)
     if not live:
         row = db.query(ScreenSession).filter(
             ScreenSession.screen_session_id == screen_session_id
         ).first()
         if not row:
             return {"success": False, "error": f"浏览器会话不存在: {screen_session_id}"}
-        live = await create_live_session(screen_session_id, row.system_id)
+        desktop_macro = ((system.login_macro or {}).get("desktop") if system else {}) or {}
+        live = await create_live_session(
+            screen_session_id,
+            row.system_id,
+            exec_mode=(system.exec_mode if system else "browser") or "browser",
+            desktop_macro=desktop_macro,
+        )
 
-    system = _get_system(db, skill.system_id)
     risk_rules = (system.risk_rules or {}) if system else {}
     params = params or {}
     results = []
@@ -606,6 +749,19 @@ async def run_workflow_screenpilot(
             action=action or "click",
             target_ref=target_ref or None,
             value=value or None,
+            vela_session_id=vela_session_id,
+            agent_id=agent_id,
+        )
+    if op == "run_task":
+        from services.screenpilot.run_task import run_task
+
+        return await run_task(
+            db,
+            system_id=system_id,
+            goal=params.get("goal") or "",
+            screen_session_id=screen_session_id or None,
+            skill_id=params.get("skill_id") or skill_id or None,
+            params=params,
             vela_session_id=vela_session_id,
             agent_id=agent_id,
         )

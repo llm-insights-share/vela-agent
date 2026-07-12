@@ -77,6 +77,23 @@ class McpTemplateResponse(BaseModel):
     config: dict
 
 
+@router.get("/mcp/status")
+def mcp_pool_status():
+    _require_enabled()
+    from services.screenpilot.mcp_pool import screenpilot_mcp_pool
+
+    alive = (
+        screenpilot_mcp_pool._process is not None
+        and screenpilot_mcp_pool._process.returncode is None
+    )
+    return {
+        "adapter": "screenpilot",
+        "inprocess_available": True,
+        "pool_process_alive": alive,
+        "tools": 8,
+    }
+
+
 @router.get("/status")
 def screenpilot_status():
     return {"enabled": SCREENPILOT_ENABLED, "service": "vela-screenpilot"}
@@ -230,11 +247,13 @@ def get_mcp_template():
         name="vela-screenpilot",
         tool_type="MCP",
         config={
+            "adapter": "screenpilot",
+            "mcp_pool": True,
             "mcp_command": python,
             "mcp_args": ["-m", "services.screenpilot.mcp_server"],
             "mcp_env": {"SCREENPILOT_ENABLED": "true", "PYTHONPATH": backend_dir},
-            "mcp_tool_name": "ui_navigate,ui_observe,ui_act,ui_extract,ui_replay_skill,ui_compile_skill,ui_search_skills",
-            "description": "驭屏引擎 ScreenPilot — 企业内系统 UI 自动化（P1 含技能编译/重放）",
+            "mcp_tool_name": "ui_navigate,ui_observe,ui_act,ui_extract,ui_replay_skill,ui_compile_skill,ui_search_skills,ui_run_task",
+            "description": "驭屏引擎 ScreenPilot — 推荐 adapter=screenpilot 进程内直调；亦可 mcp_pool 长驻进程",
         },
     )
 

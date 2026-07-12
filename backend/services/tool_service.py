@@ -113,10 +113,33 @@ class ToolExecutionService:
         raw_tool_name = config.get("mcp_tool_name", "") or config.get("server_name", tool.name)
         mcp_tool_name = self._resolve_mcp_tool_name(raw_tool_name, parameters, tool.name)
 
+        # ScreenPilot 进程内直调（最快，无子进程）
+        if config.get("adapter") == "screenpilot":
+            from services.screenpilot.mcp_pool import call_screenpilot_inprocess
+
+            return await call_screenpilot_inprocess(mcp_tool_name, parameters)
+
         if not command:
             return {"success": False, "error": "MCP 工具缺少 command 配置"}
 
         merged_env = {**os.environ, **env}
+
+        # ScreenPilot MCP 长驻进程池
+        if config.get("mcp_pool") or config.get("screenpilot_pool"):
+            from services.screenpilot.mcp_pool import default_pool_command, screenpilot_mcp_pool
+
+            pool_cmd, pool_args, pool_env = default_pool_command()
+            use_cmd = command or pool_cmd
+            use_args = args or pool_args
+            use_env = {**pool_env, **merged_env}
+            return await screenpilot_mcp_pool.call_tool(
+                mcp_tool_name,
+                parameters,
+                command=use_cmd,
+                args=use_args,
+                env=use_env,
+                timeout_seconds=float(timeout_seconds),
+            )
 
         try:
             process = await asyncio.create_subprocess_exec(

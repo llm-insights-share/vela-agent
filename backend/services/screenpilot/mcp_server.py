@@ -17,6 +17,7 @@ from services.screenpilot.service import (
     replay_skill,
     search_skills,
 )
+from services.screenpilot.run_task import run_task
 
 TOOLS = [
     {
@@ -119,6 +120,25 @@ TOOLS = [
             "required": ["query"],
         },
     },
+    {
+        "name": "ui_run_task",
+        "description": "高级任务：Observe-Plan-Act-Verify 循环；优先匹配技能重放，未完成时返回 needs_agent",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "system_id": {"type": "string"},
+                "goal": {"type": "string", "description": "任务目标描述"},
+                "screen_session_id": {"type": "string"},
+                "skill_id": {"type": "string"},
+                "params": {"type": "object"},
+                "scope": {"type": "string", "default": "default"},
+                "max_steps": {"type": "integer", "default": 6},
+                "vela_session_id": {"type": "string"},
+                "agent_id": {"type": "string"},
+            },
+            "required": ["system_id", "goal"],
+        },
+    },
 ]
 
 
@@ -139,6 +159,8 @@ async def _dispatch(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
             return await compile_skill(db, **arguments)
         if name == "ui_search_skills":
             return await search_skills(db, **arguments)
+        if name == "ui_run_task":
+            return await run_task(db, **arguments)
         return {"success": False, "error": f"未知工具: {name}"}
     finally:
         db.close()

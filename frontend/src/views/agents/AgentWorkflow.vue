@@ -223,6 +223,7 @@
               <a-select-option value="navigate">navigate 导航</a-select-option>
               <a-select-option value="observe">observe 观测</a-select-option>
               <a-select-option value="replay">replay 重放技能</a-select-option>
+              <a-select-option value="run_task">run_task 高级任务</a-select-option>
               <a-select-option value="extract">extract 提取文本</a-select-option>
               <a-select-option value="act">act 原子动作</a-select-option>
             </a-select>
@@ -261,7 +262,7 @@
             <a-input v-model:value="selectedNode.data.value" />
           </a-form-item>
           <a-form-item label="参数 (JSON)">
-            <a-textarea v-model:value="selectedNode.data.parameters" :rows="2" placeholder='{"key": "{{input}}"}' />
+            <a-textarea v-model:value="selectedNode.data.parameters" :rows="2" placeholder='run_task: {"goal": "{{input}}"}' />
           </a-form-item>
         </template>
 

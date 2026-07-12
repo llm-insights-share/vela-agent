@@ -168,7 +168,7 @@ class WorkflowCompiler:
                         "message": f"ScreenPilot 节点 {nid} 需配置 system_id 或 skill_id",
                     })
                 op = (data.get("operation") or "navigate").lower()
-                if op not in ("navigate", "observe", "replay", "extract", "act"):
+                if op not in ("navigate", "observe", "replay", "extract", "act", "run_task"):
                     errors.append({
                         "field": "nodes",
                         "message": f"ScreenPilot 节点 {nid} 未知 operation: {op}",
