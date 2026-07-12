@@ -184,28 +184,12 @@ def create_hitl_for_ui_action(
     db.commit()
     db.refresh(approval)
 
-    # P2: T3 路由企业 OA 审批流（可选）
+    # P2: T3 走 Vela 内置审批流（平台收件箱 + 会话 HITL）
     if risk_tier == "T3":
-        import asyncio
-        from services.screenpilot.enterprise_approval import submit_enterprise_approval
+        from services.screenpilot.internal_approval import mark_t3_internal_flow
 
-        try:
-            ent_result = asyncio.get_event_loop().run_until_complete(
-                submit_enterprise_approval(approval, preview_payload=preview_payload, risk_tier=risk_tier)
-            )
-        except RuntimeError:
-            ent_result = asyncio.run(
-                submit_enterprise_approval(approval, preview_payload=preview_payload, risk_tier=risk_tier)
-            )
-        if ent_result.get("submitted"):
-            args = dict(approval.tool_args or {})
-            args["enterprise_ticket_id"] = ent_result.get("ticket_id", "")
-            args["enterprise_submitted"] = True
-            approval.tool_args = args
-            preview = dict(preview_payload)
-            preview["enterprise_ticket_id"] = ent_result.get("ticket_id", "")
-            preview["enterprise_approval"] = True
-            db.commit()
+        approval.tool_args = mark_t3_internal_flow(approval.tool_args or {})
+        db.commit()
 
     return approval
 
@@ -294,7 +278,10 @@ async def act_ui(
             "approval_id": approval.approval_id,
             "risk_tier": risk_tier,
             "preview_payload": preview,
-            "message": f"动作 [{action}] 风险等级 {risk_tier}，已创建 HITL 工单等待审批",
+            "message": (
+                f"动作 [{action}] 风险等级 {risk_tier}，已创建审批工单"
+                + ("，请在「驭屏审批」收件箱或会话中处理" if risk_tier == "T3" else "，等待 HITL 审批")
+            ),
         }
 
     result = await execute_action(

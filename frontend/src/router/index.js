@@ -92,6 +92,11 @@ const routes = [
     component: () => import('../views/screenpilot/SkillShop.vue'),
   },
   {
+    path: '/screenpilot/approvals',
+    name: 'ScreenPilotApprovals',
+    component: () => import('../views/screenpilot/ApprovalInbox.vue'),
+  },
+  {
     path: '/data-access',
     name: 'DataAccessConfig',
     component: () => import('../views/dataquery/DataAccessConfig.vue'),

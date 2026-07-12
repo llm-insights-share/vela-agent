@@ -59,6 +59,10 @@
           <DesktopOutlined />
           <span>技能商店</span>
         </a-menu-item>
+        <a-menu-item key="/screenpilot/approvals">
+          <DesktopOutlined />
+          <span>驭屏审批</span>
+        </a-menu-item>
         <a-menu-item key="/settings">
           <SettingOutlined />
           <span>系统配置</span>

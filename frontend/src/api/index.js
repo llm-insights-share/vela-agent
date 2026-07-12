@@ -212,4 +212,8 @@ export const screenpilotApi = {
   analyzeRisk: (params) => api.get('/screenpilot/risk/analyze', { params }),
   optimizeRisk: (data) => api.post('/screenpilot/risk/optimize', data),
   gatewayStatus: () => api.get('/screenpilot/gateway/status'),
+  listApprovals: (params) => api.get('/screenpilot/approvals', { params }),
+  getApproval: (id) => api.get(`/screenpilot/approvals/${id}`),
+  approveApproval: (id, data) => api.post(`/screenpilot/approvals/${id}/approve`, data),
+  rejectApproval: (id, data) => api.post(`/screenpilot/approvals/${id}/reject`, data),
 }

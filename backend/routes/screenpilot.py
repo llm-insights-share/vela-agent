@@ -486,7 +486,6 @@ def optimize_risk_rules(body: RiskApplyRequest, db: Session = Depends(get_db)):
 async def gateway_status():
     _require_enabled()
     from services.screenpilot.integration_gateway import oauth_configured, get_access_token
-    from services.screenpilot.enterprise_approval import enterprise_approval_enabled
 
     token_ok = False
     if oauth_configured():
@@ -496,42 +495,75 @@ async def gateway_status():
     return {
         "oauth_configured": oauth_configured(),
         "oauth_token_ok": token_ok,
-        "enterprise_approval_enabled": enterprise_approval_enabled(),
     }
 
 
-# --- P2: 企业 OA 审批回调 ---
+# --- P2: Vela 内置审批流（T3 收件箱） ---
 
 
-class EnterpriseCallbackRequest(BaseModel):
-    approval_id: str
-    decision: str = Field(..., pattern="^(approved|rejected)$")
+class ApprovalReviewRequest(BaseModel):
     reviewer: str = ""
     comment: str = ""
 
 
-@router.post("/enterprise/callback")
-async def enterprise_approval_callback(
-    body: EnterpriseCallbackRequest,
+@router.get("/approvals")
+def list_approvals(
+    risk_tier: Optional[str] = None,
+    status: str = "PENDING",
+    limit: int = 50,
     db: Session = Depends(get_db),
 ):
-    """企业 OA 审批完成后回调，自动批准/拒绝平台 HITL 工单。"""
     _require_enabled()
-    from models import HITLApproval, Session as AgentSession, SessionStatus
+    from services.screenpilot.internal_approval import list_pending_approvals
+
+    return list_pending_approvals(db, risk_tier=risk_tier, status=status, limit=limit)
+
+
+@router.get("/approvals/{approval_id}")
+def get_approval(approval_id: str, db: Session = Depends(get_db)):
+    _require_enabled()
+    from services.screenpilot.internal_approval import get_approval_detail
+
+    detail = get_approval_detail(db, approval_id)
+    if not detail:
+        raise HTTPException(status_code=404, detail="审批工单不存在")
+    return detail
+
+
+@router.post("/approvals/{approval_id}/approve")
+def approve_screenpilot(
+    approval_id: str,
+    body: ApprovalReviewRequest,
+    db: Session = Depends(get_db),
+):
+    """平台审批收件箱：批准 ScreenPilot 工单（复用 HITL 执行链路）。"""
+    _require_enabled()
+    from models import HITLApproval
+    from routes.hitl import approve_action
     from schemas import HITLReview
 
-    approval = db.query(HITLApproval).filter(
-        HITLApproval.approval_id == body.approval_id,
-        HITLApproval.status == "PENDING",
-    ).first()
-    if not approval:
-        raise HTTPException(status_code=404, detail="审批工单不存在或已处理")
+    row = db.query(HITLApproval).filter(HITLApproval.approval_id == approval_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="审批工单不存在")
 
-    review = HITLReview(reviewer=body.reviewer or "enterprise_oa", comment=body.comment)
+    review = HITLReview(reviewer=body.reviewer or "vela_approver", comment=body.comment)
+    return approve_action(row.session_id, approval_id, review, db)
 
-    if body.decision == "approved":
-        from routes.hitl import approve_action
-        return approve_action(approval.session_id, body.approval_id, review, db)
 
+@router.post("/approvals/{approval_id}/reject")
+def reject_screenpilot(
+    approval_id: str,
+    body: ApprovalReviewRequest,
+    db: Session = Depends(get_db),
+):
+    _require_enabled()
+    from models import HITLApproval
     from routes.hitl import reject_action
-    return reject_action(approval.session_id, body.approval_id, review, db)
+    from schemas import HITLReview
+
+    row = db.query(HITLApproval).filter(HITLApproval.approval_id == approval_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="审批工单不存在")
+
+    review = HITLReview(reviewer=body.reviewer or "vela_approver", comment=body.comment)
+    return reject_action(row.session_id, approval_id, review, db)
