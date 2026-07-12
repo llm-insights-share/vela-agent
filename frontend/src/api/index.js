@@ -187,3 +187,16 @@ export const hitlApi = {
   approve: (sessionId, approvalId, data) => api.post(`/sessions/${sessionId}/approvals/${approvalId}/approve`, data),
   reject: (sessionId, approvalId, data) => api.post(`/sessions/${sessionId}/approvals/${approvalId}/reject`, data),
 }
+
+export const screenpilotApi = {
+  status: () => api.get('/screenpilot/status'),
+  listSystems: () => api.get('/screenpilot/systems'),
+  createSystem: (data) => api.post('/screenpilot/systems', data),
+  getSystem: (id) => api.get(`/screenpilot/systems/${id}`),
+  updateSystem: (id, data) => api.put(`/screenpilot/systems/${id}`, data),
+  deleteSystem: (id) => api.delete(`/screenpilot/systems/${id}`),
+  createCredential: (data) => api.post('/screenpilot/credentials', data),
+  listCredentials: (systemId) => api.get(`/screenpilot/systems/${systemId}/credentials`),
+  auditLogs: (params) => api.get('/screenpilot/audit-logs', { params }),
+  mcpTemplate: () => api.get('/screenpilot/mcp-template'),
+}

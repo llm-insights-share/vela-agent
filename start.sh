@@ -22,3 +22,9 @@ echo "前端服务已启动 (PID: $!), 日志: $PROJECT_DIR/frontend.log"
 echo "=== 所有服务已启动 ==="
 echo "后端 API: http://localhost:8000/docs"
 echo "前端页面: http://localhost:5173"
+
+if [ "${SCREENPILOT_ENABLED}" = "true" ]; then
+  echo "安装 ScreenPilot Playwright Chromium..."
+  cd "$BACKEND_DIR"
+  python -m playwright install chromium 2>/dev/null || true
+fi

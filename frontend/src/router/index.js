@@ -77,6 +77,11 @@ const routes = [
     component: () => import('../views/tools/ToolList.vue'),
   },
   {
+    path: '/screenpilot/systems',
+    name: 'ScreenPilotSystems',
+    component: () => import('../views/screenpilot/SystemList.vue'),
+  },
+  {
     path: '/data-access',
     name: 'DataAccessConfig',
     component: () => import('../views/dataquery/DataAccessConfig.vue'),

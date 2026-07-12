@@ -38,6 +38,7 @@ def init_db():
         DataTableDictionary, DataDictionaryItem, DataCodeMapping, DataQueryExample, DataTermMapping,
         DataQueryFeedback, DataQueryQualityStats,
         MemoryEpisode, MemoryRecord,
+        ScreenSystem, ScreenCredential, ScreenSession, UiAuditLog,
     )
     Base.metadata.create_all(bind=engine)
     _migrate_db()

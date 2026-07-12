@@ -132,6 +132,18 @@
             show-icon
             style="margin-bottom: 8px;"
           />
+          <div v-if="msg.previewPayload && (msg.previewPayload.som_image_b64 || msg.previewPayload.screenshot_b64)" class="hitl-som-preview">
+            <div class="hitl-preview-meta">
+              <a-tag v-if="msg.previewPayload.risk_tier" color="orange">{{ msg.previewPayload.risk_tier }}</a-tag>
+              <span v-if="msg.previewPayload.action">动作: {{ msg.previewPayload.action }}</span>
+              <span v-if="msg.previewPayload.target_label">目标: {{ msg.previewPayload.target_label }}</span>
+            </div>
+            <img
+              :src="'data:image/png;base64,' + (msg.previewPayload.som_image_b64 || msg.previewPayload.screenshot_b64)"
+              alt="SoM 预览"
+              class="hitl-som-image"
+            />
+          </div>
           <a-space>
             <a-button type="primary" size="small" :loading="msg.approving" @click="approveHitl(msg)">
               批准
@@ -724,6 +736,7 @@ async function sendMessage() {
       pendingDelivery: !!res.pending_delivery,
       pendingWorkflow: !!res.pending_workflow,
       pendingToolName: res.pending_tool_name || '',
+      previewPayload: res.preview_payload || null,
       approvalStatus: null,
       approvalFinalResult: '',
     }
@@ -1019,11 +1032,27 @@ function renderMarkdown(text) {
   font-weight: 500;
 }
 .chat-hitl-actions {
-  margin-top: 10px;
-  padding: 10px 14px;
-  background: #fffbe6;
-  border: 1px solid #ffe58f;
+  margin-top: 8px;
+}
+.hitl-som-preview {
+  margin-bottom: 10px;
+  border: 1px solid #ffd591;
   border-radius: 8px;
+  padding: 8px;
+  background: #fffbe6;
+}
+.hitl-preview-meta {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: #595959;
+}
+.hitl-som-image {
+  max-width: 100%;
+  border-radius: 6px;
+  border: 1px solid #f0f0f0;
 }
 .chat-hitl-result {
   margin-top: 10px;

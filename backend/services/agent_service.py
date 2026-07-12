@@ -667,7 +667,17 @@ class AgentService:
             result = await loop.run(mode)
             return result
         except HITLPendingError as he:
-            # SGL-CFG-06: 工具需人工审批，返回挂起响应（不视为错误）
+            # SGL-CFG-06 / ScreenPilot GOV: 工具需人工审批，返回挂起响应
+            preview_payload = {}
+            try:
+                from models import HITLApproval
+                approval = loop.db.query(HITLApproval).filter(
+                    HITLApproval.approval_id == he.approval_id
+                ).first()
+                if approval and approval.tool_args:
+                    preview_payload = approval.tool_args.get("preview_payload") or {}
+            except Exception:
+                pass
             return {
                 "content": f"⏸️ 工具 [{he.tool_name}] 需要人工审批后才能继续执行。\n审批工单 ID: `{he.approval_id}`\n\n请在审批中心处理后继续对话。",
                 "thinking": "\n".join(loop.thinking_log) if loop else "",
@@ -677,6 +687,7 @@ class AgentService:
                 "files": [],
                 "pending_approval_id": he.approval_id,
                 "pending_tool_name": he.tool_name,
+                "preview_payload": preview_payload,
                 "session_status": "HITL_WAIT",
             }
         except Exception as e:
@@ -1166,6 +1177,22 @@ class AgentLoop:
             timeout_seconds=self.step_timeout,
         )
 
+    def _check_screenpilot_hitl_pending(self, tool, result: Dict[str, Any]) -> Optional[str]:
+        """ScreenPilot MCP 返回 hitl_pending 时挂起 ReAct 循环。"""
+        name = getattr(tool, "name", "") or ""
+        if not name.startswith("ui_") or not result.get("success"):
+            return None
+        raw = result.get("result", "")
+        if not isinstance(raw, str):
+            return None
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        if payload.get("hitl_pending") and payload.get("approval_id"):
+            return payload["approval_id"]
+        return None
+
     async def _execute_tool_with_retry(self, tool, args: Dict[str, Any]) -> Dict[str, Any]:
         # SGL-CFG-06: HITL 拦截 - 工具调用前检查 require_approval
         tool_id = getattr(tool, "tool_id", None) or tool.name
@@ -1197,6 +1224,12 @@ class AgentLoop:
                 result = await tool_execution_service.execute_tool(
                     tool, args, timeout_seconds=self.step_timeout
                 )
+                sp_approval = self._check_screenpilot_hitl_pending(tool, result)
+                if sp_approval:
+                    self.thinking_log.append(
+                        f"  ScreenPilot 工具 [{tool.name}] 触发 GOV HITL (approval_id={sp_approval})"
+                    )
+                    raise HITLPendingError(sp_approval, tool.name)
                 if result.get("success"):
                     finalized = await self._finalize_tool_success(tool, args, result)
                     self._memory_record_tool(tool.name, args, finalized)

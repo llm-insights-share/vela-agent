@@ -538,3 +538,70 @@ class MemoryRecord(Base):
     created_at = Column(DateTime, default=now_utc)
     updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)
     created_by = Column(String(128), default="system")
+
+
+# --- ScreenPilot (驭屏引擎) ---
+
+
+class ScreenSystem(Base):
+    """目标系统注册表"""
+    __tablename__ = "screen_systems"
+
+    system_id = Column(String, primary_key=True, default=gen_uuid)
+    name = Column(String(128), nullable=False, unique=True)
+    entry_url = Column(String(512), nullable=False, default="")
+    login_type = Column(String(32), default="form")  # form | sso | cas
+    exec_mode = Column(String(16), default="browser")  # browser | desktop
+    allowed_domains = Column(JSON, default=list)
+    login_macro = Column(JSON, default=dict)
+    risk_rules = Column(JSON, default=dict)
+    status = Column(String(16), default="ACTIVE")
+    created_at = Column(DateTime, default=now_utc)
+    updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)
+
+
+class ScreenCredential(Base):
+    """ScreenPilot 凭据（加密存储）"""
+    __tablename__ = "screen_credentials"
+
+    credential_id = Column(String, primary_key=True, default=gen_uuid)
+    system_id = Column(String, ForeignKey("screen_systems.system_id"), nullable=False, index=True)
+    label = Column(String(128), default="default")
+    username = Column(String(256), default="")
+    secret_enc = Column(Text, default="")
+    extra = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=now_utc)
+    updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)
+
+
+class ScreenSession(Base):
+    """Playwright 浏览器会话"""
+    __tablename__ = "screen_sessions"
+
+    screen_session_id = Column(String, primary_key=True, default=gen_uuid)
+    system_id = Column(String, ForeignKey("screen_systems.system_id"), nullable=False, index=True)
+    vela_session_id = Column(String, index=True, default="")
+    agent_id = Column(String, default="")
+    status = Column(String(16), default="ACTIVE")  # ACTIVE | CLOSED | ERROR
+    current_url = Column(String(1024), default="")
+    meta = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=now_utc)
+    updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)
+
+
+class UiAuditLog(Base):
+    """ScreenPilot 操作审计"""
+    __tablename__ = "ui_audit_logs"
+
+    log_id = Column(String, primary_key=True, default=gen_uuid)
+    screen_session_id = Column(String, index=True, default="")
+    vela_session_id = Column(String, index=True, default="")
+    agent_id = Column(String, default="")
+    action = Column(String(64), default="")
+    risk_tier = Column(String(8), default="T0")
+    payload = Column(JSON, default=dict)
+    screenshot_path = Column(String(512), default="")
+    screenshot_hash = Column(String(64), default="")
+    verification = Column(JSON, default=dict)
+    approval_id = Column(String, default="")
+    created_at = Column(DateTime, default=now_utc)
