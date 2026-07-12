@@ -10,10 +10,12 @@ from typing import Any, Dict
 from database import SessionLocal
 from services.screenpilot.service import (
     act_ui,
+    compile_skill,
     extract_ui,
     navigate_ui,
     observe_session,
-    replay_skill_stub,
+    replay_skill,
+    search_skills,
 )
 
 TOOLS = [
@@ -77,11 +79,44 @@ TOOLS = [
     },
     {
         "name": "ui_replay_skill",
-        "description": "确定性重放已编译 UI 技能（P1 stub）",
+        "description": "确定性重放已编译 UI 技能；指纹失效时返回 needs_replan",
         "inputSchema": {
             "type": "object",
-            "properties": {"skill_id": {"type": "string"}, "params": {"type": "object"}},
-            "required": ["skill_id"],
+            "properties": {
+                "skill_id": {"type": "string"},
+                "screen_session_id": {"type": "string"},
+                "params": {"type": "object"},
+                "vela_session_id": {"type": "string"},
+                "agent_id": {"type": "string"},
+            },
+            "required": ["skill_id", "screen_session_id"],
+        },
+    },
+    {
+        "name": "ui_compile_skill",
+        "description": "将当前会话轨迹编译为可重放 UI 技能模板",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "screen_session_id": {"type": "string"},
+                "name": {"type": "string"},
+                "description": {"type": "string"},
+                "scope": {"type": "string", "default": "default"},
+            },
+            "required": ["screen_session_id", "name"],
+        },
+    },
+    {
+        "name": "ui_search_skills",
+        "description": "按任务描述语义检索 UI 技能（FAISS）",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "scope": {"type": "string", "default": "default"},
+                "top_k": {"type": "integer", "default": 5},
+            },
+            "required": ["query"],
         },
     },
 ]
@@ -99,7 +134,11 @@ async def _dispatch(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         if name == "ui_extract":
             return await extract_ui(db, arguments["screen_session_id"])
         if name == "ui_replay_skill":
-            return await replay_skill_stub(**arguments)
+            return await replay_skill(db, **arguments)
+        if name == "ui_compile_skill":
+            return await compile_skill(db, **arguments)
+        if name == "ui_search_skills":
+            return await search_skills(db, **arguments)
         return {"success": False, "error": f"未知工具: {name}"}
     finally:
         db.close()

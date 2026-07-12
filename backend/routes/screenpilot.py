@@ -210,6 +210,8 @@ def list_audit_logs(
             "payload": r.payload,
             "screenshot_path": r.screenshot_path,
             "approval_id": r.approval_id,
+            "prev_hash": r.prev_hash,
+            "content_hash": r.content_hash,
             "created_at": r.created_at.isoformat() if r.created_at else None,
         }
         for r in rows
@@ -231,7 +233,122 @@ def get_mcp_template():
             "mcp_command": python,
             "mcp_args": ["-m", "services.screenpilot.mcp_server"],
             "mcp_env": {"SCREENPILOT_ENABLED": "true", "PYTHONPATH": backend_dir},
-            "mcp_tool_name": "ui_navigate,ui_observe,ui_act,ui_extract,ui_replay_skill",
-            "description": "驭屏引擎 ScreenPilot — 企业内系统 UI 自动化",
+            "mcp_tool_name": "ui_navigate,ui_observe,ui_act,ui_extract,ui_replay_skill,ui_compile_skill,ui_search_skills",
+            "description": "驭屏引擎 ScreenPilot — 企业内系统 UI 自动化（P1 含技能编译/重放）",
         },
+    )
+
+
+class SkillCompileRequest(BaseModel):
+    screen_session_id: str
+    name: str
+    description: str = ""
+    scope: str = "default"
+
+
+class SkillSearchRequest(BaseModel):
+    query: str
+    scope: str = "default"
+    top_k: int = 5
+
+
+class SkillReplayRequest(BaseModel):
+    skill_id: str
+    screen_session_id: str
+    params: dict = Field(default_factory=dict)
+    vela_session_id: str = ""
+    agent_id: str = ""
+
+
+@router.get("/skills")
+def list_skills(scope: Optional[str] = None, db: Session = Depends(get_db)):
+    _require_enabled()
+    from models import UiSkill, UiSkillStep
+
+    q = db.query(UiSkill).filter(UiSkill.status == "ACTIVE")
+    if scope:
+        q = q.filter(UiSkill.scope == scope)
+    skills = q.order_by(UiSkill.created_at.desc()).all()
+    out = []
+    for s in skills:
+        step_count = db.query(UiSkillStep).filter(UiSkillStep.skill_id == s.skill_id).count()
+        out.append(
+            {
+                "skill_id": s.skill_id,
+                "name": s.name,
+                "description": s.description,
+                "system_id": s.system_id,
+                "scope": s.scope,
+                "step_count": step_count,
+                "param_schema": s.param_schema,
+                "created_at": s.created_at.isoformat() if s.created_at else None,
+            }
+        )
+    return out
+
+
+@router.get("/skills/{skill_id}")
+def get_skill_detail(skill_id: str, db: Session = Depends(get_db)):
+    _require_enabled()
+    from services.screenpilot.skill_store import skill_store
+
+    skill = skill_store.get_skill(db, skill_id)
+    if not skill:
+        raise HTTPException(status_code=404, detail="技能不存在")
+    steps = skill_store.get_steps(db, skill_id)
+    return {
+        "skill_id": skill.skill_id,
+        "name": skill.name,
+        "description": skill.description,
+        "system_id": skill.system_id,
+        "scope": skill.scope,
+        "param_schema": skill.param_schema,
+        "steps": [
+            {
+                "step_id": st.step_id,
+                "step_order": st.step_order,
+                "action": st.action,
+                "target_label": st.target_label,
+                "value_template": st.value_template,
+                "fingerprints": st.fingerprints,
+            }
+            for st in steps
+        ],
+    }
+
+
+@router.post("/skills/compile")
+async def compile_skill_api(body: SkillCompileRequest, db: Session = Depends(get_db)):
+    _require_enabled()
+    from services.screenpilot.service import compile_skill
+
+    return await compile_skill(
+        db,
+        screen_session_id=body.screen_session_id,
+        name=body.name,
+        description=body.description,
+        scope=body.scope,
+    )
+
+
+@router.post("/skills/search")
+async def search_skills_api(body: SkillSearchRequest, db: Session = Depends(get_db)):
+    _require_enabled()
+    from services.screenpilot.service import search_skills
+
+    return await search_skills(db, query=body.query, scope=body.scope, top_k=body.top_k)
+
+
+@router.post("/skills/replay")
+async def replay_skill_api(body: SkillReplayRequest, db: Session = Depends(get_db)):
+    _require_enabled()
+    from services.screenpilot.service import replay_skill
+
+    return await replay_skill(
+        db,
+        skill_id=body.skill_id,
+        screen_session_id=body.screen_session_id,
+        params=body.params,
+        vela_session_id=body.vela_session_id,
+        agent_id=body.agent_id,
     )

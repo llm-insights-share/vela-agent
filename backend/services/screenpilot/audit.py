@@ -1,3 +1,5 @@
+import hashlib
+import json
 import os
 from typing import Any, Dict, Optional
 
@@ -16,6 +18,41 @@ def save_screenshot(screen_session_id: str, png: bytes, tag: str = "step") -> st
     with open(path, "wb") as f:
         f.write(png)
     return path
+
+
+def _last_content_hash(db: Session, screen_session_id: str) -> str:
+    row = (
+        db.query(UiAuditLog)
+        .filter(UiAuditLog.screen_session_id == screen_session_id)
+        .order_by(UiAuditLog.created_at.desc())
+        .first()
+    )
+    return (row.content_hash if row else "") or ""
+
+
+def _compute_content_hash(
+    *,
+    prev_hash: str,
+    action: str,
+    risk_tier: str,
+    payload: Dict[str, Any],
+    shot_hash: str,
+    verification: Dict[str, Any],
+) -> str:
+    body = json.dumps(
+        {
+            "prev_hash": prev_hash,
+            "action": action,
+            "risk_tier": risk_tier,
+            "payload": payload,
+            "screenshot_hash": shot_hash,
+            "verification": verification,
+        },
+        sort_keys=True,
+        ensure_ascii=False,
+        default=str,
+    )
+    return hashlib.sha256(body.encode()).hexdigest()
 
 
 def write_audit(
@@ -37,6 +74,18 @@ def write_audit(
         shot_path = save_screenshot(screen_session_id, screenshot_png)
         shot_hash = screenshot_hash(screenshot_png)
 
+    prev_hash = _last_content_hash(db, screen_session_id)
+    payload = payload or {}
+    verification = verification or {}
+    content_hash = _compute_content_hash(
+        prev_hash=prev_hash,
+        action=action,
+        risk_tier=risk_tier,
+        payload=payload,
+        shot_hash=shot_hash,
+        verification=verification,
+    )
+
     log = UiAuditLog(
         log_id=gen_uuid(),
         screen_session_id=screen_session_id,
@@ -44,11 +93,13 @@ def write_audit(
         agent_id=agent_id,
         action=action,
         risk_tier=risk_tier,
-        payload=payload or {},
+        payload=payload,
         screenshot_path=shot_path,
         screenshot_hash=shot_hash,
-        verification=verification or {},
+        verification=verification,
         approval_id=approval_id,
+        prev_hash=prev_hash,
+        content_hash=content_hash,
         created_at=now_utc(),
     )
     db.add(log)

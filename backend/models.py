@@ -604,4 +604,38 @@ class UiAuditLog(Base):
     screenshot_hash = Column(String(64), default="")
     verification = Column(JSON, default=dict)
     approval_id = Column(String, default="")
+    prev_hash = Column(String(64), default="")
+    content_hash = Column(String(64), default="")
+    created_at = Column(DateTime, default=now_utc)
+
+
+class UiSkill(Base):
+    """UI 技能模板（SKL 层）"""
+    __tablename__ = "ui_skills"
+
+    skill_id = Column(String, primary_key=True, default=gen_uuid)
+    name = Column(String(128), nullable=False)
+    description = Column(Text, default="")
+    system_id = Column(String, ForeignKey("screen_systems.system_id"), nullable=False, index=True)
+    scope = Column(String(64), default="default", index=True)
+    param_schema = Column(JSON, default=dict)
+    status = Column(String(16), default="ACTIVE")
+    source_session_id = Column(String, default="")
+    created_at = Column(DateTime, default=now_utc)
+    updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)
+
+
+class UiSkillStep(Base):
+    """技能步骤与选择器指纹"""
+    __tablename__ = "ui_skill_steps"
+
+    step_id = Column(String, primary_key=True, default=gen_uuid)
+    skill_id = Column(String, ForeignKey("ui_skills.skill_id"), nullable=False, index=True)
+    step_order = Column(Integer, nullable=False, default=0)
+    system_id = Column(String, default="")
+    action = Column(String(32), nullable=False)
+    target_label = Column(String(256), default="")
+    value_template = Column(String(1024), default="")
+    fingerprints = Column(JSON, default=dict)
+    meta = Column(JSON, default=dict)
     created_at = Column(DateTime, default=now_utc)

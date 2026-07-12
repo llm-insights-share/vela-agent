@@ -137,6 +137,26 @@ class MemoryGateway:
         self.db.refresh(new_record)
         return new_record
 
+    def score(self, candidate: Dict[str, Any]) -> Dict[str, Any]:
+        """动作/记忆候选风险打分（与 ScreenPilot GOV 同构，不修改 write 路径）。"""
+        from services.screenpilot.layers.govern import classify_risk
+
+        action = candidate.get("action") or candidate.get("memory_type") or "read"
+        label = candidate.get("target_label") or candidate.get("content") or ""
+        if action in MEMORY_TYPES:
+            action = "type" if "write" in str(candidate.get("operation", "")) else "extract"
+
+        tier = classify_risk(str(action), str(label)[:200], candidate.get("risk_rules"))
+        score_map = {"T0": 0.15, "T1": 0.45, "T2": 0.72, "T3": 0.95}
+        route_map = {"T0": "auto", "T1": "sample_review", "T2": "hitl", "T3": "dual_review"}
+        score_val = score_map.get(tier, 0.5)
+        return {
+            "tier": tier,
+            "score": score_val,
+            "route": route_map.get(tier, "hitl"),
+            "confidence": 1.0 - score_val if tier in ("T0", "T1") else score_val,
+        }
+
     def read(self, query: MemoryQuery) -> List[MemoryRecord]:
         q = self.db.query(MemoryRecord)
         if query.agent_id:

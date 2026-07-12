@@ -51,6 +51,10 @@
           <DesktopOutlined />
           <span>驭屏系统</span>
         </a-menu-item>
+        <a-menu-item key="/screenpilot/skills">
+          <DesktopOutlined />
+          <span>UI 技能</span>
+        </a-menu-item>
         <a-menu-item key="/settings">
           <SettingOutlined />
           <span>系统配置</span>

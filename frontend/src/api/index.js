@@ -199,4 +199,9 @@ export const screenpilotApi = {
   listCredentials: (systemId) => api.get(`/screenpilot/systems/${systemId}/credentials`),
   auditLogs: (params) => api.get('/screenpilot/audit-logs', { params }),
   mcpTemplate: () => api.get('/screenpilot/mcp-template'),
+  listSkills: (params) => api.get('/screenpilot/skills', { params }),
+  getSkill: (id) => api.get(`/screenpilot/skills/${id}`),
+  compileSkill: (data) => api.post('/screenpilot/skills/compile', data),
+  searchSkills: (data) => api.post('/screenpilot/skills/search', data),
+  replaySkill: (data) => api.post('/screenpilot/skills/replay', data),
 }
