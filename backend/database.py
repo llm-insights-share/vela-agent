@@ -38,6 +38,7 @@ def init_db():
         DataTableDictionary, DataDictionaryItem, DataCodeMapping, DataQueryExample, DataTermMapping,
         DataQueryFeedback, DataQueryQualityStats,
         MemoryEpisode, MemoryRecord,
+        ScreenSystem, ScreenCredential, ScreenSession, UiAuditLog, UiSkill, UiSkillStep,
     )
     Base.metadata.create_all(bind=engine)
     _migrate_db()
@@ -82,6 +83,28 @@ def _migrate_db():
     sess_cols = {row[1] for row in cursor.fetchall()}
     if "pending_context" not in sess_cols:
         cursor.execute("ALTER TABLE sessions ADD COLUMN pending_context TEXT DEFAULT '{}'")
+
+    # ScreenPilot P1: ui_audit_logs 哈希链字段
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='ui_audit_logs'")
+    if cursor.fetchone():
+        cursor.execute("PRAGMA table_info(ui_audit_logs)")
+        audit_cols = {row[1] for row in cursor.fetchall()}
+        if "prev_hash" not in audit_cols:
+            cursor.execute("ALTER TABLE ui_audit_logs ADD COLUMN prev_hash VARCHAR(64) DEFAULT ''")
+        if "content_hash" not in audit_cols:
+            cursor.execute("ALTER TABLE ui_audit_logs ADD COLUMN content_hash VARCHAR(64) DEFAULT ''")
+
+    # ScreenPilot P2: ui_skills 技能商店字段
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='ui_skills'")
+    if cursor.fetchone():
+        cursor.execute("PRAGMA table_info(ui_skills)")
+        skill_cols = {row[1] for row in cursor.fetchall()}
+        if "visibility" not in skill_cols:
+            cursor.execute("ALTER TABLE ui_skills ADD COLUMN visibility VARCHAR(16) DEFAULT 'PRIVATE'")
+        if "publisher_id" not in skill_cols:
+            cursor.execute("ALTER TABLE ui_skills ADD COLUMN publisher_id VARCHAR(128) DEFAULT ''")
+        if "published_at" not in skill_cols:
+            cursor.execute("ALTER TABLE ui_skills ADD COLUMN published_at DATETIME")
 
     conn.commit()
     conn.close()

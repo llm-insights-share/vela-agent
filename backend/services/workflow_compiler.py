@@ -13,7 +13,7 @@ from models import Agent, AgentStatus, AgentType, ModelService, ModelServiceStat
 
 
 VALID_NODE_TYPES = {
-    "start", "llm", "tool", "condition", "hitl", "cron", "subgraph", "end"
+    "start", "llm", "tool", "condition", "hitl", "cron", "subgraph", "end", "screenpilot"
 }
 
 
@@ -160,6 +160,18 @@ class WorkflowCompiler:
                     errors.append({
                         "field": "nodes",
                         "message": f"条件节点 {nid} 未配置 expression",
+                    })
+            elif ntype == "screenpilot":
+                if not data.get("system_id") and not data.get("skill_id"):
+                    errors.append({
+                        "field": "nodes",
+                        "message": f"ScreenPilot 节点 {nid} 需配置 system_id 或 skill_id",
+                    })
+                op = (data.get("operation") or "navigate").lower()
+                if op not in ("navigate", "observe", "replay", "extract", "act", "run_task"):
+                    errors.append({
+                        "field": "nodes",
+                        "message": f"ScreenPilot 节点 {nid} 未知 operation: {op}",
                     })
 
         passed = len(errors) == 0

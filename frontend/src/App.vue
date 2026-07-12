@@ -47,6 +47,22 @@
           <ToolOutlined />
           <span>工具</span>
         </a-menu-item>
+        <a-menu-item key="/screenpilot/systems">
+          <DesktopOutlined />
+          <span>驭屏系统</span>
+        </a-menu-item>
+        <a-menu-item key="/screenpilot/skills">
+          <DesktopOutlined />
+          <span>UI 技能</span>
+        </a-menu-item>
+        <a-menu-item key="/screenpilot/shop">
+          <DesktopOutlined />
+          <span>技能商店</span>
+        </a-menu-item>
+        <a-menu-item key="/screenpilot/approvals">
+          <DesktopOutlined />
+          <span>驭屏审批</span>
+        </a-menu-item>
         <a-menu-item key="/settings">
           <SettingOutlined />
           <span>系统配置</span>
@@ -77,6 +93,7 @@ import {
   ToolOutlined,
   SettingOutlined,
   BulbOutlined,
+  DesktopOutlined,
 } from '@ant-design/icons-vue'
 
 const router = useRouter()

@@ -86,6 +86,44 @@ def approve_action(
         db.commit()
         return result_data
 
+    # ScreenPilot: ui_* 延迟动作审批通过后执行
+    tool_args = approval.tool_args or {}
+    if approval.tool_name.startswith("ui_") and tool_args.get("deferred"):
+        pending = (session.pending_context or {}) if session else {}
+        is_workflow = pending.get("kind") == "workflow"
+
+        tool_result_str = ""
+        if session:
+            from services.screenpilot.service import execute_deferred_ui_act
+            tool_result_str = __import__("asyncio").run(
+                execute_deferred_ui_act(db, approval)
+            )
+
+            if is_workflow:
+                result_data = _resume_workflow_after_hitl(db, session, approval, approved=True)
+                result_data["tool_result"] = tool_result_str
+                result_data["kind"] = "workflow"
+                db.commit()
+                return result_data
+
+            messages = session.messages or []
+            preview = tool_args.get("preview_payload") or {}
+            messages.append({
+                "role": "system",
+                "content": f"[HITL 审批通过] ScreenPilot 工具 {approval.tool_name} 已执行，结果如下：\n{tool_result_str}",
+                "meta": {"approved": True, "approval_id": approval_id, "preview_payload": preview},
+            })
+            session.messages = messages
+            session.pending_context = {}
+        db.commit()
+        return {
+            "success": True,
+            "message": "已批准",
+            "tool_name": approval.tool_name,
+            "kind": "screenpilot",
+            "tool_result": tool_result_str,
+        }
+
     # SGL-CFG-06: 普通工具审批通过后执行工具
     if session:
         tool_args = approval.tool_args or {}

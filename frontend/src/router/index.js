@@ -77,6 +77,26 @@ const routes = [
     component: () => import('../views/tools/ToolList.vue'),
   },
   {
+    path: '/screenpilot/systems',
+    name: 'ScreenPilotSystems',
+    component: () => import('../views/screenpilot/SystemList.vue'),
+  },
+  {
+    path: '/screenpilot/skills',
+    name: 'ScreenPilotSkills',
+    component: () => import('../views/screenpilot/SkillList.vue'),
+  },
+  {
+    path: '/screenpilot/shop',
+    name: 'ScreenPilotShop',
+    component: () => import('../views/screenpilot/SkillShop.vue'),
+  },
+  {
+    path: '/screenpilot/approvals',
+    name: 'ScreenPilotApprovals',
+    component: () => import('../views/screenpilot/ApprovalInbox.vue'),
+  },
+  {
     path: '/data-access',
     name: 'DataAccessConfig',
     component: () => import('../views/dataquery/DataAccessConfig.vue'),
