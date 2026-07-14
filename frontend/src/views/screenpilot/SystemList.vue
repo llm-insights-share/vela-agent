@@ -34,6 +34,7 @@
         <template v-else-if="column.key === 'action'">
           <a-space>
             <a @click="openEdit(record)">修改</a>
+            <a @click="openCredentials(record)">凭证</a>
             <a v-if="record.status !== 'ACTIVE'" @click="setStatus(record, 'ACTIVE')">激活</a>
             <a v-else @click="setStatus(record, 'INACTIVE')">停用</a>
             <a-popconfirm
@@ -48,6 +49,62 @@
         </template>
       </template>
     </a-table>
+
+    <a-drawer
+      v-model:open="credDrawerOpen"
+      :title="`凭证 — ${credSystemName}`"
+      width="480"
+      destroyOnClose
+    >
+      <a-alert
+        type="info"
+        show-icon
+        style="margin-bottom: 16px"
+        :message="credHelpText"
+      />
+      <a-table
+        :dataSource="credentials"
+        :columns="credColumns"
+        rowKey="credential_id"
+        :loading="credLoading"
+        size="small"
+        :pagination="false"
+      >
+        <template #bodyCell="{ column, record }">
+          <template v-if="column.key === 'has_value'">
+            <a-tag :color="record.has_value ? 'green' : 'default'">
+              {{ record.has_value ? '已设置' : '空' }}
+            </a-tag>
+          </template>
+          <template v-else-if="column.key === 'action'">
+            <a-space>
+              <a @click="openCredEdit(record)">更新</a>
+              <a-popconfirm title="确认删除该凭证？" @confirm="removeCredential(record)">
+                <a style="color: #b5341c">删除</a>
+              </a-popconfirm>
+            </a-space>
+          </template>
+        </template>
+      </a-table>
+      <a-divider />
+      <a-form layout="vertical">
+        <a-form-item label="name（键）" required>
+          <a-input v-model:value="credForm.name" placeholder="username / password / 其它键" />
+        </a-form-item>
+        <a-form-item label="value" required>
+          <a-input-password
+            v-if="isSecretCredName(credForm.name)"
+            v-model:value="credForm.value"
+            placeholder="明文仅在保存时传输并加密"
+          />
+          <a-input v-else v-model:value="credForm.value" placeholder="凭证值" />
+        </a-form-item>
+        <a-button type="primary" :loading="credSaving" @click="saveCredential">
+          {{ credEditingId ? '更新凭证' : '新增凭证' }}
+        </a-button>
+        <a-button v-if="credEditingId" style="margin-left: 8px" @click="resetCredForm">取消编辑</a-button>
+      </a-form>
+    </a-drawer>
 
     <a-modal
       v-model:open="modalOpen"
@@ -103,8 +160,8 @@
             placeholder='{"steps":[{"action":"fill","selector":"#phone","value":"{{username}}"},{"action":"wait_for_otp","selector":"#code","submit_selector":"#submit","prompt":"请输入短信验证码"}]}'
           />
           <div style="margin-top: 6px; font-size: 12px; color: #888;">
-            支持 goto / fill / click / wait / wait_for_otp；变量 &#123;&#123;username&#125;&#125; 等。
-            登录成功后 Cookie 自动保存 24 小时（需先通过 API 配置凭据）。
+            支持 goto / fill / click / wait / wait_for_otp；变量 &#123;&#123;username&#125;&#125; / &#123;&#123;password&#125;&#125; 从「凭证」读取并解密，勿在宏中写明文密码。
+            登录成功后 Cookie 自动保存 24 小时。
           </div>
         </a-form-item>
         <a-form-item label="风险规则 risk_rules (JSON)">
@@ -266,8 +323,103 @@ const columns = [
   { title: '登录', dataIndex: 'login_type', key: 'login_type', width: 90 },
   { title: '模式', dataIndex: 'exec_mode', key: 'exec_mode', width: 90 },
   { title: '状态', key: 'status', width: 100 },
-  { title: '操作', key: 'action', width: 200 },
+  { title: '操作', key: 'action', width: 260 },
 ]
+
+const credColumns = [
+  { title: 'name', dataIndex: 'name', key: 'name' },
+  { title: '值', key: 'has_value', width: 90 },
+  { title: '操作', key: 'action', width: 120 },
+]
+
+const credDrawerOpen = ref(false)
+const credLoading = ref(false)
+const credSaving = ref(false)
+const credSystemId = ref('')
+const credSystemName = ref('')
+const credentials = ref([])
+const credEditingId = ref(null)
+const credForm = ref({ name: '', value: '' })
+const credHelpText =
+  '使用 name/value 保存；password 等敏感值加密存储。登录宏中填写 {{username}} / {{password}}，勿写明文。'
+
+function isSecretCredName(name) {
+  const n = (name || '').toLowerCase()
+  return n.includes('password') || n.includes('secret') || n.includes('token') || n === '密码'
+}
+
+function resetCredForm() {
+  credEditingId.value = null
+  credForm.value = { name: '', value: '' }
+}
+
+async function openCredentials(record) {
+  credSystemId.value = record.system_id
+  credSystemName.value = record.name || ''
+  resetCredForm()
+  credDrawerOpen.value = true
+  await loadCredentials()
+}
+
+async function loadCredentials() {
+  if (!credSystemId.value) return
+  credLoading.value = true
+  try {
+    credentials.value = await screenpilotApi.listCredentials(credSystemId.value)
+  } catch (e) {
+    message.error(e.message)
+  } finally {
+    credLoading.value = false
+  }
+}
+
+function openCredEdit(record) {
+  credEditingId.value = record.credential_id
+  credForm.value = { name: record.name || '', value: '' }
+}
+
+async function saveCredential() {
+  const name = (credForm.value.name || '').trim()
+  const value = credForm.value.value || ''
+  if (!name) {
+    message.warning('请填写 name')
+    return
+  }
+  if (!value) {
+    message.warning('请填写 value')
+    return
+  }
+  credSaving.value = true
+  try {
+    if (credEditingId.value) {
+      await screenpilotApi.updateCredential(credEditingId.value, { value })
+      message.success('凭证已更新')
+    } else {
+      await screenpilotApi.createCredential({
+        system_id: credSystemId.value,
+        name,
+        value,
+      })
+      message.success('凭证已保存')
+    }
+    resetCredForm()
+    await loadCredentials()
+  } catch (e) {
+    message.error(e.message)
+  } finally {
+    credSaving.value = false
+  }
+}
+
+async function removeCredential(record) {
+  try {
+    await screenpilotApi.deleteCredential(record.credential_id)
+    message.success('已删除')
+    await loadCredentials()
+  } catch (e) {
+    message.error(e.message)
+  }
+}
 
 function emptyForm() {
   return {

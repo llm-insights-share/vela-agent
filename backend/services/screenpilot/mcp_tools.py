@@ -200,26 +200,6 @@ def sync_cu_tool_bindings_for_existing_agents(db: Session) -> Dict[str, Any]:
             have.add(name)
     if bound:
         db.commit()
-    # #region agent log
-    try:
-        import json as _json, time as _time
-        with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-66b153.log", "a") as _f:
-            _f.write(_json.dumps({
-                "sessionId": "66b153",
-                "runId": "fix",
-                "hypothesisId": "B",
-                "location": "mcp_tools.py:sync_cu_tool_bindings",
-                "message": "synced cu tool bindings",
-                "data": {
-                    "agent_count": len(agent_ids),
-                    "registered_cu": list(by_name.keys()),
-                    "newly_bound": bound,
-                },
-                "timestamp": int(_time.time() * 1000),
-            }, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
-    # #endregion
     return {"agents": list(agent_ids), "bound": bound}
 
 
@@ -232,27 +212,5 @@ def ensure_cu_tools_registered_and_bound(db: Session) -> Dict[str, Any]:
         reg = register_cu_mcp_tools(db)
     sync = sync_cu_tool_bindings_for_existing_agents(db)
     after = {t["name"] for t in list_registered_cu_tools(db)}
-    # #region agent log
-    try:
-        import json as _json, time as _time
-        with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-66b153.log", "a") as _f:
-            _f.write(_json.dumps({
-                "sessionId": "66b153",
-                "runId": "fix",
-                "hypothesisId": "A",
-                "location": "mcp_tools.py:ensure_cu_tools",
-                "message": "ensure cu tools registered+bound",
-                "data": {
-                    "before": sorted(before),
-                    "missing": missing,
-                    "after": sorted(after),
-                    "has_cu_vision": "cu_vision" in after,
-                    "sync_bound": sync.get("bound"),
-                },
-                "timestamp": int(_time.time() * 1000),
-            }, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
-    # #endregion
     return {"missing_before": missing, "register": reg, "sync": sync, "tools": sorted(after)}
 

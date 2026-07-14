@@ -1,4 +1,4 @@
-"""Playwright storage_state 持久化（按系统凭据，默认 24 小时有效）。"""
+"""Playwright storage_state 持久化（按系统凭证 KV，默认 24 小时有效）。"""
 from __future__ import annotations
 
 import json
@@ -6,12 +6,13 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
 from sqlalchemy.orm import Session
-from sqlalchemy.orm.attributes import flag_modified
 
-from models import ScreenCredential
+from models import ScreenCredential, gen_uuid, now_utc
 from services.screenpilot.crypto_util import decrypt_secret, encrypt_secret
 
 COOKIE_TTL_HOURS = 24
+STORAGE_STATE_KEY = "__storage_state"
+STORAGE_STATE_AT_KEY = "__storage_state_saved_at"
 
 
 def _parse_saved_at(saved_at: str) -> Optional[datetime]:
@@ -24,26 +25,48 @@ def _parse_saved_at(saved_at: str) -> Optional[datetime]:
         return None
 
 
-def get_valid_storage_state(db: Session, system_id: str) -> Optional[Dict[str, Any]]:
-    cred = (
+def _get_kv(db: Session, system_id: str, name: str) -> Optional[ScreenCredential]:
+    return (
         db.query(ScreenCredential)
-        .filter(ScreenCredential.system_id == system_id)
+        .filter(
+            ScreenCredential.system_id == system_id,
+            ScreenCredential.name == name,
+        )
         .first()
     )
-    if not cred:
+
+
+def _upsert_kv(db: Session, system_id: str, name: str, plain: str) -> None:
+    row = _get_kv(db, system_id, name)
+    if row:
+        row.value_enc = encrypt_secret(plain)
+        row.updated_at = now_utc()
+    else:
+        db.add(
+            ScreenCredential(
+                credential_id=gen_uuid(),
+                system_id=system_id,
+                name=name,
+                value_enc=encrypt_secret(plain),
+                created_at=now_utc(),
+                updated_at=now_utc(),
+            )
+        )
+
+
+def get_valid_storage_state(db: Session, system_id: str) -> Optional[Dict[str, Any]]:
+    state_row = _get_kv(db, system_id, STORAGE_STATE_KEY)
+    at_row = _get_kv(db, system_id, STORAGE_STATE_AT_KEY)
+    if not state_row or not at_row or not state_row.value_enc:
         return None
-    extra = cred.extra or {}
-    enc = extra.get("storage_state_enc")
-    saved_at = extra.get("storage_state_saved_at")
-    if not enc or not saved_at:
-        return None
+    saved_at = decrypt_secret(at_row.value_enc)
     saved = _parse_saved_at(saved_at)
     if not saved:
         return None
     if datetime.now(timezone.utc) - saved > timedelta(hours=COOKIE_TTL_HOURS):
         return None
     try:
-        raw = decrypt_secret(enc)
+        raw = decrypt_secret(state_row.value_enc)
         if not raw:
             return None
         return json.loads(raw)
@@ -52,38 +75,25 @@ def get_valid_storage_state(db: Session, system_id: str) -> Optional[Dict[str, A
 
 
 async def save_storage_state(db: Session, system_id: str, context: Any) -> None:
-    cred = (
-        db.query(ScreenCredential)
-        .filter(ScreenCredential.system_id == system_id)
-        .first()
-    )
-    if not cred or not context:
+    if not context:
         return
     try:
         state = await context.storage_state()
-        extra = dict(cred.extra or {})
-        extra["storage_state_enc"] = encrypt_secret(
-            json.dumps(state, ensure_ascii=False)
+        _upsert_kv(db, system_id, STORAGE_STATE_KEY, json.dumps(state, ensure_ascii=False))
+        _upsert_kv(
+            db,
+            system_id,
+            STORAGE_STATE_AT_KEY,
+            datetime.now(timezone.utc).isoformat(),
         )
-        extra["storage_state_saved_at"] = datetime.now(timezone.utc).isoformat()
-        cred.extra = extra
-        flag_modified(cred, "extra")
         db.commit()
     except Exception as e:
         print(f"[cookie_store] 保存 storage_state 失败: {e}")
 
 
 def clear_storage_state(db: Session, system_id: str) -> None:
-    cred = (
-        db.query(ScreenCredential)
-        .filter(ScreenCredential.system_id == system_id)
-        .first()
-    )
-    if not cred:
-        return
-    extra = dict(cred.extra or {})
-    extra.pop("storage_state_enc", None)
-    extra.pop("storage_state_saved_at", None)
-    cred.extra = extra
-    flag_modified(cred, "extra")
+    for name in (STORAGE_STATE_KEY, STORAGE_STATE_AT_KEY):
+        row = _get_kv(db, system_id, name)
+        if row:
+            db.delete(row)
     db.commit()

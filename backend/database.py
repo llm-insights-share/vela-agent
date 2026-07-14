@@ -107,5 +107,117 @@ def _migrate_db():
         if "published_at" not in skill_cols:
             cursor.execute("ALTER TABLE ui_skills ADD COLUMN published_at DATETIME")
 
+    # ScreenPilot: screen_credentials → name/value_enc KV
+    cursor.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='screen_credentials'"
+    )
+    if cursor.fetchone():
+        cursor.execute("PRAGMA table_info(screen_credentials)")
+        cred_cols = {row[1] for row in cursor.fetchall()}
+        if "value_enc" not in cred_cols and "secret_enc" in cred_cols:
+            import json as _json
+            import uuid as _uuid
+
+            from services.screenpilot.crypto_util import decrypt_secret, encrypt_secret
+
+            cursor.execute(
+                """
+                CREATE TABLE screen_credentials_kv (
+                    credential_id VARCHAR NOT NULL PRIMARY KEY,
+                    system_id VARCHAR NOT NULL,
+                    name VARCHAR(128) NOT NULL DEFAULT '',
+                    value_enc TEXT DEFAULT '',
+                    created_at DATETIME,
+                    updated_at DATETIME
+                )
+                """
+            )
+            cursor.execute(
+                "SELECT credential_id, system_id, username, secret_enc, extra, created_at, updated_at "
+                "FROM screen_credentials"
+            )
+            for (
+                _cid,
+                system_id,
+                username,
+                secret_enc,
+                extra,
+                created_at,
+                updated_at,
+            ) in cursor.fetchall():
+                if username:
+                    cursor.execute(
+                        "INSERT INTO screen_credentials_kv "
+                        "(credential_id, system_id, name, value_enc, created_at, updated_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            str(_uuid.uuid4()),
+                            system_id,
+                            "username",
+                            encrypt_secret(username),
+                            created_at,
+                            updated_at,
+                        ),
+                    )
+                if secret_enc:
+                    pw_enc = secret_enc if decrypt_secret(secret_enc) else encrypt_secret(secret_enc)
+                    cursor.execute(
+                        "INSERT INTO screen_credentials_kv "
+                        "(credential_id, system_id, name, value_enc, created_at, updated_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            str(_uuid.uuid4()),
+                            system_id,
+                            "password",
+                            pw_enc,
+                            created_at,
+                            updated_at,
+                        ),
+                    )
+                try:
+                    extra_obj = (
+                        _json.loads(extra) if isinstance(extra, str) and extra else (extra or {})
+                    )
+                except Exception:
+                    extra_obj = {}
+                if isinstance(extra_obj, dict):
+                    ss = extra_obj.get("storage_state_enc")
+                    sat = extra_obj.get("storage_state_saved_at")
+                    if ss:
+                        cursor.execute(
+                            "INSERT INTO screen_credentials_kv "
+                            "(credential_id, system_id, name, value_enc, created_at, updated_at) "
+                            "VALUES (?, ?, ?, ?, ?, ?)",
+                            (
+                                str(_uuid.uuid4()),
+                                system_id,
+                                "__storage_state",
+                                ss if decrypt_secret(ss) else encrypt_secret(str(ss)),
+                                created_at,
+                                updated_at,
+                            ),
+                        )
+                    if sat:
+                        cursor.execute(
+                            "INSERT INTO screen_credentials_kv "
+                            "(credential_id, system_id, name, value_enc, created_at, updated_at) "
+                            "VALUES (?, ?, ?, ?, ?, ?)",
+                            (
+                                str(_uuid.uuid4()),
+                                system_id,
+                                "__storage_state_saved_at",
+                                encrypt_secret(str(sat)),
+                                created_at,
+                                updated_at,
+                            ),
+                        )
+
+            cursor.execute("DROP TABLE screen_credentials")
+            cursor.execute("ALTER TABLE screen_credentials_kv RENAME TO screen_credentials")
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS ix_screen_credentials_system_id "
+                "ON screen_credentials (system_id)"
+            )
+
     conn.commit()
     conn.close()

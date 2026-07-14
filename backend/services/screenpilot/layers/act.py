@@ -42,13 +42,26 @@ async def _click_by_value(page, value: str) -> Dict[str, Any]:
         mode = "css"
         locator = page.locator(raw[4:].strip()).first
     elif raw.startswith("text="):
-        mode = "text"
-        locator = page.get_by_text(raw[5:].strip(), exact=False).first
+        text = raw[5:].strip()
+        mode = "text_exact"
+        # Prefer exact button name so "登录" does not hit title "用户登录".
+        btn = page.get_by_role("button", name=text, exact=True)
+        if await btn.count() > 0:
+            locator = btn.first
+            mode = "role_button_exact"
+        else:
+            locator = page.get_by_text(text, exact=True).first
     elif raw.startswith("/") or raw.startswith(".") or raw.startswith("#") or raw.startswith("["):
         mode = "css"
         locator = page.locator(raw).first
     else:
-        locator = page.get_by_text(raw, exact=False).first
+        mode = "text_exact"
+        btn = page.get_by_role("button", name=raw, exact=True)
+        if await btn.count() > 0:
+            locator = btn.first
+            mode = "role_button_exact"
+        else:
+            locator = page.get_by_text(raw, exact=True).first
 
     try:
         await locator.click(timeout=8000)
@@ -208,53 +221,8 @@ async def execute_action(
                         cx = box["x"] + min(12.0, max(4.0, float(box.get("width", 20)) * 0.08))
                         await page.mouse.click(cx, cy)
                         click_mode = "checkbox_left"
-                    # #region agent log
-                    try:
-                        import json as _json, time as _time
-                        with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-8b0267.log", "a") as _f:
-                            _f.write(_json.dumps({
-                                "sessionId": "8b0267",
-                                "runId": "post-fix",
-                                "hypothesisId": "H5",
-                                "location": "act.py:execute_action:checkbox",
-                                "message": "checkbox/label click path",
-                                "data": {
-                                    "target_ref": target_ref,
-                                    "role": role,
-                                    "label": label[:40],
-                                    "click_mode": click_mode,
-                                    "assoc_ok": bool(assoc.get("success")),
-                                    "assoc_checked": assoc.get("checked"),
-                                },
-                                "timestamp": int(_time.time() * 1000),
-                            }, ensure_ascii=False) + "\n")
-                    except Exception:
-                        pass
-                    # #endregion
                 elif label and len(label) <= 24 and role in ("button", "link"):
                     text_click = await _click_by_value(page, f"text={label}")
-                    # #region agent log
-                    try:
-                        import json as _json, time as _time
-                        with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-8b0267.log", "a") as _f:
-                            _f.write(_json.dumps({
-                                "sessionId": "8b0267",
-                                "runId": "post-fix",
-                                "hypothesisId": "H2",
-                                "location": "act.py:execute_action:click",
-                                "message": "click via text or coordinate",
-                                "data": {
-                                    "target_ref": target_ref,
-                                    "role": role,
-                                    "label": label[:40],
-                                    "text_ok": bool(text_click.get("success")),
-                                    "text_err": (text_click.get("error") or "")[:120],
-                                },
-                                "timestamp": int(_time.time() * 1000),
-                            }, ensure_ascii=False) + "\n")
-                    except Exception:
-                        pass
-                    # #endregion
                     if text_click.get("success"):
                         click_mode = text_click.get("click_mode")
                     else:

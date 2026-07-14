@@ -82,27 +82,45 @@ class SkillStore:
         id_map.append(skill_id)
         self._save_index(scope)
 
-    def remove_skill_from_index(self, skill_id: str, scope: str = "default") -> None:
-        """从 scope 索引中移除 skill 并增量重建该 scope。"""
+    def remove_skill_from_index(
+        self, skill_id: str, scope: str = "default", db: Optional[Session] = None
+    ) -> None:
+        """从 scope 索引中移除 skill；有 db 时按剩余 ACTIVE 技能重建向量。"""
         scope = scope or "default"
         self._ensure_index(scope)
         id_map = self._id_maps.get(scope, [])
-        if skill_id not in id_map:
+        if skill_id not in id_map and db is None:
             return
-        idx = id_map.index(skill_id)
-        index = self._indexes[scope]
-        if index.ntotal > 0 and idx < index.ntotal:
-            # IndexFlatIP 不支持单条删除，重建该 scope 向量
-            remaining_ids = [sid for sid in id_map if sid != skill_id]
-            dim = self._embedding_model().get_sentence_embedding_dimension()
-            new_index = faiss.IndexFlatIP(dim)
-            new_map: List[str] = []
-            for sid in remaining_ids:
-                # 需要从 DB 或缓存获取描述；此处仅保留 ID 占位，下次 search 会 rebuild
-                new_map.append(sid)
-            self._indexes[scope] = new_index
-            self._id_maps[scope] = new_map
-            self._save_index(scope)
+        if db is not None:
+            self.rebuild_scope_from_db(db, scope)
+            # After rebuild, already excludes deleted rows if caller deleted first.
+            # If skill still ACTIVE in DB, rebuild includes it — so callers must delete DB first.
+            return
+        remaining_ids = [sid for sid in id_map if sid != skill_id]
+        dim = self._embedding_model().get_sentence_embedding_dimension()
+        self._indexes[scope] = faiss.IndexFlatIP(dim)
+        self._id_maps[scope] = []
+        self._save_index(scope)
+        # IDs without vectors — next search with db will full rebuild
+        self._id_maps[scope] = remaining_ids
+        self._save_index(scope)
+
+    def delete_skill(self, db: Session, skill_id: str) -> bool:
+        """Delete skill + steps and drop from FAISS. Caller must ensure unpublished."""
+        skill = self.get_skill(db, skill_id)
+        if not skill:
+            return False
+        scope = skill.scope or "default"
+        db.query(UiSkillStep).filter(UiSkillStep.skill_id == skill_id).delete(
+            synchronize_session=False
+        )
+        db.delete(skill)
+        db.commit()
+        try:
+            self.rebuild_scope_from_db(db, scope)
+        except Exception as e:
+            logger.warning("FAISS rebuild after delete failed: %s", e)
+        return True
 
     def reindex_skill(self, skill_id: str, description: str, scope: str = "default") -> None:
         """增量更新：先移除再写入（用于技能内容变更）。"""
@@ -242,6 +260,73 @@ class SkillStore:
             return
         step.fingerprints = fingerprints
         db.commit()
+
+    def update_step(
+        self,
+        db: Session,
+        skill_id: str,
+        step_id: str,
+        *,
+        action: Optional[str] = None,
+        target_label: Optional[str] = None,
+        value_template: Optional[str] = None,
+        note: Optional[str] = None,
+        fingerprints: Optional[Dict[str, Any]] = None,
+    ) -> Optional[UiSkillStep]:
+        step = (
+            db.query(UiSkillStep)
+            .filter(UiSkillStep.step_id == step_id, UiSkillStep.skill_id == skill_id)
+            .first()
+        )
+        if not step:
+            return None
+        if action is not None:
+            step.action = (action or "").strip() or step.action
+        if target_label is not None:
+            step.target_label = target_label
+        if value_template is not None:
+            step.value_template = value_template
+        if fingerprints is not None:
+            step.fingerprints = fingerprints
+        if note is not None:
+            from sqlalchemy.orm.attributes import flag_modified
+
+            meta = dict(step.meta or {})
+            meta["note"] = note
+            step.meta = meta
+            flag_modified(step, "meta")
+        skill = self.get_skill(db, skill_id)
+        if skill:
+            skill.updated_at = now_utc()
+        db.commit()
+        db.refresh(step)
+        return step
+
+    def update_skill_meta(
+        self,
+        db: Session,
+        skill_id: str,
+        *,
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+    ) -> Optional[UiSkill]:
+        skill = self.get_skill(db, skill_id)
+        if not skill:
+            return None
+        if name is not None and name.strip():
+            skill.name = name.strip()[:128]
+        if description is not None:
+            skill.description = description
+        skill.updated_at = now_utc()
+        db.commit()
+        db.refresh(skill)
+        try:
+            self.reindex_skill(
+                skill.skill_id, f"{skill.name}\n{skill.description or ''}", skill.scope or "default"
+            )
+        except Exception as e:
+            logger.warning("reindex after skill meta update failed: %s", e)
+        return skill
 
 
 skill_store = SkillStore()

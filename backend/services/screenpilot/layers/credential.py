@@ -7,20 +7,156 @@ from models import ScreenCredential, ScreenSystem
 from services.screenpilot.crypto_util import decrypt_secret
 
 
-def _resolve_credential(db: Session, system_id: str) -> Optional[ScreenCredential]:
-    return (
+def load_credential_map(db: Session, system_id: str) -> Dict[str, str]:
+    """Decrypt all non-internal credential KV rows for a system."""
+    rows = (
         db.query(ScreenCredential)
         .filter(ScreenCredential.system_id == system_id)
-        .first()
+        .all()
     )
+    out: Dict[str, str] = {}
+    _dbg_names = []
+    _dbg_decrypt_ok = []
+    for row in rows:
+        name = (row.name or "").strip()
+        if not name or name.startswith("__"):
+            continue
+        plain = decrypt_secret(row.value_enc or "")
+        _dbg_names.append(name)
+        _dbg_decrypt_ok.append(bool(plain))
+        if plain:
+            out[name] = plain
+    return out
 
 
-def _render_template(value_tpl: str, *, username: str, password: str, otp: str = "") -> str:
-    return (
-        value_tpl.replace("{{username}}", username)
-        .replace("{{password}}", password)
-        .replace("{{otp}}", otp)
+def merge_params_with_credentials(
+    cred_map: Dict[str, str], params: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """Merge vault credentials; empty-string params do not override vault values."""
+    merged: Dict[str, Any] = dict(cred_map or {})
+    for k, v in (params or {}).items():
+        if v is None:
+            continue
+        if isinstance(v, str) and not v.strip() and k in merged:
+            continue
+        merged[k] = v
+    return merged
+
+
+def resolve_value_with_credentials(
+    value: Optional[str],
+    cred_map: Dict[str, str],
+    *,
+    target_el: Optional[Dict[str, Any]] = None,
+    target_label: str = "",
+) -> str:
+    """Resolve {{key}} templates; for username/password fields prefer vault when applicable."""
+    text = "" if value is None else str(value)
+    if cred_map and "{{" in text:
+        for key, val in cred_map.items():
+            text = text.replace("{{" + key + "}}", val)
+    tgt = target_el or {}
+    label = (target_label or "") + " " + str(tgt.get("label") or "")
+    low = label.lower()
+    field_kind = (tgt.get("field_kind") or "").lower()
+    input_type = (tgt.get("input_type") or "").lower()
+    is_password = (
+        field_kind == "password"
+        or input_type == "password"
+        or "密码" in label
+        or "password" in low
     )
+    is_username = (
+        field_kind == "username"
+        or any(k in label for k in ("用户", "账号", "帐号"))
+        or "user" in low
+        or "account" in low
+    ) and not is_password
+    if is_password and cred_map.get("password"):
+        # Prefer vault over chat plaintext for login password fields.
+        if (not text.strip()) or text.strip() in ("{{password}}", "***") or "{{" in (value or ""):
+            return cred_map["password"]
+        # Also prefer vault when agent typed a value — user asked vault to drive login.
+        return cred_map["password"]
+    if is_username and cred_map.get("username"):
+        if (not text.strip()) or text.strip() in ("{{username}}",) or "{{" in (value or ""):
+            return cred_map["username"]
+        return cred_map["username"]
+    return text
+
+
+async def auto_fill_login_from_credentials(
+    page,
+    db: Session,
+    *,
+    system_id: str,
+    elements: list,
+) -> Dict[str, Any]:
+    """When login_macro is empty: fill SoM username/password from vault and click submit."""
+    from services.screenpilot.layers.act import execute_action
+    from services.screenpilot.layers.perceive import build_login_form_hint, enrich_field_kinds
+
+    cred_map = load_credential_map(db, system_id)
+    if not cred_map.get("username") and not cred_map.get("password"):
+        return {"success": False, "skipped": True, "reason": "no_credentials"}
+
+    els = enrich_field_kinds(list(elements or []))
+    for i, e in enumerate(els):
+        e = dict(e)
+        e["ref"] = e.get("ref") or f"[{i + 1}]"
+        els[i] = e
+    hint = build_login_form_hint(els) or {}
+    user_refs = hint.get("username_refs") or []
+    pass_refs = hint.get("password_refs") or []
+    submit_refs = hint.get("submit_refs") or []
+
+    if not pass_refs and not user_refs:
+        # Fallback: scan labels
+        for e in els:
+            lab = e.get("label") or ""
+            if "密码" in lab and (e.get("role") or "") == "textbox":
+                pass_refs.append(e.get("ref"))
+            elif any(k in lab for k in ("用户", "账号")) and (e.get("role") or "") == "textbox":
+                user_refs.append(e.get("ref"))
+            elif (e.get("label") or "").strip() == "登录" and (e.get("role") or "") == "button":
+                submit_refs.append(e.get("ref"))
+
+
+    if user_refs and cred_map.get("username"):
+        r = await execute_action(
+            page, "type", els, target_ref=user_refs[0], value=cred_map["username"]
+        )
+        if not r.get("success"):
+            return {"success": False, "error": r.get("error") or "fill username failed"}
+    if pass_refs and cred_map.get("password"):
+        r = await execute_action(
+            page, "type", els, target_ref=pass_refs[0], value=cred_map["password"]
+        )
+        if not r.get("success"):
+            return {"success": False, "error": r.get("error") or "fill password failed"}
+    if submit_refs:
+        r = await execute_action(page, "click", els, target_ref=submit_refs[0])
+        if not r.get("success"):
+            return {"success": False, "error": r.get("error") or "click login failed"}
+    elif cred_map.get("password"):
+        # fallback: exact button text 登录
+        from services.screenpilot.layers.act import _click_by_value
+
+        r = await _click_by_value(page, "text=登录")
+        if not r.get("success"):
+            return {"success": False, "error": r.get("error") or "click login failed"}
+
+    return {"success": True, "filled": True}
+
+
+def _render_template(value_tpl: str, values: Dict[str, str], otp: str = "") -> str:
+    text = value_tpl or ""
+    merged = dict(values or {})
+    if otp:
+        merged["otp"] = otp
+    for key, val in merged.items():
+        text = text.replace("{{" + key + "}}", val)
+    return text
 
 
 async def _execute_macro_steps(
@@ -30,19 +166,17 @@ async def _execute_macro_steps(
     steps: list,
     *,
     start_step: int,
-    username: str,
-    password: str,
+    cred_map: Dict[str, str],
     screen_session_id: str = "",
     vela_session_id: str = "",
     agent_id: str = "",
-    credential_id: str = "",
 ) -> Dict[str, Any]:
     for i in range(start_step, len(steps)):
         step = steps[i]
         action = (step.get("action") or "").lower()
         selector = step.get("selector") or ""
         value_tpl = step.get("value") or ""
-        value = _render_template(value_tpl, username=username, password=password)
+        value = _render_template(value_tpl, cred_map)
         wait_ms = int(step.get("wait_ms") or 300)
 
         if action == "goto":
@@ -85,7 +219,6 @@ async def _execute_macro_steps(
                 preview_payload=preview,
                 login_macro_resume={
                     "system_id": system.system_id,
-                    "credential_id": credential_id,
                     "step_index": i,
                     "step": step,
                     "steps": steps,
@@ -125,10 +258,7 @@ async def run_login_macro(
             await page.goto(entry, wait_until="domcontentloaded", timeout=60000)
         return {"success": True, "message": "无登录宏，已导航至入口 URL"}
 
-    cred = _resolve_credential(db, system.system_id)
-    username = cred.username if cred else ""
-    password = decrypt_secret(cred.secret_enc) if cred and cred.secret_enc else ""
-    credential_id = cred.credential_id if cred else ""
+    cred_map = load_credential_map(db, system.system_id)
 
     return await _execute_macro_steps(
         page,
@@ -136,12 +266,10 @@ async def run_login_macro(
         db,
         steps,
         start_step=start_step,
-        username=username,
-        password=password,
+        cred_map=cred_map,
         screen_session_id=screen_session_id,
         vela_session_id=vela_session_id,
         agent_id=agent_id,
-        credential_id=credential_id,
     )
 
 
@@ -168,11 +296,7 @@ async def resume_login_macro_after_otp(
         await page.click(submit_selector)
     await asyncio.sleep(wait_ms / 1000.0)
 
-    cred = _resolve_credential(db, system.system_id)
-    username = cred.username if cred else ""
-    password = decrypt_secret(cred.secret_enc) if cred and cred.secret_enc else ""
-    credential_id = cred.credential_id if cred else ""
-
+    cred_map = load_credential_map(db, system.system_id)
     steps = resume.get("steps") or []
     next_index = int(resume.get("step_index") or 0) + 1
 
@@ -182,10 +306,8 @@ async def resume_login_macro_after_otp(
         db,
         steps,
         start_step=next_index,
-        username=username,
-        password=password,
+        cred_map=cred_map,
         screen_session_id=screen_session_id,
         vela_session_id=vela_session_id,
         agent_id=agent_id,
-        credential_id=credential_id,
     )

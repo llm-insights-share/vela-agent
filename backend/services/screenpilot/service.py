@@ -18,6 +18,7 @@ from services.screenpilot.layers.govern import (
 from services.screenpilot.layers.ground import find_element_by_ref, build_selector_fingerprint
 from services.screenpilot.layers.perceive import (
     DEFAULT_MAX_ELEMENTS,
+    build_login_form_hint,
     build_som,
     capture_page_state,
     collect_dom_elements,
@@ -251,6 +252,9 @@ async def observe_session(db: Session, screen_session_id: str) -> Dict[str, Any]
         "truncated": bool(som_meta.get("truncated")),
         "scope": som_meta.get("scope") or "page",
     }
+    login_form = build_login_form_hint(elements)
+    if login_form:
+        result["login_form_hint"] = login_form
     if risk:
         result["risk_blocked"] = True
         result["error_code"] = risk["error_code"]
@@ -350,82 +354,6 @@ async def observe_session(db: Session, screen_session_id: str) -> Dict[str, Any]
         )
         result["canvas_count"] = canvas_count
 
-    # #region agent log
-    try:
-        import json as _json, time as _time
-        _summary = [
-            {
-                "ref": e.get("ref"),
-                "role": e.get("role"),
-                "label": ((e.get("label") or "")[:24]),
-                "checked": e.get("checked"),
-                "w": round(float((e.get("box") or {}).get("width") or 0), 1),
-            }
-            for e in elements
-            if (e.get("role") or "").lower() in ("button", "link", "checkbox", "switch", "label", "textbox")
-            or (1 <= len((e.get("label") or "").strip()) <= 16)
-        ][:50]
-        _dom_probe = []
-        try:
-            _dom_probe = await live.page.evaluate(
-                """() => {
-                  const out = [];
-                  for (const inp of document.querySelectorAll('input, textarea')) {
-                    let scope = inp.parentElement;
-                    for (let d = 0; d < 3 && scope; d++, scope = scope.parentElement) {
-                      for (const c of scope.querySelectorAll('a,button,span,div,[role=button],[role=link]')) {
-                        if (c === inp || c.contains(inp) || inp.contains(c)) continue;
-                        const t = ((c.innerText || c.textContent || '') + '').replace(/\\s+/g, ' ').trim();
-                        if (!t || t.length > 16) continue;
-                        const r = c.getBoundingClientRect();
-                        if (r.width < 4 || r.height < 4) continue;
-                        const st = getComputedStyle(c);
-                        out.push({
-                          tag: (c.tagName || '').toLowerCase(),
-                          role: c.getAttribute('role') || '',
-                          t: t.slice(0, 16),
-                          w: Math.round(r.width),
-                          pe: st.pointerEvents,
-                          cur: st.cursor,
-                          op: st.opacity,
-                        });
-                      }
-                    }
-                  }
-                  return out.slice(0, 30);
-                }"""
-            )
-        except Exception:
-            _dom_probe = []
-        with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-8b0267.log", "a") as _f:
-            _f.write(_json.dumps({
-                "sessionId": "8b0267",
-                "runId": "post-fix",
-                "hypothesisId": "H6",
-                "location": "service.py:observe_session",
-                "message": "observe elements summary",
-                "data": {
-                    "url": (url or "")[:120],
-                    "element_count": len(elements),
-                    "short_btn_labels": [((e.get("label") or "")[:16], e.get("ref"), e.get("role")) for e in short_btns[:8]],
-                    "send_code_candidates": [
-                        ((e.get("label") or "")[:16], e.get("ref"), e.get("role"), round(float((e.get("box") or {}).get("width") or 0), 1))
-                        for e in send_code_candidates[:8]
-                    ],
-                    "link_labels": [
-                        ((e.get("label") or "")[:16], e.get("ref"))
-                        for e in elements if (e.get("role") or "") == "link"
-                    ][:12],
-                    "dom_probe_inline": _dom_probe,
-                    "has_form_flow_hint": bool(result.get("form_flow_hint")),
-                    "has_checkbox": any((e.get("role") or "") == "checkbox" for e in elements),
-                    "elements": _summary,
-                },
-                "timestamp": int(_time.time() * 1000),
-            }, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
-    # #endregion
     return result
 
 
@@ -517,8 +445,8 @@ async def navigate_ui(
             if probe.get("success") and not probe.get("login_required"):
                 skip_login = True
 
-    if auto_login and system.login_macro and not skip_login:
-        macro_steps = (system.login_macro or {}).get("steps") or []
+    if auto_login and not skip_login:
+        macro_steps = ((system.login_macro or {}).get("steps") or []) if system else []
         if macro_steps:
             login_result = await run_login_macro(
                 live.page,
@@ -537,6 +465,25 @@ async def navigate_ui(
                 return login_result
             if live.context:
                 await save_storage_state(db, resolved_id, live.context)
+        else:
+            # No login_macro steps: fill vault credentials on login page via SoM.
+            probe = await observe_session(db, row.screen_session_id)
+            if probe.get("success") and (
+                probe.get("login_required")
+                or build_login_form_hint(probe.get("elements") or [])
+            ):
+                from services.screenpilot.layers.credential import (
+                    auto_fill_login_from_credentials,
+                )
+
+                fill = await auto_fill_login_from_credentials(
+                    live.page,
+                    db,
+                    system_id=resolved_id,
+                    elements=probe.get("elements") or live.elements or [],
+                )
+                if fill.get("success") and live.context:
+                    await save_storage_state(db, resolved_id, live.context)
 
     if target_url:
         nav = await execute_action(
@@ -896,12 +843,28 @@ async def act_ui(
         }
 
     target_label = ""
+    target_el = None
     if target_ref and live.elements:
         from services.screenpilot.layers.ground import find_element_by_ref
 
         el = find_element_by_ref(live.elements, target_ref)
         if el:
+            target_el = el
             target_label = el.get("label") or ""
+
+    # Login fields: resolve {{username}}/{{password}} or prefer system vault over chat plaintext.
+    if action == "type" and row and row.system_id:
+        from services.screenpilot.layers.credential import (
+            load_credential_map,
+            resolve_value_with_credentials,
+        )
+
+        _cred = load_credential_map(db, row.system_id)
+        if _cred:
+            _before = value
+            value = resolve_value_with_credentials(
+                value, _cred, target_el=target_el, target_label=target_label
+            )
 
     risk_tier = classify_risk(action, target_label, risk_rules)
 
@@ -966,47 +929,22 @@ async def act_ui(
         value=value,
         allowed_domains=allowed,
     )
-    # #region agent log
-    try:
-        import json as _json, time as _time, re as _re
-        _after = ((result.get("verification") or {}).get("after_target") or {}).get("dom") or {}
-        _before = ((result.get("verification") or {}).get("before_target") or {}).get("dom") or {}
-        _tgt = result.get("target") or {}
-        _body = ""
-        try:
-            _body = (await live.page.inner_text("body"))[:400] if live.page else ""
-        except Exception:
-            pass
-        with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-8b0267.log", "a") as _f:
-            _f.write(_json.dumps({
-                "sessionId": "8b0267",
-                "runId": "pre-fix",
-                "hypothesisId": "H1",
-                "location": "service.py:act_ui:after_execute",
-                "message": "act result",
-                "data": {
-                    "action": action,
-                    "target_ref": target_ref,
-                    "value": (str(value)[:40] if value is not None else None),
-                    "target_label": ((_tgt.get("label") or "")[:40]),
-                    "target_role": _tgt.get("role"),
-                    "success": bool(result.get("success")),
-                    "executed": result.get("executed"),
-                    "effect_ok": result.get("effect_ok"),
-                    "click_mode": result.get("click_mode"),
-                    "error": (result.get("error") or "")[:160],
-                    "warning": (result.get("warning") or "")[:120],
-                    "after_text": (_after.get("text") or "")[:40],
-                    "checked_before": _before.get("checked"),
-                    "checked_after": _after.get("checked"),
-                    "checkbox_flipped": (result.get("verification") or {}).get("checkbox_flipped"),
-                    "countdown_like": bool(_re.search(r"\d+\s*[s秒分]", _after.get("text") or "") or _re.search(r"\d+\s*[s秒分]", _body)),
-                },
-                "timestamp": int(_time.time() * 1000),
-            }, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
-    # #endregion
+    # If a login-looking click had no effect, nudge agent toward the real submit button.
+    if (
+        action == "click"
+        and result.get("success")
+        and result.get("effect_ok") is False
+    ):
+        hint = build_login_form_hint(live.elements or [])
+        if hint and hint.get("submit_refs"):
+            result["warning"] = (
+                (result.get("warning") or "")
+                + " 点击未产生登录跳转：请改点 login_form.submit_refs / value=text=登录，"
+                "不要点域名前缀或「用户登录」标题。"
+            ).strip()
+            result["login_form_hint"] = hint
+            result["suggest_click"] = {"value": "text=登录", "refs": hint.get("submit_refs")}
+
     if not result.get("success"):
         return result
 
@@ -1037,6 +975,14 @@ async def act_ui(
         },
     )
 
+    audit_value = value
+    if action == "type":
+        tgt = result.get("target") or {}
+        if (tgt.get("input_type") or "").lower() == "password" or tgt.get("field_kind") == "password":
+            audit_value = "***"
+        elif value and len(str(value)) >= 6:
+            audit_value = "***"
+
     write_audit(
         db,
         screen_session_id=screen_session_id,
@@ -1044,12 +990,12 @@ async def act_ui(
         agent_id=agent_id or (row.agent_id if row else ""),
         action=action,
         risk_tier=risk_tier,
-        payload={"target_ref": target_ref, "value": value},
+        payload={"target_ref": target_ref, "value": audit_value},
         screenshot_png=live.last_screenshot or None,
         verification=result.get("verification"),
     )
 
-    return {
+    out = {
         "success": True,
         "risk_tier": risk_tier,
         "executed": bool(result.get("executed", True)),
@@ -1061,8 +1007,14 @@ async def act_ui(
             "url": obs.get("url"),
             "elements": obs.get("elements"),
             "som_image_b64": obs.get("som_image_b64"),
+            "login_form_hint": obs.get("login_form_hint"),
         },
     }
+    if result.get("login_form_hint"):
+        out["login_form_hint"] = result["login_form_hint"]
+    if result.get("suggest_click"):
+        out["suggest_click"] = result["suggest_click"]
+    return out
 
 
 async def extract_ui(db: Session, screen_session_id: str) -> Dict[str, Any]:
@@ -1116,11 +1068,18 @@ async def replay_skill(
         )
 
     risk_rules = (system.risk_rules or {}) if system else {}
-    params = params or {}
+    from services.screenpilot.layers.credential import load_credential_map
+
+    cred_map = load_credential_map(db, skill.system_id) if skill.system_id else {}
+    incoming = dict(params or {})
+    from services.screenpilot.layers.credential import merge_params_with_credentials
+
+    params = merge_params_with_credentials(cred_map, incoming)
     results = []
 
     for step in steps:
-        value = resolve_template(step.value_template or "", params)
+        raw_tpl = step.value_template or ""
+        value = resolve_template(raw_tpl, params)
         action = step.action
         label = step.target_label or ""
         risk_tier = classify_risk(action, label, risk_rules)
@@ -1247,6 +1206,8 @@ async def search_skills(
                     "name": skill.name,
                     "description": skill.description,
                     "system_id": skill.system_id,
+                    "visibility": getattr(skill, "visibility", "PRIVATE") or "PRIVATE",
+                    "status": skill.status or "ACTIVE",
                     "score": score,
                 }
             )

@@ -779,22 +779,6 @@ class AgentService:
                         AgentToolBinding.agent_id == agent_id
                     ).all()
         except Exception as _e:
-            # #region agent log
-            try:
-                import json as _json, time as _time
-                with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-66b153.log", "a") as _f:
-                    _f.write(_json.dumps({
-                        "sessionId": "66b153",
-                        "runId": "fix",
-                        "hypothesisId": "C",
-                        "location": "agent_service.py:load_tools",
-                        "message": "ensure_cu_tools failed",
-                        "data": {"error": str(_e)[:200]},
-                        "timestamp": int(_time.time() * 1000),
-                    }, ensure_ascii=False) + "\n")
-            except Exception:
-                pass
-            # #endregion
 
         available_tools = []
         for tb in tool_bindings:
@@ -805,28 +789,6 @@ class AgentService:
             if tool:
                 available_tools.append(tool)
 
-        # #region agent log
-        try:
-            import json as _json, time as _time
-            cu_names = [t.name for t in available_tools if getattr(t, "name", "").startswith("cu_")]
-            with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-66b153.log", "a") as _f:
-                _f.write(_json.dumps({
-                    "sessionId": "66b153",
-                    "runId": "post-fix",
-                    "hypothesisId": "A+B",
-                    "location": "agent_service.py:available_tools",
-                    "message": "agent available cu tools after ensure",
-                    "data": {
-                        "agent_id": agent_id,
-                        "cu_tools": cu_names,
-                        "has_cu_vision": "cu_vision" in cu_names,
-                        "has_cu_wait_for_otp": "cu_wait_for_otp" in cu_names,
-                    },
-                    "timestamp": int(_time.time() * 1000),
-                }, ensure_ascii=False) + "\n")
-        except Exception:
-            pass
-        # #endregion
 
         available_tools.extend(BUILTIN_TOOLS)
 
@@ -851,30 +813,6 @@ class AgentService:
                     "请立即调用 cu_observe 查看当前页面，将验证码填入验证码输入框，"
                     "然后点击登录按钮完成登录。必须调用工具，不要只回复文字。"
                 )
-        # #region agent log
-        try:
-            import json as _json, time as _time
-            with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-8b0267.log", "a") as _f:
-                _f.write(_json.dumps({
-                    "sessionId": "8b0267",
-                    "runId": "otp-continue",
-                    "hypothesisId": "H3",
-                    "location": "agent_service.py:chat_with_agent:mode",
-                    "message": "execution mode selected",
-                    "data": {
-                        "mode": mode,
-                        "has_tools": has_tools,
-                        "tool_count": len(available_tools),
-                        "looks_like_otp": _looks_like_otp_message(original_message),
-                        "has_sp_context": _session_has_screenpilot_context(session),
-                        "otp_forced_react": "用户提供了登录验证码" in (message or ""),
-                        "msg_len": len((original_message or "").strip()),
-                    },
-                    "timestamp": int(_time.time() * 1000),
-                }, ensure_ascii=False) + "\n")
-        except Exception:
-            pass
-        # #endregion
 
         loop = AgentLoop(
             db=db,
@@ -1026,6 +964,7 @@ class AgentLoop:
 
         # SGL-IMP-03: 死循环检测历史
         self._tool_call_history: List[str] = []
+        self._screenpilot_session_ids: set = set()
 
         # SGL-CFG-06: 加载工具→require_approval 映射
         self.tool_require_approval: Dict[str, bool] = {}
@@ -1328,6 +1267,13 @@ class AgentLoop:
             data["elements_truncated"] = True
 
         compact = json.dumps(data, ensure_ascii=False)
+        if tool_name in ("cu_search_skills", "ui_search_skills") and isinstance(
+            data.get("items"), list
+        ) and data["items"]:
+            compact += (
+                "\n[Hint] 命中 UI 技能后请优先调用 cu_replay_skill(skill_id, screen_session_id)；"
+                "登录步骤中的 {{username}}/{{password}} 会自动使用系统凭证库，勿用聊天里的明文密码 cu_act。"
+            )
         if len(compact) > 16000:
             compact = compact[:16000] + "…[truncated]"
         return compact
@@ -1555,7 +1501,49 @@ class AgentLoop:
             return payload["approval_id"]
         return None
 
+    def _track_screenpilot_session(self, tool_result: Any) -> None:
+        """Collect screen_session_id from cu_* results and backfill vela_session_id."""
+        raw = tool_result
+        if isinstance(raw, dict):
+            payload = raw
+        elif isinstance(raw, str) and raw.strip().startswith("{"):
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                return
+        else:
+            return
+        sid = (payload.get("screen_session_id") or "").strip()
+        if not sid and isinstance(payload.get("observe"), dict):
+            sid = (payload["observe"].get("screen_session_id") or "").strip()
+        if not sid:
+            return
+        self._screenpilot_session_ids.add(sid)
+        try:
+            from models import ScreenSession
+            row = (
+                self.db.query(ScreenSession)
+                .filter(ScreenSession.screen_session_id == sid)
+                .first()
+            )
+            if row and not (row.vela_session_id or "").strip():
+                row.vela_session_id = self.session.session_id
+                if not (row.agent_id or "").strip():
+                    row.agent_id = getattr(self.agent, "agent_id", "") or ""
+                self.db.commit()
+        except Exception:
+            pass
+
     async def _execute_tool_with_retry(self, tool, args: Dict[str, Any]) -> Dict[str, Any]:
+        # ScreenPilot：注入会话关联，便于轨迹自动编译回落 UI 技能库
+        tool_name = getattr(tool, "name", "") or ""
+        if tool_name.startswith(("cu_", "ui_")):
+            args = dict(args or {})
+            if not args.get("vela_session_id"):
+                args["vela_session_id"] = self.session.session_id
+            if not args.get("agent_id"):
+                args["agent_id"] = getattr(self.agent, "agent_id", "") or ""
+
         # SGL-CFG-06: HITL 拦截 - 工具调用前检查 require_approval
         tool_id = getattr(tool, "tool_id", None) or tool.name
         if self.tool_require_approval.get(tool_id):
@@ -1594,6 +1582,8 @@ class AgentLoop:
                     raise HITLPendingError(sp_approval, tool.name)
                 if result.get("success"):
                     finalized = await self._finalize_tool_success(tool, args, result)
+                    if tool_name.startswith(("cu_", "ui_")):
+                        self._track_screenpilot_session(finalized.get("result", ""))
                     self._memory_record_tool(tool.name, args, finalized)
                     return finalized
 
@@ -1842,6 +1832,7 @@ class AgentLoop:
                     func_args = self._safe_parse_tool_args(raw_args)
 
                     parse_failed = bool(raw_args) and not func_args
+
 
                     tool = next((t for t in self.available_tools if t.name == func_name), None)
                     if tool:
@@ -2130,6 +2121,28 @@ class AgentLoop:
 
         # 自我记录：消息轮次
         self._memory_record_turn(assistant_content=content or "")
+
+        # 成功驭屏会话结束后：将未编译轨迹自动写入 UI 技能库
+        if mode in ("react", "plan_and_execute"):
+            try:
+                from services.screenpilot.trajectory import auto_compile_pending_trajectories
+
+                compiled = auto_compile_pending_trajectories(
+                    self.db,
+                    vela_session_id=self.session.session_id,
+                    name_hint=self.original_user_message or "",
+                    screen_session_ids=list(getattr(self, "_screenpilot_session_ids", set()) or []),
+                )
+                if compiled:
+                    names = ", ".join(c.get("name", "") for c in compiled)
+                    self.thinking_log.append(f"[UI技能] 自动编译 {len(compiled)} 条: {names}")
+                    result["thinking"] = "\n".join(self.thinking_log) + "\n" + (thinking or "")
+                    result["compiled_ui_skills"] = [
+                        {"skill_id": c.get("skill_id"), "name": c.get("name"), "step_count": c.get("step_count")}
+                        for c in compiled
+                    ]
+            except Exception as _e:
+
         return result
 
     def _replace_file_references(self, content: str) -> str:

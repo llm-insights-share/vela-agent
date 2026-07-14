@@ -222,28 +222,44 @@ TOOLS = [
 
 
 async def _dispatch(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    import inspect
+
+    def _filter_kwargs(fn, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Drop injected keys (e.g. vela_session_id) that the handler does not accept."""
+        try:
+            sig = inspect.signature(fn)
+        except (TypeError, ValueError):
+            return args
+        if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+            return args
+        allowed = {k for k in sig.parameters if k != "db"}
+        return {k: v for k, v in (args or {}).items() if k in allowed}
+
     db = SessionLocal()
     try:
+
         if name == "cu_navigate":
-            return await navigate_ui(db, **arguments)
+            return await navigate_ui(db, **_filter_kwargs(navigate_ui, arguments))
         if name == "cu_observe":
-            return await observe_session(db, arguments["screen_session_id"])
+            args = _filter_kwargs(observe_session, arguments)
+            return await observe_session(db, args.get("screen_session_id") or arguments["screen_session_id"])
         if name == "cu_act":
-            return await act_ui(db, **arguments)
+            return await act_ui(db, **_filter_kwargs(act_ui, arguments))
         if name == "cu_extract":
             return await extract_ui(db, arguments["screen_session_id"])
         if name == "cu_replay_skill":
-            return await replay_skill(db, **arguments)
+            return await replay_skill(db, **_filter_kwargs(replay_skill, arguments))
         if name == "cu_compile_skill":
-            return await compile_skill(db, **arguments)
+            return await compile_skill(db, **_filter_kwargs(compile_skill, arguments))
         if name == "cu_search_skills":
-            return await search_skills(db, **arguments)
+            filtered = _filter_kwargs(search_skills, arguments)
+            return await search_skills(db, **filtered)
         if name == "cu_run_task":
-            return await run_task(db, **arguments)
+            return await run_task(db, **_filter_kwargs(run_task, arguments))
         if name == "cu_wait_for_otp":
-            return await wait_for_otp_ui(db, **arguments)
+            return await wait_for_otp_ui(db, **_filter_kwargs(wait_for_otp_ui, arguments))
         if name == "cu_vision":
-            return await vision_query(db, **arguments)
+            return await vision_query(db, **_filter_kwargs(vision_query, arguments))
         return {"success": False, "error": f"未知工具: {name}"}
     finally:
         db.close()

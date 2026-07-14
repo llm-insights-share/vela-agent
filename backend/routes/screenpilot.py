@@ -56,18 +56,19 @@ class ScreenSystemResponse(BaseModel):
 
 class ScreenCredentialCreate(BaseModel):
     system_id: str
-    label: str = "default"
-    username: str = ""
-    password: str = ""
-    extra: dict = Field(default_factory=dict)
+    name: str
+    value: str = ""
+
+
+class ScreenCredentialUpdate(BaseModel):
+    value: str = ""
 
 
 class ScreenCredentialResponse(BaseModel):
     credential_id: str
     system_id: str
-    label: str
-    username: str
-    has_secret: bool = False
+    name: str
+    has_value: bool = False
     model_config = {"from_attributes": True}
 
 
@@ -206,13 +207,33 @@ def create_credential(data: ScreenCredentialCreate, db: Session = Depends(get_db
     system = db.query(ScreenSystem).filter(ScreenSystem.system_id == data.system_id).first()
     if not system:
         raise HTTPException(status_code=404, detail="系统不存在")
+    name = (data.name or "").strip()
+    if not name or name.startswith("__"):
+        raise HTTPException(status_code=400, detail="凭证 name 无效")
+    existing = (
+        db.query(ScreenCredential)
+        .filter(
+            ScreenCredential.system_id == data.system_id,
+            ScreenCredential.name == name,
+        )
+        .first()
+    )
+    if existing:
+        existing.value_enc = encrypt_secret(data.value or "")
+        existing.updated_at = now_utc()
+        db.commit()
+        db.refresh(existing)
+        return ScreenCredentialResponse(
+            credential_id=existing.credential_id,
+            system_id=existing.system_id,
+            name=existing.name,
+            has_value=bool(existing.value_enc),
+        )
     row = ScreenCredential(
         credential_id=gen_uuid(),
         system_id=data.system_id,
-        label=data.label,
-        username=data.username,
-        secret_enc=encrypt_secret(data.password),
-        extra=data.extra,
+        name=name,
+        value_enc=encrypt_secret(data.value or ""),
         created_at=now_utc(),
         updated_at=now_utc(),
     )
@@ -222,26 +243,67 @@ def create_credential(data: ScreenCredentialCreate, db: Session = Depends(get_db
     return ScreenCredentialResponse(
         credential_id=row.credential_id,
         system_id=row.system_id,
-        label=row.label,
-        username=row.username,
-        has_secret=bool(row.secret_enc),
+        name=row.name,
+        has_value=bool(row.value_enc),
     )
 
 
 @router.get("/systems/{system_id}/credentials", response_model=List[ScreenCredentialResponse])
 def list_credentials(system_id: str, db: Session = Depends(get_db)):
     _require_enabled()
-    rows = db.query(ScreenCredential).filter(ScreenCredential.system_id == system_id).all()
+    rows = (
+        db.query(ScreenCredential)
+        .filter(ScreenCredential.system_id == system_id)
+        .order_by(ScreenCredential.name.asc())
+        .all()
+    )
     return [
         ScreenCredentialResponse(
             credential_id=r.credential_id,
             system_id=r.system_id,
-            label=r.label,
-            username=r.username,
-            has_secret=bool(r.secret_enc),
+            name=r.name,
+            has_value=bool(r.value_enc),
         )
         for r in rows
+        if not (r.name or "").startswith("__")
     ]
+
+
+@router.put("/credentials/{credential_id}", response_model=ScreenCredentialResponse)
+def update_credential(
+    credential_id: str,
+    data: ScreenCredentialUpdate,
+    db: Session = Depends(get_db),
+):
+    _require_enabled()
+    row = db.query(ScreenCredential).filter(ScreenCredential.credential_id == credential_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="凭证不存在")
+    if (row.name or "").startswith("__"):
+        raise HTTPException(status_code=400, detail="系统内部凭证不可修改")
+    row.value_enc = encrypt_secret(data.value or "")
+    row.updated_at = now_utc()
+    db.commit()
+    db.refresh(row)
+    return ScreenCredentialResponse(
+        credential_id=row.credential_id,
+        system_id=row.system_id,
+        name=row.name,
+        has_value=bool(row.value_enc),
+    )
+
+
+@router.delete("/credentials/{credential_id}")
+def delete_credential(credential_id: str, db: Session = Depends(get_db)):
+    _require_enabled()
+    row = db.query(ScreenCredential).filter(ScreenCredential.credential_id == credential_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="凭证不存在")
+    if (row.name or "").startswith("__"):
+        raise HTTPException(status_code=400, detail="系统内部凭证不可删除")
+    db.delete(row)
+    db.commit()
+    return {"success": True}
 
 
 @router.get("/audit-logs")
@@ -365,6 +427,33 @@ def list_skill_shop(
     )
 
 
+class SkillUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+
+
+class SkillStepUpdateRequest(BaseModel):
+    action: Optional[str] = None
+    target_label: Optional[str] = None
+    value_template: Optional[str] = None
+    note: Optional[str] = None
+    fingerprints: Optional[dict] = None
+
+
+def _step_to_dict(st) -> dict:
+    meta = st.meta or {}
+    return {
+        "step_id": st.step_id,
+        "step_order": st.step_order,
+        "action": st.action,
+        "target_label": st.target_label or "",
+        "value_template": st.value_template or "",
+        "note": (meta.get("note") if isinstance(meta, dict) else "") or "",
+        "fingerprints": st.fingerprints or {},
+        "meta": meta if isinstance(meta, dict) else {},
+    }
+
+
 @router.get("/skills/{skill_id}")
 def get_skill_detail(skill_id: str, db: Session = Depends(get_db)):
     _require_enabled()
@@ -377,22 +466,63 @@ def get_skill_detail(skill_id: str, db: Session = Depends(get_db)):
     return {
         "skill_id": skill.skill_id,
         "name": skill.name,
-        "description": skill.description,
+        "description": skill.description or "",
         "system_id": skill.system_id,
         "scope": skill.scope,
+        "status": skill.status or "ACTIVE",
+        "visibility": getattr(skill, "visibility", "PRIVATE") or "PRIVATE",
         "param_schema": skill.param_schema,
-        "steps": [
-            {
-                "step_id": st.step_id,
-                "step_order": st.step_order,
-                "action": st.action,
-                "target_label": st.target_label,
-                "value_template": st.value_template,
-                "fingerprints": st.fingerprints,
-            }
-            for st in steps
-        ],
+        "steps": [_step_to_dict(st) for st in steps],
     }
+
+
+@router.put("/skills/{skill_id}")
+def update_skill_api(skill_id: str, body: SkillUpdateRequest, db: Session = Depends(get_db)):
+    _require_enabled()
+    from services.screenpilot.skill_store import skill_store
+
+    skill = skill_store.update_skill_meta(
+        db,
+        skill_id,
+        name=body.name,
+        description=body.description,
+    )
+    if not skill:
+        raise HTTPException(status_code=404, detail="技能不存在")
+    return {
+        "skill_id": skill.skill_id,
+        "name": skill.name,
+        "description": skill.description or "",
+        "visibility": getattr(skill, "visibility", "PRIVATE") or "PRIVATE",
+        "status": skill.status or "ACTIVE",
+    }
+
+
+@router.put("/skills/{skill_id}/steps/{step_id}")
+def update_skill_step_api(
+    skill_id: str,
+    step_id: str,
+    body: SkillStepUpdateRequest,
+    db: Session = Depends(get_db),
+):
+    _require_enabled()
+    from services.screenpilot.skill_store import skill_store
+
+    if not skill_store.get_skill(db, skill_id):
+        raise HTTPException(status_code=404, detail="技能不存在")
+    step = skill_store.update_step(
+        db,
+        skill_id,
+        step_id,
+        action=body.action,
+        target_label=body.target_label,
+        value_template=body.value_template,
+        note=body.note,
+        fingerprints=body.fingerprints,
+    )
+    if not step:
+        raise HTTPException(status_code=404, detail="步骤不存在")
+    return _step_to_dict(step)
 
 
 @router.post("/skills/compile")
@@ -461,6 +591,24 @@ def unpublish_skill_api(skill_id: str, db: Session = Depends(get_db)):
     if not skill:
         raise HTTPException(status_code=404, detail="技能不存在")
     return {"skill_id": skill.skill_id, "visibility": skill.visibility}
+
+
+@router.delete("/skills/{skill_id}")
+def delete_skill_api(skill_id: str, db: Session = Depends(get_db)):
+    """仅允许删除未发布（私有/已下架）技能。"""
+    _require_enabled()
+    from services.screenpilot.skill_store import skill_store
+
+    skill = skill_store.get_skill(db, skill_id)
+    if not skill:
+        raise HTTPException(status_code=404, detail="技能不存在")
+    visibility = (getattr(skill, "visibility", None) or "PRIVATE").upper()
+    if visibility in ("DEPARTMENT", "PUBLIC"):
+        raise HTTPException(status_code=400, detail="请先下架后再删除该技能")
+    ok = skill_store.delete_skill(db, skill_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="技能不存在")
+    return {"success": True, "skill_id": skill_id}
 
 
 @router.post("/skills/{skill_id}/import")

@@ -150,17 +150,31 @@ async def call_screenpilot_inprocess(
     tool_name: str, arguments: Dict[str, Any]
 ) -> Dict[str, Any]:
     """进程内直接调用 ScreenPilot 服务（最快路径，不经 MCP 子进程）。"""
+    import inspect
+
     from database import SessionLocal
     from services.screenpilot.service import TOOL_HANDLERS
     from services.screenpilot.run_task import run_task
 
+    def _filter_kwargs(fn, args: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            sig = inspect.signature(fn)
+        except (TypeError, ValueError):
+            return args or {}
+        if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+            return args or {}
+        allowed = {k for k in sig.parameters if k != "db"}
+        return {k: v for k, v in (args or {}).items() if k in allowed}
+
     db = SessionLocal()
     try:
+
         if tool_name == "cu_run_task":
-            result = await run_task(db, **arguments)
+            result = await run_task(db, **_filter_kwargs(run_task, arguments))
         elif tool_name in TOOL_HANDLERS:
             handler = TOOL_HANDLERS[tool_name]
-            result = await handler(db, **arguments)
+            filtered = _filter_kwargs(handler, arguments)
+            result = await handler(db, **filtered)
         else:
             return {"success": False, "error": f"未知 ScreenPilot 工具: {tool_name}"}
 

@@ -177,6 +177,7 @@ _DOM_COLLECT_JS = """
     if (role) return role;
     if (tag === 'input' && type === 'checkbox') return 'checkbox';
     if (tag === 'input' && type === 'radio') return 'radio';
+    if (tag === 'input' && type === 'password') return 'textbox';
     if (tag === 'input' && (type === 'search' || (el.name || '').includes('search'))) return 'searchbox';
     if (tag === 'a') return 'link';
     if (tag === 'button' || type === 'button' || type === 'submit') return 'button';
@@ -348,6 +349,20 @@ _DOM_COLLECT_JS = """
       path: 'dom/' + tag,
       source: 'dom',
     };
+    if (tag === 'input' || tag === 'button') {
+      item.input_type = type || (tag === 'button' ? 'button' : 'text');
+    }
+    // Make password fields unmistakable for the agent (avoid typing password into username).
+    if (type === 'password') {
+      item.input_type = 'password';
+      item.field_kind = 'password';
+      if (!item.label || item.label === name) {
+        item.label = (el.getAttribute('placeholder') || '').trim() || 'password';
+      }
+    }
+    if (type === 'submit' || (outRole === 'button' && /登录|login|sign\\s*in/i.test(item.label || ''))) {
+      item.field_kind = 'login_submit';
+    }
     // Only expose checked for real checkable roles (avoid input.checked noise on textboxes).
     if (checked !== null && (outRole === 'checkbox' || outRole === 'radio' || outRole === 'switch' || outRole === 'label')) {
       item.checked = checked;
@@ -459,17 +474,47 @@ def _prefer_element(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
     ra = ROLE_SPECIFICITY.get((a.get("role") or "").lower(), 0)
     rb = ROLE_SPECIFICITY.get((b.get("role") or "").lower(), 0)
     if ra != rb:
-        return a if ra > rb else b
-    la = len(a.get("label") or "")
-    lb = len(b.get("label") or "")
-    if la != lb:
-        return a if la > lb else b
-    # Prefer DOM when labels equal — often has checked state.
-    if a.get("source") == "dom" and b.get("source") != "dom":
-        return a
-    if b.get("source") == "dom" and a.get("source") != "dom":
-        return b
-    return a
+        winner, other = (a, b) if ra > rb else (b, a)
+    else:
+        la = len(a.get("label") or "")
+        lb = len(b.get("label") or "")
+        if la != lb:
+            winner, other = (a, b) if la > lb else (b, a)
+        elif a.get("source") == "dom" and b.get("source") != "dom":
+            winner, other = a, b
+        elif b.get("source") == "dom" and a.get("source") != "dom":
+            winner, other = b, a
+        else:
+            winner, other = a, b
+    # Preserve DOM-only metadata lost when a11y wins the merge.
+    out = dict(winner)
+    for key in ("input_type", "field_kind", "checked"):
+        if not out.get(key) and other.get(key) is not None:
+            out[key] = other[key]
+    return out
+
+
+def enrich_field_kinds(elements: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Infer password/username/login_submit from labels when DOM type is missing."""
+    out: List[Dict[str, Any]] = []
+    for raw in elements or []:
+        e = dict(raw)
+        role = (e.get("role") or "").lower()
+        label = (e.get("label") or "").strip()
+        low = label.lower()
+        if role in ("textbox", "searchbox"):
+            if (e.get("input_type") or "").lower() == "password" or "密码" in label or "password" in low:
+                e["input_type"] = "password"
+                e["field_kind"] = "password"
+            elif any(k in label for k in ("用户", "账号", "帐号")) or "user" in low or "account" in low:
+                e["field_kind"] = e.get("field_kind") or "username"
+        if role == "button":
+            if label in ("登录", "Login", "Sign in", "Log in"):
+                e["field_kind"] = "login_submit"
+            elif label == "用户登录" or (label.endswith("登录") and label != "登录"):
+                e["field_kind"] = "login_title"
+        out.append(e)
+    return out
 
 
 def merge_elements(
@@ -502,6 +547,9 @@ def merge_elements(
     return merged
 
 
+LOGIN_SUBMIT_HINTS = ("登录", "login", "sign in", "signin", "log in", "提交登录")
+
+
 def rank_elements_for_som(
     elements: List[Dict[str, Any]],
     dialogs: Optional[List[Dict[str, float]]] = None,
@@ -509,21 +557,82 @@ def rank_elements_for_som(
     """Boost elements inside visible dialogs (Hermes app-scope equivalent)."""
     dialogs = dialogs or []
 
-    def score(el: Dict[str, Any]) -> Tuple[int, int, float]:
+    def score(el: Dict[str, Any]) -> Tuple[int, int, int, float]:
         box = el.get("box") or {}
         cx, cy = _box_center(box)
         in_dialog = 1 if any(_point_in_box(cx, cy, d) for d in dialogs) else 0
         role_score = ROLE_SPECIFICITY.get((el.get("role") or "").lower(), 0)
-        label = (el.get("label") or "").lower()
+        label = (el.get("label") or "").lower().strip()
         agreement_boost = 1 if any(k.lower() in label for k in AGREEMENT_KEYWORDS) else 0
+        login_boost = 0
+        if el.get("field_kind") == "login_title":
+            login_boost = -2  # demote SSO page titles like「用户登录」
+        elif (el.get("field_kind") == "login_submit") or (
+            (el.get("role") or "").lower() == "button"
+            and (el.get("label") or "").strip().lower() in ("登录", "login", "sign in", "log in")
+        ):
+            login_boost = 3
+        if (el.get("input_type") or "").lower() == "password" or el.get("field_kind") == "password":
+            login_boost = max(login_boost, 2)
         # Prefer compact interactive controls inside dialogs over huge cards.
         area = _box_area(box)
         compact_boost = 1 if area < 8000 and (el.get("role") or "") in (
             "checkbox", "switch", "button", "textbox", "label",
         ) else 0
-        return (in_dialog, agreement_boost + compact_boost, role_score - min(area / 50000.0, 20))
+        # Deprioritize tiny domain-prefix chips (e.g. "ai\\") next to username.
+        tiny_chip_penalty = 0
+        if (el.get("role") or "") in ("button", "link") and 0 < len(label) <= 4 and area < 1200:
+            tiny_chip_penalty = 1
+        return (
+            in_dialog,
+            login_boost + agreement_boost + compact_boost - tiny_chip_penalty,
+            role_score,
+            -min(area / 50000.0, 20),
+        )
 
     return sorted(elements, key=score, reverse=True)
+
+
+def build_login_form_hint(elements: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """When a password field is present, point agent at username/password/submit refs."""
+    els = elements or []
+    passwords = [
+        e for e in els
+        if (e.get("input_type") or "").lower() == "password" or e.get("field_kind") == "password"
+    ]
+    if not passwords:
+        return None
+    textboxes = [
+        e for e in els
+        if (e.get("role") or "").lower() in ("textbox", "searchbox")
+        and (e.get("input_type") or "").lower() != "password"
+        and e.get("field_kind") != "password"
+    ]
+    submits = [
+        e for e in els
+        if e.get("field_kind") == "login_submit"
+        or (
+            (e.get("role") or "").lower() == "button"
+            and (e.get("label") or "").strip() in ("登录", "Login", "Sign in", "Log in")
+        )
+    ]
+    # Never treat titles like「用户登录」as submit.
+    submits = [e for e in submits if e.get("field_kind") != "login_title"]
+    submits_exact = [e for e in submits if (e.get("label") or "").strip() in ("登录", "Login", "Sign in", "Log in")]
+    if submits_exact:
+        submits = submits_exact
+    return {
+        "username_refs": [e.get("ref") for e in textboxes[:3] if e.get("ref")],
+        "password_refs": [e.get("ref") for e in passwords[:2] if e.get("ref")],
+        "submit_refs": [e.get("ref") for e in submits[:3] if e.get("ref")],
+        "submit_labels": [(e.get("label") or "")[:20] for e in submits[:3]],
+        "hint": (
+            "检测到登录表单：请先 type 用户名到 username_refs（不要点域名前缀如 ai\\），"
+            "再 type 密码到 password_refs（input_type=password / 标签含「密码」），"
+            "最后 click 真正的提交按钮 submit_refs（橙色「登录」原文，不要点「用户登录」标题）。"
+            "也可用 cu_act click value=text=登录 兜底（exact 匹配）。"
+        ),
+    }
 
 
 def prepare_som_elements(
@@ -534,7 +643,7 @@ def prepare_som_elements(
     max_elements: int = DEFAULT_MAX_ELEMENTS,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """Merge, rank, and cap elements for SoM. Returns (elements, meta)."""
-    merged = merge_elements(a11y_els, dom_els)
+    merged = enrich_field_kinds(merge_elements(a11y_els, dom_els))
     ranked = rank_elements_for_som(merged, dialogs)
     total = len(ranked)
     truncated = total > max_elements

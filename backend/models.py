@@ -564,15 +564,13 @@ class ScreenSystem(Base):
 
 
 class ScreenCredential(Base):
-    """ScreenPilot 凭据（加密存储）"""
+    """ScreenPilot 系统凭证 KV（value Fernet 加密）"""
     __tablename__ = "screen_credentials"
 
     credential_id = Column(String, primary_key=True, default=gen_uuid)
     system_id = Column(String, ForeignKey("screen_systems.system_id"), nullable=False, index=True)
-    label = Column(String(128), default="default")
-    username = Column(String(256), default="")
-    secret_enc = Column(Text, default="")
-    extra = Column(JSON, default=dict)
+    name = Column(String(128), nullable=False, default="")
+    value_enc = Column(Text, default="")
     created_at = Column(DateTime, default=now_utc)
     updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)
 
