@@ -156,7 +156,7 @@ async def call_screenpilot_inprocess(
 
     db = SessionLocal()
     try:
-        if tool_name == "ui_run_task":
+        if tool_name == "cu_run_task":
             result = await run_task(db, **arguments)
         elif tool_name in TOOL_HANDLERS:
             handler = TOOL_HANDLERS[tool_name]

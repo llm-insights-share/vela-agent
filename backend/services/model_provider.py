@@ -46,7 +46,7 @@ class ModelProviderService:
     async def chat_completion(
         provider: ModelProvider,
         model_name: str,
-        messages: List[Dict[str, str]],
+        messages: List[Dict[str, Any]],
         max_tokens: int = 4096,
         temperature: float = 0.7,
         tools: Optional[List[Dict[str, Any]]] = None,
@@ -77,7 +77,10 @@ class ModelProviderService:
             try:
                 url = provider.base_url.rstrip("/") + "/chat/completions"
                 response = await client.post(url, headers=headers, json=payload)
-                response.raise_for_status()
+                if response.status_code >= 400:
+                    detail = response.text[:1000]
+                    print(f"[ModelProviderService] chat error body: {detail}")
+                    response.raise_for_status()
                 data = response.json()
 
                 result = dict(data)

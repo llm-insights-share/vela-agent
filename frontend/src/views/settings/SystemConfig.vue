@@ -38,6 +38,31 @@
       </a-collapse>
     </a-card>
 
+    <a-card title="打开驭屏系统" style="margin-bottom: 24px;">
+      <div class="screenpilot-card">
+        <div class="screenpilot-card-main">
+          <div>
+            <div class="field-hint" style="margin-bottom: 8px;">
+              打开后自动注册 8 个 <code>cu_*</code> MCP 工具（导航 / 观测 / 动作 / 提取 / 技能重放 / 技能编译 / 技能搜索 / 任务执行）；关闭则移除这些工具并解除 Agent 绑定。
+            </div>
+            <div v-if="screenpilot.tools.length" class="sp-tools">
+              <a-tag v-for="t in screenpilot.tools" :key="t.tool_id" color="blue">
+                {{ t.name }}
+              </a-tag>
+            </div>
+            <div v-else class="field-hint">当前未注册驭屏 MCP 工具</div>
+          </div>
+          <a-switch
+            :checked="screenpilot.enabled"
+            :loading="screenpilotSaving"
+            checked-children="已打开"
+            un-checked-children="已关闭"
+            @change="onScreenpilotToggle"
+          />
+        </div>
+      </div>
+    </a-card>
+
     <a-card title="记忆模块" style="margin-bottom: 24px;">
       <div class="field-hint" style="margin-bottom: 16px;">
         为各 Agent 开关记忆闭环（自我记录 / 自我处理 / 自我检索）。开启后，对话过程会自动写入情景事件，会话关闭时蒸馏语义记忆，并在后续对话中自动召回。
@@ -139,6 +164,37 @@ const rewriteColumns = [
   { title: '状态', key: 'status', dataIndex: 'status', width: 120 },
   { title: '挂载改写', key: 'query_rewrite_enabled', width: 120 },
 ]
+
+const screenpilotSaving = ref(false)
+const screenpilot = reactive({
+  enabled: false,
+  tools: [],
+})
+
+async function fetchScreenpilot() {
+  try {
+    const res = await configApi.getScreenpilot()
+    screenpilot.enabled = !!res.enabled
+    screenpilot.tools = res.tools || []
+  } catch (e) {
+    // ignore
+  }
+}
+
+async function onScreenpilotToggle(checked) {
+  screenpilotSaving.value = true
+  try {
+    const res = await configApi.updateScreenpilot({ enabled: !!checked })
+    screenpilot.enabled = !!res.enabled
+    screenpilot.tools = res.tools || []
+    message.success(res.message || (checked ? '驭屏系统已打开' : '驭屏系统已关闭'))
+  } catch (e) {
+    message.error(e.message)
+    await fetchScreenpilot()
+  } finally {
+    screenpilotSaving.value = false
+  }
+}
 
 async function fetchConfig() {
   try {
@@ -257,6 +313,7 @@ async function saveRewriteMounts() {
 
 onMounted(async () => {
   await fetchConfig()
+  await fetchScreenpilot()
   await fetchMemoryAgents()
   await fetchRewriteAgents()
 })
@@ -277,5 +334,17 @@ onMounted(async () => {
   padding: 1px 5px;
   border-radius: 3px;
   color: #5c5650;
+}
+.screenpilot-card-main {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+}
+.sp-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
 }
 </style>

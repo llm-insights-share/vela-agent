@@ -88,8 +88,7 @@ const routes = [
   },
   {
     path: '/screenpilot/shop',
-    name: 'ScreenPilotShop',
-    component: () => import('../views/screenpilot/SkillShop.vue'),
+    redirect: '/screenpilot/skills',
   },
   {
     path: '/screenpilot/approvals',

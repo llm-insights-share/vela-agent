@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ScreenPilot stdio MCP Server — 暴露 ui_* 工具供 Vela Agent 调用。"""
+"""ScreenPilot stdio MCP Server — 暴露 cu_* 工具供 Vela Agent 调用。"""
 from __future__ import annotations
 
 import asyncio
@@ -16,18 +16,26 @@ from services.screenpilot.service import (
     observe_session,
     replay_skill,
     search_skills,
+    vision_query,
+    wait_for_otp_ui,
 )
 from services.screenpilot.run_task import run_task
 
 TOOLS = [
     {
-        "name": "ui_navigate",
+        "name": "cu_navigate",
         "description": "打开目标系统页面并可选执行登录宏，返回 SoM 标注观测结果",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "system_id": {"type": "string", "description": "注册的系统 ID"},
-                "url": {"type": "string", "description": "目标 URL，默认使用系统入口"},
+                "system_id": {
+                    "type": "string",
+                    "description": "已注册系统的 system_id（UUID）或系统名称（如 xhs）",
+                },
+                "url": {
+                    "type": "string",
+                    "description": "目标 URL，省略时使用系统 entry_url；勿自行猜测域名，优先省略或只传路径如 explore",
+                },
                 "screen_session_id": {"type": "string", "description": "可选，已有浏览器会话 ID"},
                 "vela_session_id": {"type": "string", "description": "Vela Agent 会话 ID"},
                 "agent_id": {"type": "string", "description": "Agent ID"},
@@ -37,8 +45,12 @@ TOOLS = [
         },
     },
     {
-        "name": "ui_observe",
-        "description": "观测当前页面：截图 + 无障碍树 + SoM 元素编号",
+        "name": "cu_observe",
+        "description": (
+            "观测当前页面：截图 + 无障碍树 + DOM 合并 SoM 元素编号；"
+            "返回 total_elements/truncated/scope，弹窗内元素优先；"
+            "元素过少或含 canvas 时返回 suggest_vision=true，可再调 cu_vision"
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -48,8 +60,12 @@ TOOLS = [
         },
     },
     {
-        "name": "ui_act",
-        "description": "在企业内系统页面上执行原子操作；T2/T3 动作将触发 HITL 网关",
+        "name": "cu_act",
+        "description": (
+            "在企业内系统页面上执行原子操作；T2/T3 动作将触发 HITL 网关。"
+            "短信登录：勾选协议后填手机号，先点输入框旁短文案发码控件（button 或 link），"
+            "确认倒计时后再填验证码并点主提交；wait 的 value 只能是毫秒数字，等短信请用 cu_wait_for_otp。"
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -61,8 +77,17 @@ TOOLS = [
                         "upload", "scroll", "wait", "extract", "screenshot",
                     ],
                 },
-                "target_ref": {"type": "string", "description": "SoM 编号，如 [7]"},
-                "value": {"type": "string"},
+                "target_ref": {
+                    "type": "string",
+                    "description": "SoM 编号，如 [7]；click 时优先使用",
+                },
+                "value": {
+                    "type": "string",
+                    "description": (
+                        "navigate 的 URL；type 的输入文本；"
+                        "click 且无 target_ref 时可用 value=text=按钮文案 或 css=selector 兜底点击"
+                    ),
+                },
                 "vela_session_id": {"type": "string"},
                 "agent_id": {"type": "string"},
             },
@@ -70,7 +95,7 @@ TOOLS = [
         },
     },
     {
-        "name": "ui_extract",
+        "name": "cu_extract",
         "description": "提取当前页面正文文本",
         "inputSchema": {
             "type": "object",
@@ -79,7 +104,7 @@ TOOLS = [
         },
     },
     {
-        "name": "ui_replay_skill",
+        "name": "cu_replay_skill",
         "description": "确定性重放已编译 UI 技能；指纹失效时返回 needs_replan",
         "inputSchema": {
             "type": "object",
@@ -94,7 +119,7 @@ TOOLS = [
         },
     },
     {
-        "name": "ui_compile_skill",
+        "name": "cu_compile_skill",
         "description": "将当前会话轨迹编译为可重放 UI 技能模板",
         "inputSchema": {
             "type": "object",
@@ -108,7 +133,7 @@ TOOLS = [
         },
     },
     {
-        "name": "ui_search_skills",
+        "name": "cu_search_skills",
         "description": "按任务描述语义检索 UI 技能（FAISS）",
         "inputSchema": {
             "type": "object",
@@ -121,12 +146,43 @@ TOOLS = [
         },
     },
     {
-        "name": "ui_run_task",
-        "description": "高级任务：Observe-Plan-Act-Verify 循环；优先匹配技能重放，未完成时返回 needs_agent",
+        "name": "cu_wait_for_otp",
+        "description": "暂停任务并弹出 HITL，等待用户输入短信/邮箱验证码后继续登录",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "system_id": {"type": "string"},
+                "screen_session_id": {"type": "string"},
+                "selector": {
+                    "type": "string",
+                    "description": "验证码输入框 CSS 选择器",
+                },
+                "submit_selector": {
+                    "type": "string",
+                    "description": "可选，提交按钮选择器",
+                },
+                "prompt": {
+                    "type": "string",
+                    "default": "请输入短信验证码",
+                },
+                "vela_session_id": {"type": "string"},
+                "agent_id": {"type": "string"},
+            },
+            "required": ["screen_session_id", "selector"],
+        },
+    },
+    {
+        "name": "cu_run_task",
+        "description": (
+            "高级任务：Observe-Plan-Act-Verify；优先技能重放，未完成时返回 needs_agent + plan_hints。"
+            "goal 可含规则：url_contains= / title_contains= / text_contains="
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "system_id": {
+                    "type": "string",
+                    "description": "已注册系统的 system_id（UUID）或系统名称（如 xhs）",
+                },
                 "goal": {"type": "string", "description": "任务目标描述"},
                 "screen_session_id": {"type": "string"},
                 "skill_id": {"type": "string"},
@@ -139,28 +195,55 @@ TOOLS = [
             "required": ["system_id", "goal"],
         },
     },
+    {
+        "name": "cu_vision",
+        "description": (
+            "对当前页面截图做视觉问答（a11y/SoM 不足或 canvas 时使用）。"
+            "不自动调用；当 cu_observe 返回 suggest_vision=true 时再考虑。"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "screen_session_id": {"type": "string"},
+                "question": {
+                    "type": "string",
+                    "description": "关于截图的问题，例如「登录按钮在哪里」",
+                },
+                "use_som": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "为 true 时使用 SoM 叠加图而非原截图",
+                },
+            },
+            "required": ["screen_session_id", "question"],
+        },
+    },
 ]
 
 
 async def _dispatch(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
     db = SessionLocal()
     try:
-        if name == "ui_navigate":
+        if name == "cu_navigate":
             return await navigate_ui(db, **arguments)
-        if name == "ui_observe":
+        if name == "cu_observe":
             return await observe_session(db, arguments["screen_session_id"])
-        if name == "ui_act":
+        if name == "cu_act":
             return await act_ui(db, **arguments)
-        if name == "ui_extract":
+        if name == "cu_extract":
             return await extract_ui(db, arguments["screen_session_id"])
-        if name == "ui_replay_skill":
+        if name == "cu_replay_skill":
             return await replay_skill(db, **arguments)
-        if name == "ui_compile_skill":
+        if name == "cu_compile_skill":
             return await compile_skill(db, **arguments)
-        if name == "ui_search_skills":
+        if name == "cu_search_skills":
             return await search_skills(db, **arguments)
-        if name == "ui_run_task":
+        if name == "cu_run_task":
             return await run_task(db, **arguments)
+        if name == "cu_wait_for_otp":
+            return await wait_for_otp_ui(db, **arguments)
+        if name == "cu_vision":
+            return await vision_query(db, **arguments)
         return {"success": False, "error": f"未知工具: {name}"}
     finally:
         db.close()

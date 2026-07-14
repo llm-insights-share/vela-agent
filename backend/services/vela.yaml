@@ -1,0 +1,13 @@
+screenpilot:
+  enabled: true
+  # headless 可通过环境变量 SCREENPILOT_HEADLESS=false 覆盖
+  headless: true
+  # 会话闲置回收（秒），亦可用 SCREENPILOT_INACTIVITY_TIMEOUT
+  inactivity_timeout: 300
+  # CDP 附着：本地调试 / 真人已登录 Chrome / 远程 headed
+  # 例: SCREENPILOT_CDP_URL=http://127.0.0.1:9222
+  # cdp_url: ""
+  # Vision 兜底模型（cu_vision）：SCREENPILOT_VISION_MODEL_SERVICE_ID 或 SCREENPILOT_VISION_MODEL_NAME
+  # 站点风控文案 / 登录步骤不要写进引擎代码：
+  # - ScreenSystem.risk_rules: block_url_substrings / block_body_hints / block_message / recovery_hint
+  # - ScreenSystem.login_macro: goto/fill/click/wait_for_otp（见 examples/system_config_examples.py）

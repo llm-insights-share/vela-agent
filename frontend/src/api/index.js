@@ -93,6 +93,9 @@ export const sessionApi = {
     const reqTimeout = ((data.timeout_seconds || 120) + 10) * 1000
     return api.post(`/sessions/${id}/chat`, data, { timeout: reqTimeout })
   },
+  chatAsync: (id, data) => api.post(`/sessions/${id}/chat/async`, data, { timeout: 10000 }),
+  listRunning: (params) => api.get('/sessions', { params: { ...params, status: 'RUNNING' } }),
+  abort: (id) => api.post(`/sessions/${id}/abort`, {}, { timeout: 15000 }),
   close: (id) => api.post(`/sessions/${id}/close`),
   delete: (id) => api.delete(`/sessions/${id}`),
 }
@@ -112,6 +115,8 @@ export const configApi = {
   getToolConfig: () => api.get('/config/tools'),
   updateTavily: (data) => api.put('/config/tools/tavily', data),
   getTavilyStatus: () => api.get('/config/tools/tavily/status'),
+  getScreenpilot: () => api.get('/config/screenpilot'),
+  updateScreenpilot: (data) => api.put('/config/screenpilot', data),
   listMemoryAgents: () => api.get('/config/memory/agents'),
   updateMemoryAgents: (items) => api.put('/config/memory/agents', { items }),
   listQueryRewriteAgents: () => api.get('/config/query-rewrite/agents'),
@@ -210,7 +215,6 @@ export const screenpilotApi = {
   compileSkill: (data) => api.post('/screenpilot/skills/compile', data),
   searchSkills: (data) => api.post('/screenpilot/skills/search', data),
   replaySkill: (data) => api.post('/screenpilot/skills/replay', data),
-  listSkillShop: (params) => api.get('/screenpilot/skills/shop', { params }),
   publishSkill: (id, data) => api.post(`/screenpilot/skills/${id}/publish`, data),
   unpublishSkill: (id) => api.post(`/screenpilot/skills/${id}/unpublish`),
   importSkill: (id, data) => api.post(`/screenpilot/skills/${id}/import`, data),

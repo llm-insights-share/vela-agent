@@ -7,10 +7,25 @@ from sqlalchemy.orm import Session
 from models import HITLApproval, ScreenSession, ScreenSystem, SessionStatus, gen_uuid, now_utc
 from services.screenpilot.audit import write_audit
 from services.screenpilot.layers.act import execute_action
-from services.screenpilot.layers.credential import run_login_macro
-from services.screenpilot.layers.govern import classify_risk, requires_hitl
+from services.screenpilot.layers.credential import run_login_macro, resume_login_macro_after_otp
+from services.screenpilot.cookie_store import get_valid_storage_state, save_storage_state
+from services.screenpilot.layers.govern import (
+    classify_risk,
+    requires_hitl,
+    check_domain_allowed,
+    check_navigation_allowed,
+)
 from services.screenpilot.layers.ground import find_element_by_ref, build_selector_fingerprint
-from services.screenpilot.layers.perceive import build_som, capture_page_state
+from services.screenpilot.layers.perceive import (
+    DEFAULT_MAX_ELEMENTS,
+    build_som,
+    capture_page_state,
+    collect_dom_elements,
+    detect_login_wall,
+    detect_risk_block,
+    extract_a11y_elements,
+    prepare_som_elements,
+)
 from services.screenpilot.layers.replay import enrich_fingerprints_from_page, execute_by_fingerprints
 from services.screenpilot.session_manager import create_live_session, get_live_session
 from services.screenpilot.skill_store import skill_store
@@ -26,7 +41,43 @@ def _b64(data: bytes) -> str:
 
 
 def _get_system(db: Session, system_id: str) -> Optional[ScreenSystem]:
-    return db.query(ScreenSystem).filter(ScreenSystem.system_id == system_id).first()
+    """按 system_id（UUID）或系统名称解析已激活系统。"""
+    key = (system_id or "").strip()
+    if not key:
+        return None
+    by_id = (
+        db.query(ScreenSystem)
+        .filter(ScreenSystem.system_id == key, ScreenSystem.status == "ACTIVE")
+        .first()
+    )
+    if by_id:
+        return by_id
+    return (
+        db.query(ScreenSystem)
+        .filter(ScreenSystem.name == key, ScreenSystem.status == "ACTIVE")
+        .first()
+    )
+
+
+def _system_lookup_error(db: Session, system_id: str) -> Dict[str, Any]:
+    key = (system_id or "").strip()
+    raw = (
+        db.query(ScreenSystem)
+        .filter((ScreenSystem.system_id == key) | (ScreenSystem.name == key))
+        .first()
+    )
+    if raw and raw.status != "ACTIVE":
+        return {"success": False, "error": f"系统已停用: {key}"}
+    available = [
+        {"system_id": r.system_id, "name": r.name}
+        for r in db.query(ScreenSystem).filter(ScreenSystem.status == "ACTIVE").all()
+    ]
+    hint = (
+        "；可用系统: " + ", ".join(f"{a['name']}({a['system_id']})" for a in available)
+        if available
+        else "；当前无已激活系统，请先在驭屏系统管理中注册"
+    )
+    return {"success": False, "error": f"系统未注册: {key}{hint}"}
 
 
 def _resolve_screen_session(
@@ -60,6 +111,26 @@ def _resolve_screen_session(
     db.commit()
     db.refresh(row)
     return row
+
+
+async def _open_live_browser_session(
+    db: Session,
+    *,
+    screen_session_id: str,
+    system_id: str,
+    system: Optional[ScreenSystem] = None,
+) -> Any:
+    """获取或创建浏览器 LiveSession，优先恢复已持久化的 cookie（24h 内有效）。"""
+    sys = system or _get_system(db, system_id)
+    desktop_macro = ((sys.login_macro or {}).get("desktop") if sys else {}) or {}
+    storage_state = get_valid_storage_state(db, system_id)
+    return await create_live_session(
+        screen_session_id,
+        system_id,
+        exec_mode=(sys.exec_mode if sys else "browser") or "browser",
+        desktop_macro=desktop_macro,
+        storage_state=storage_state,
+    )
 
 
 async def observe_session(db: Session, screen_session_id: str) -> Dict[str, Any]:
@@ -122,7 +193,13 @@ async def observe_session(db: Session, screen_session_id: str) -> Dict[str, Any]
         }
 
     shot, tree, url = await capture_page_state(live.page)
-    som_img, elements = build_som(shot, tree)
+    a11y_els = extract_a11y_elements(tree)
+    dom_els, dialogs = await collect_dom_elements(live.page, limit=max(DEFAULT_MAX_ELEMENTS * 2, 200))
+    ranked, som_meta = prepare_som_elements(
+        a11y_els, dom_els, dialogs, max_elements=DEFAULT_MAX_ELEMENTS
+    )
+    som_source = som_meta.get("som_source") or "empty"
+    som_img, elements = build_som(shot, {}, extra_elements=ranked)
     live.elements = elements
     live.last_screenshot = shot
     live.last_som_image = som_img
@@ -143,24 +220,251 @@ async def observe_session(db: Session, screen_session_id: str) -> Dict[str, Any]
         action="observe",
         risk_tier="T0",
         screenshot_png=shot,
-        payload={"url": url, "element_count": len(elements)},
+        payload={
+            "url": url,
+            "element_count": len(elements),
+            "som_source": som_source,
+            "total_elements": som_meta.get("total_elements"),
+            "truncated": som_meta.get("truncated"),
+            "scope": som_meta.get("scope"),
+        },
     )
 
-    return {
+    body_preview = ""
+    try:
+        body_preview = await live.page.inner_text("body")
+    except Exception:
+        body_preview = ""
+    login_wall = detect_login_wall(body_preview)
+    system = _get_system(db, row.system_id) if row else None
+    risk_rules = (system.risk_rules or {}) if system else {}
+    risk = detect_risk_block(body_preview, url, risk_rules=risk_rules)
+    result = {
         "success": True,
         "screen_session_id": screen_session_id,
         "url": url,
         "screenshot_b64": _b64(shot),
         "som_image_b64": _b64(som_img),
         "elements": elements,
+        "som_source": som_source,
+        "total_elements": som_meta.get("total_elements", len(elements)),
+        "truncated": bool(som_meta.get("truncated")),
+        "scope": som_meta.get("scope") or "page",
     }
+    if risk:
+        result["risk_blocked"] = True
+        result["error_code"] = risk["error_code"]
+        result["warning"] = (
+            f"{risk['message']}（error_code={risk['error_code']}）。"
+            "请按系统 risk_rules / entry_url 配置调整网络或入口后重试。"
+        )
+        result["recovery_hint"] = str(
+            risk_rules.get("recovery_hint")
+            or "检查网络环境与系统 entry_url / risk_rules 配置后重试"
+        )
+    elif login_wall:
+        result["warning"] = (
+            "页面疑似登录墙/未登录态：搜索与个性化内容可能不可用。"
+            "请先完成登录，或设置 auto_login=true 并配置登录宏。"
+        )
+        result["login_required"] = True
+
+    # Structural SMS/login form hint (no site-specific vocabulary).
+    textboxes = [
+        e for e in elements
+        if (e.get("role") or "").lower() in ("textbox", "searchbox")
+    ]
+
+    def _row_near_textbox(btn: Dict[str, Any]) -> bool:
+        bb = btn.get("box") or {}
+        bw = float(bb.get("width") or 0)
+        # Full-width primary submit buttons are not send-code controls.
+        if bw > 180:
+            return False
+        by = float(bb.get("y") or 0)
+        bh = float(bb.get("height") or 0)
+        bcy = by + bh / 2
+        bx1 = float(bb.get("x") or 0)
+        bx2 = bx1 + bw
+        for tb in textboxes:
+            tbx = tb.get("box") or {}
+            ty = float(tbx.get("y") or 0)
+            th = float(tbx.get("height") or 0)
+            tcy = ty + th / 2
+            if abs(bcy - tcy) > 36:
+                continue
+            tx1 = float(tbx.get("x") or 0)
+            tx2 = tx1 + float(tbx.get("width") or 0)
+            gap = max(0.0, max(bx1 - tx2, tx1 - bx2))
+            overlap = min(bx2, tx2) - max(bx1, tx1)
+            if gap <= 56 or overlap > 0:
+                return True
+        return False
+
+    send_code_candidates = [
+        e for e in elements
+        if (e.get("role") or "").lower() in ("button", "link")
+        and 1 <= len((e.get("label") or "").strip()) <= 16
+        and _row_near_textbox(e)
+    ]
+    # Exclude labels that also appear as wide primary buttons (e.g. duplicate "登录").
+    wide_labels = {
+        ((e.get("label") or "").strip())
+        for e in elements
+        if (e.get("role") or "").lower() in ("button", "link")
+        and float((e.get("box") or {}).get("width") or 0) > 180
+    }
+    send_code_candidates = [
+        e for e in send_code_candidates
+        if (e.get("label") or "").strip() not in wide_labels
+    ]
+    short_btns = send_code_candidates  # for debug log compatibility
+    if send_code_candidates and textboxes:
+        cand_txt = ", ".join(
+            f"{e.get('ref')}={(e.get('label') or '')[:12]}/{e.get('role')}"
+            for e in send_code_candidates[:4]
+        )
+        result["form_flow_hint"] = (
+            "检测到输入框旁的短按钮/链接：填入手机号后必须先点击该控件请求验证码"
+            "（可能是 button 或 link），确认文案变为倒计时后再填验证码并点主提交。"
+            "等待用户短信请调用 cu_wait_for_otp，不要对 cu_act wait 传入 otp/code。"
+            f"候选发码控件: {cand_txt}"
+        )
+        result["candidate_send_code_refs"] = [e.get("ref") for e in send_code_candidates[:6]]
+
+    # Vision fallback hint: sparse SoM or canvas-heavy page (agent may call cu_vision).
+    canvas_count = 0
+    try:
+        canvas_count = int(
+            await live.page.evaluate("() => document.querySelectorAll('canvas').length") or 0
+        )
+    except Exception:
+        canvas_count = 0
+    sparse = len(elements) < 3 or som_source in ("empty", "")
+    if sparse or canvas_count > 0:
+        result["suggest_vision"] = True
+        result["vision_hint"] = (
+            "可访问性/DOM 元素偏少或存在 canvas，建议调用 cu_vision 用截图回答布局问题"
+            if sparse
+            else "页面含 canvas，SoM 可能不可靠，建议在必要时调用 cu_vision"
+        )
+        result["canvas_count"] = canvas_count
+
+    # #region agent log
+    try:
+        import json as _json, time as _time
+        _summary = [
+            {
+                "ref": e.get("ref"),
+                "role": e.get("role"),
+                "label": ((e.get("label") or "")[:24]),
+                "checked": e.get("checked"),
+                "w": round(float((e.get("box") or {}).get("width") or 0), 1),
+            }
+            for e in elements
+            if (e.get("role") or "").lower() in ("button", "link", "checkbox", "switch", "label", "textbox")
+            or (1 <= len((e.get("label") or "").strip()) <= 16)
+        ][:50]
+        _dom_probe = []
+        try:
+            _dom_probe = await live.page.evaluate(
+                """() => {
+                  const out = [];
+                  for (const inp of document.querySelectorAll('input, textarea')) {
+                    let scope = inp.parentElement;
+                    for (let d = 0; d < 3 && scope; d++, scope = scope.parentElement) {
+                      for (const c of scope.querySelectorAll('a,button,span,div,[role=button],[role=link]')) {
+                        if (c === inp || c.contains(inp) || inp.contains(c)) continue;
+                        const t = ((c.innerText || c.textContent || '') + '').replace(/\\s+/g, ' ').trim();
+                        if (!t || t.length > 16) continue;
+                        const r = c.getBoundingClientRect();
+                        if (r.width < 4 || r.height < 4) continue;
+                        const st = getComputedStyle(c);
+                        out.push({
+                          tag: (c.tagName || '').toLowerCase(),
+                          role: c.getAttribute('role') || '',
+                          t: t.slice(0, 16),
+                          w: Math.round(r.width),
+                          pe: st.pointerEvents,
+                          cur: st.cursor,
+                          op: st.opacity,
+                        });
+                      }
+                    }
+                  }
+                  return out.slice(0, 30);
+                }"""
+            )
+        except Exception:
+            _dom_probe = []
+        with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-8b0267.log", "a") as _f:
+            _f.write(_json.dumps({
+                "sessionId": "8b0267",
+                "runId": "post-fix",
+                "hypothesisId": "H6",
+                "location": "service.py:observe_session",
+                "message": "observe elements summary",
+                "data": {
+                    "url": (url or "")[:120],
+                    "element_count": len(elements),
+                    "short_btn_labels": [((e.get("label") or "")[:16], e.get("ref"), e.get("role")) for e in short_btns[:8]],
+                    "send_code_candidates": [
+                        ((e.get("label") or "")[:16], e.get("ref"), e.get("role"), round(float((e.get("box") or {}).get("width") or 0), 1))
+                        for e in send_code_candidates[:8]
+                    ],
+                    "link_labels": [
+                        ((e.get("label") or "")[:16], e.get("ref"))
+                        for e in elements if (e.get("role") or "") == "link"
+                    ][:12],
+                    "dom_probe_inline": _dom_probe,
+                    "has_form_flow_hint": bool(result.get("form_flow_hint")),
+                    "has_checkbox": any((e.get("role") or "") == "checkbox" for e in elements),
+                    "elements": _summary,
+                },
+                "timestamp": int(_time.time() * 1000),
+            }, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+    # #endregion
+    return result
+
+
+def _resolve_navigate_url(system: ScreenSystem, url: str, allowed: List[str]) -> str:
+    """Resolve target URL; fall back to entry_url when LLM uses a non-whitelisted host."""
+    from urllib.parse import urljoin, urlparse
+
+    raw = (url or "").strip()
+    entry = (system.entry_url or "").strip()
+    if not raw:
+        return entry
+    if not raw.startswith(("http://", "https://")):
+        if entry:
+            entry_parsed = urlparse(entry)
+            segment = raw.lstrip("/")
+            entry_path = entry_parsed.path.rstrip("/")
+            if entry_path == f"/{segment}" or entry_path.endswith(f"/{segment}"):
+                return entry
+            base = f"{entry_parsed.scheme}://{entry_parsed.netloc}"
+            return urljoin(base.rstrip("/") + "/", segment)
+        return raw
+    if not allowed or check_domain_allowed(raw, allowed):
+        return raw
+    if entry and check_domain_allowed(entry, allowed):
+        parsed = urlparse(raw)
+        if parsed.path and parsed.path not in ("", "/"):
+            entry_base = f"{urlparse(entry).scheme}://{urlparse(entry).netloc}"
+            mapped = urljoin(entry_base.rstrip("/") + "/", parsed.path.lstrip("/"))
+            if check_domain_allowed(mapped, allowed):
+                return mapped
+        return entry
+    return raw
 
 
 async def navigate_ui(
     db: Session,
     *,
     system_id: str,
-    url: str,
+    url: str = "",
     screen_session_id: Optional[str] = None,
     vela_session_id: str = "",
     agent_id: str = "",
@@ -168,35 +472,71 @@ async def navigate_ui(
 ) -> Dict[str, Any]:
     system = _get_system(db, system_id)
     if not system:
-        return {"success": False, "error": f"系统未注册: {system_id}"}
+        return _system_lookup_error(db, system_id)
 
+    resolved_id = system.system_id
     row = _resolve_screen_session(
         db,
         screen_session_id=screen_session_id,
-        system_id=system_id,
+        system_id=resolved_id,
         vela_session_id=vela_session_id,
         agent_id=agent_id,
     )
-    target_url = url or system.entry_url
-    desktop_macro = (system.login_macro or {}).get("desktop") or {}
-    live = await create_live_session(
-        row.screen_session_id,
-        system_id,
-        exec_mode=system.exec_mode or "browser",
-        desktop_macro=desktop_macro,
+    target_url = _resolve_navigate_url(system, url, system.allowed_domains or [])
+    if target_url:
+        ok_nav, reason_nav = check_navigation_allowed(
+            target_url, system.allowed_domains or []
+        )
+        if not ok_nav:
+            return {"success": False, "error": reason_nav, "url": target_url}
+
+    live = await _open_live_browser_session(
+        db,
+        screen_session_id=row.screen_session_id,
+        system_id=resolved_id,
+        system=system,
     )
 
     if (system.exec_mode or "browser") == "desktop":
         obs = await observe_session(db, row.screen_session_id)
         obs["screen_session_id"] = row.screen_session_id
+        obs["system_id"] = resolved_id
+        obs["system_name"] = system.name
         return obs
 
     allowed = system.allowed_domains or []
 
-    if auto_login and system.login_macro:
-        login_result = await run_login_macro(live.page, system, db)
-        if not login_result.get("success"):
-            return login_result
+    skip_login = False
+    if auto_login and get_valid_storage_state(db, resolved_id):
+        check_url = target_url or system.entry_url
+        if check_url and live.page:
+            await execute_action(
+                live.page, "navigate", [], value=check_url, allowed_domains=allowed
+            )
+            probe = await observe_session(db, row.screen_session_id)
+            if probe.get("success") and not probe.get("login_required"):
+                skip_login = True
+
+    if auto_login and system.login_macro and not skip_login:
+        macro_steps = (system.login_macro or {}).get("steps") or []
+        if macro_steps:
+            login_result = await run_login_macro(
+                live.page,
+                system,
+                db,
+                screen_session_id=row.screen_session_id,
+                vela_session_id=vela_session_id or row.vela_session_id,
+                agent_id=agent_id or row.agent_id,
+            )
+            if login_result.get("hitl_pending"):
+                login_result["screen_session_id"] = row.screen_session_id
+                login_result["system_id"] = resolved_id
+                login_result["system_name"] = system.name
+                return login_result
+            if not login_result.get("success"):
+                return login_result
+            if live.context:
+                await save_storage_state(db, resolved_id, live.context)
 
     if target_url:
         nav = await execute_action(
@@ -207,6 +547,8 @@ async def navigate_ui(
 
     obs = await observe_session(db, row.screen_session_id)
     obs["screen_session_id"] = row.screen_session_id
+    obs["system_id"] = resolved_id
+    obs["system_name"] = system.name
     return obs
 
 
@@ -259,6 +601,209 @@ def create_hitl_for_ui_action(
     return approval
 
 
+def create_hitl_for_login_otp(
+    db: Session,
+    *,
+    screen_session_id: str,
+    vela_session_id: str,
+    agent_id: str,
+    prompt: str,
+    preview_payload: Dict[str, Any],
+    login_macro_resume: Optional[Dict[str, Any]] = None,
+    otp_action: Optional[Dict[str, Any]] = None,
+) -> HITLApproval:
+    """登录宏 wait_for_otp 或 cu_wait_for_otp：等待用户输入验证码。"""
+    from models import Session as AgentSession
+
+    tool_args = {
+        "flow_kind": "otp_wait",
+        "screen_session_id": screen_session_id,
+        "preview_payload": preview_payload,
+        "prompt": prompt,
+    }
+    if login_macro_resume:
+        tool_args["login_macro_resume"] = login_macro_resume
+    if otp_action:
+        tool_args["otp_action"] = otp_action
+
+    approval = HITLApproval(
+        approval_id=gen_uuid(),
+        session_id=vela_session_id,
+        agent_id=agent_id,
+        tool_name="cu_login_otp",
+        tool_args=tool_args,
+        status="PENDING",
+        created_at=now_utc(),
+    )
+    db.add(approval)
+
+    sess = db.query(AgentSession).filter(
+        AgentSession.session_id == vela_session_id
+    ).first()
+    if sess:
+        sess.status = SessionStatus.HITL_WAIT
+
+    db.commit()
+    db.refresh(approval)
+    return approval
+
+
+async def resume_login_after_otp_approval(
+    db: Session,
+    approval: HITLApproval,
+    otp_code: str,
+) -> str:
+    """HITL 验证码提交后恢复登录流程。"""
+    tool_args = approval.tool_args or {}
+    screen_session_id = tool_args.get("screen_session_id") or ""
+    live = get_live_session(screen_session_id)
+    if not live or not live.page:
+        row = db.query(ScreenSession).filter(
+            ScreenSession.screen_session_id == screen_session_id
+        ).first()
+        if not row:
+            return "浏览器会话不存在"
+        system = _get_system(db, row.system_id)
+        if not system:
+            return "系统不存在"
+        live = await _open_live_browser_session(
+            db,
+            screen_session_id=screen_session_id,
+            system_id=row.system_id,
+            system=system,
+        )
+
+    row = db.query(ScreenSession).filter(
+        ScreenSession.screen_session_id == screen_session_id
+    ).first()
+    if not row:
+        return "浏览器会话记录不存在"
+
+    system = _get_system(db, row.system_id)
+    if not system:
+        return "系统不存在"
+
+    resume = tool_args.get("login_macro_resume")
+    otp_action = tool_args.get("otp_action") or {}
+    selector = (otp_action.get("selector") or "").strip()
+    submit_selector = (otp_action.get("submit_selector") or "").strip()
+    url_before = ""
+    try:
+        url_before = live.page.url if live and live.page else ""
+    except Exception:
+        url_before = ""
+    if resume:
+        result = await resume_login_macro_after_otp(
+            live.page,
+            system,
+            db,
+            otp_code=otp_code,
+            resume=resume,
+            screen_session_id=screen_session_id,
+            vela_session_id=approval.session_id,
+            agent_id=approval.agent_id,
+        )
+    else:
+        fill_ok = False
+        click_ok = False
+        fill_err = ""
+        click_err = ""
+        if selector:
+            try:
+                await live.page.fill(selector, otp_code)
+                fill_ok = True
+            except Exception as e:
+                fill_err = str(e)[:200]
+        if submit_selector:
+            try:
+                await live.page.click(submit_selector)
+                click_ok = True
+            except Exception as e:
+                click_err = str(e)[:200]
+        result = {
+            "success": True if (not selector or fill_ok) else False,
+            "message": "验证码已提交",
+            "url": live.page.url,
+            "fill_ok": fill_ok,
+            "click_ok": click_ok,
+            "fill_skipped": not bool(selector),
+            "click_skipped": not bool(submit_selector),
+            "fill_err": fill_err,
+            "click_err": click_err,
+        }
+
+    if result.get("hitl_pending"):
+        return json.dumps(result, ensure_ascii=False)
+
+    if result.get("success") and live.context:
+        await save_storage_state(db, system.system_id, live.context)
+        return f"登录继续完成：{result.get('message', '')} 当前 URL: {result.get('url', live.page.url)}"
+
+    if not result.get("success"):
+        return f"登录失败：{result.get('error', '未知错误')}"
+
+    return json.dumps(result, ensure_ascii=False)
+
+
+async def wait_for_otp_ui(
+    db: Session,
+    *,
+    screen_session_id: str,
+    selector: str,
+    submit_selector: str = "",
+    prompt: str = "请输入短信验证码",
+    vela_session_id: str = "",
+    agent_id: str = "",
+) -> Dict[str, Any]:
+    """Agent 显式调用：暂停并等待用户输入 OTP。"""
+    live = get_live_session(screen_session_id)
+    row = db.query(ScreenSession).filter(
+        ScreenSession.screen_session_id == screen_session_id
+    ).first()
+    if not live and row:
+        system = _get_system(db, row.system_id)
+        live = await _open_live_browser_session(
+            db,
+            screen_session_id=screen_session_id,
+            system_id=row.system_id,
+            system=system,
+        )
+    if not live or not live.page:
+        return {"success": False, "error": f"浏览器会话不存在: {screen_session_id}"}
+
+    preview = {
+        "flow_kind": "otp_wait",
+        "prompt": prompt,
+        "selector": selector,
+        "submit_selector": submit_selector,
+        "url": live.page.url,
+    }
+    if live.last_screenshot:
+        preview["screenshot_b64"] = _b64(live.last_screenshot)
+
+    approval = create_hitl_for_login_otp(
+        db,
+        screen_session_id=screen_session_id,
+        vela_session_id=vela_session_id or (row.vela_session_id if row else ""),
+        agent_id=agent_id or (row.agent_id if row else ""),
+        prompt=prompt,
+        preview_payload=preview,
+        otp_action={
+            "selector": selector,
+            "submit_selector": submit_selector,
+        },
+    )
+    return {
+        "success": True,
+        "hitl_pending": True,
+        "approval_id": approval.approval_id,
+        "otp_required": True,
+        "message": prompt,
+        "preview_payload": preview,
+        "screen_session_id": screen_session_id,
+    }
+
+
 async def act_ui(
     db: Session,
     *,
@@ -278,12 +823,11 @@ async def act_ui(
         if not row:
             return {"success": False, "error": f"浏览器会话不存在: {screen_session_id}"}
         system = _get_system(db, row.system_id)
-        desktop_macro = ((system.login_macro or {}).get("desktop") if system else {}) or {}
-        live = await create_live_session(
-            screen_session_id,
-            row.system_id,
-            exec_mode=(system.exec_mode if system else "browser") or "browser",
-            desktop_macro=desktop_macro,
+        live = await _open_live_browser_session(
+            db,
+            screen_session_id=screen_session_id,
+            system_id=row.system_id,
+            system=system,
         )
 
     row = db.query(ScreenSession).filter(
@@ -320,7 +864,7 @@ async def act_ui(
                 screen_session_id=screen_session_id,
                 vela_session_id=vela_session_id or (row.vela_session_id if row else ""),
                 agent_id=agent_id or (row.agent_id if row else ""),
-                tool_name="ui_act",
+                tool_name="cu_act",
                 action_payload={"action": action, "target_ref": target_ref, "value": value},
                 preview_payload=preview,
                 risk_tier=risk_tier,
@@ -380,7 +924,7 @@ async def act_ui(
             screen_session_id=screen_session_id,
             vela_session_id=vela_session_id or (row.vela_session_id if row else ""),
             agent_id=agent_id or (row.agent_id if row else ""),
-            tool_name="ui_act",
+            tool_name="cu_act",
             action_payload={
                 "action": action,
                 "target_ref": target_ref,
@@ -422,6 +966,47 @@ async def act_ui(
         value=value,
         allowed_domains=allowed,
     )
+    # #region agent log
+    try:
+        import json as _json, time as _time, re as _re
+        _after = ((result.get("verification") or {}).get("after_target") or {}).get("dom") or {}
+        _before = ((result.get("verification") or {}).get("before_target") or {}).get("dom") or {}
+        _tgt = result.get("target") or {}
+        _body = ""
+        try:
+            _body = (await live.page.inner_text("body"))[:400] if live.page else ""
+        except Exception:
+            pass
+        with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-8b0267.log", "a") as _f:
+            _f.write(_json.dumps({
+                "sessionId": "8b0267",
+                "runId": "pre-fix",
+                "hypothesisId": "H1",
+                "location": "service.py:act_ui:after_execute",
+                "message": "act result",
+                "data": {
+                    "action": action,
+                    "target_ref": target_ref,
+                    "value": (str(value)[:40] if value is not None else None),
+                    "target_label": ((_tgt.get("label") or "")[:40]),
+                    "target_role": _tgt.get("role"),
+                    "success": bool(result.get("success")),
+                    "executed": result.get("executed"),
+                    "effect_ok": result.get("effect_ok"),
+                    "click_mode": result.get("click_mode"),
+                    "error": (result.get("error") or "")[:160],
+                    "warning": (result.get("warning") or "")[:120],
+                    "after_text": (_after.get("text") or "")[:40],
+                    "checked_before": _before.get("checked"),
+                    "checked_after": _after.get("checked"),
+                    "checkbox_flipped": (result.get("verification") or {}).get("checkbox_flipped"),
+                    "countdown_like": bool(_re.search(r"\d+\s*[s秒分]", _after.get("text") or "") or _re.search(r"\d+\s*[s秒分]", _body)),
+                },
+                "timestamp": int(_time.time() * 1000),
+            }, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+    # #endregion
     if not result.get("success"):
         return result
 
@@ -467,7 +1052,11 @@ async def act_ui(
     return {
         "success": True,
         "risk_tier": risk_tier,
+        "executed": bool(result.get("executed", True)),
+        "effect_ok": result.get("effect_ok"),
         "verification": result.get("verification"),
+        "warning": result.get("warning"),
+        "click_mode": result.get("click_mode"),
         "observe": {
             "url": obs.get("url"),
             "elements": obs.get("elements"),
@@ -518,12 +1107,12 @@ async def replay_skill(
         ).first()
         if not row:
             return {"success": False, "error": f"浏览器会话不存在: {screen_session_id}"}
-        desktop_macro = ((system.login_macro or {}).get("desktop") if system else {}) or {}
-        live = await create_live_session(
-            screen_session_id,
-            row.system_id,
-            exec_mode=(system.exec_mode if system else "browser") or "browser",
-            desktop_macro=desktop_macro,
+        system = _get_system(db, skill.system_id)
+        live = await _open_live_browser_session(
+            db,
+            screen_session_id=screen_session_id,
+            system_id=row.system_id,
+            system=system,
         )
 
     risk_rules = (system.risk_rules or {}) if system else {}
@@ -550,7 +1139,7 @@ async def replay_skill(
                 screen_session_id=screen_session_id,
                 vela_session_id=vela_session_id,
                 agent_id=agent_id,
-                tool_name="ui_replay_skill",
+                tool_name="cu_replay_skill",
                 action_payload={
                     "skill_id": skill_id,
                     "screen_session_id": screen_session_id,
@@ -665,9 +1254,9 @@ async def search_skills(
 
 
 async def execute_deferred_ui_act(db: Session, approval: HITLApproval) -> str:
-    """HITL 批准后执行挂起的 ui_act 或 ui_replay_skill。"""
+    """HITL 批准后执行挂起的 cu_act / cu_replay_skill（兼容历史 ui_*）。"""
     args = approval.tool_args or {}
-    if approval.tool_name == "ui_replay_skill" and args.get("skill_id"):
+    if approval.tool_name in ("cu_replay_skill", "ui_replay_skill") and args.get("skill_id"):
         result = await replay_skill(
             db,
             skill_id=args["skill_id"],
@@ -769,12 +1358,169 @@ async def run_workflow_screenpilot(
     return {"success": False, "error": f"未知 ScreenPilot 操作: {operation}"}
 
 
+async def _resolve_vision_model(db: Session):
+    """Pick an active ModelService suitable for vision / multimodal chat."""
+    from models import ModelProvider, ModelService, ModelServiceStatus, ProviderStatus
+    from services.screenpilot.config import (
+        SCREENPILOT_VISION_MODEL_NAME,
+        SCREENPILOT_VISION_MODEL_SERVICE_ID,
+    )
+
+    svc = None
+    if SCREENPILOT_VISION_MODEL_SERVICE_ID:
+        svc = (
+            db.query(ModelService)
+            .filter(ModelService.model_service_id == SCREENPILOT_VISION_MODEL_SERVICE_ID)
+            .first()
+        )
+    if not svc and SCREENPILOT_VISION_MODEL_NAME:
+        svc = (
+            db.query(ModelService)
+            .filter(
+                ModelService.model_name == SCREENPILOT_VISION_MODEL_NAME,
+                ModelService.status == ModelServiceStatus.ACTIVE,
+            )
+            .first()
+        )
+    if not svc:
+        candidates = (
+            db.query(ModelService)
+            .filter(ModelService.status == ModelServiceStatus.ACTIVE)
+            .all()
+        )
+        for row in candidates:
+            caps = row.capabilities or []
+            name = (row.model_name or "").lower()
+            if "vision" in caps or "image" in caps or "vl" in name or "vision" in name or "gpt-4o" in name:
+                svc = row
+                break
+        if not svc and candidates:
+            # Last resort: try first active service; provider may reject if not multimodal.
+            svc = candidates[0]
+    if not svc:
+        return None, None, "未配置可用模型服务（设置 SCREENPILOT_VISION_MODEL_SERVICE_ID）"
+    provider = (
+        db.query(ModelProvider)
+        .filter(
+            ModelProvider.provider_id == svc.provider_id,
+            ModelProvider.status == ProviderStatus.ACTIVE,
+        )
+        .first()
+    )
+    if not provider or not (provider.api_key or "").strip():
+        return None, None, "视觉模型对应的 Provider 未配置或缺少 API Key"
+    return provider, svc, ""
+
+
+async def vision_query(
+    db: Session,
+    *,
+    screen_session_id: str,
+    question: str,
+    use_som: bool = False,
+) -> Dict[str, Any]:
+    """Ask a multimodal model about the current page screenshot (Hermes browser_vision style)."""
+    live = get_live_session(screen_session_id)
+    if not live:
+        return {"success": False, "error": f"浏览器会话不存在: {screen_session_id}", "vision_unavailable": False}
+
+    q = (question or "").strip()
+    if not q:
+        return {"success": False, "error": "question 不能为空"}
+
+    shot = live.last_som_image if use_som and live.last_som_image else live.last_screenshot
+    if not shot and live.page:
+        try:
+            shot = await live.page.screenshot(type="png", full_page=False)
+            live.last_screenshot = shot
+        except Exception as e:
+            return {"success": False, "error": f"截图失败: {e}"}
+    if not shot:
+        return {"success": False, "error": "无可用截图，请先 cu_observe"}
+
+    provider, svc, err = await _resolve_vision_model(db)
+    if err or not provider or not svc:
+        return {
+            "success": False,
+            "vision_unavailable": True,
+            "error": err or "vision_unavailable",
+        }
+
+    from services.model_provider import model_provider_service
+
+    b64 = _b64(shot)
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        "你是企业内系统界面助手。根据截图简洁回答问题；"
+                        "如需指出可点击控件，尽量描述可见文案与大致位置。"
+                        f"\n\n问题：{q}"
+                    ),
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{b64}"},
+                },
+            ],
+        }
+    ]
+    try:
+        completion = await model_provider_service.chat_completion(
+            provider,
+            svc.model_name,
+            messages,  # multimodal payload
+            max_tokens=min(int(svc.max_tokens or 1024), 2048),
+            temperature=0.2,
+        )
+    except Exception as e:
+        msg = str(e)
+        unavailable = any(
+            x in msg.lower()
+            for x in ("vision", "image", "multimodal", "unsupported", "invalid", "400")
+        )
+        return {
+            "success": False,
+            "vision_unavailable": unavailable,
+            "error": f"视觉模型调用失败: {msg[:400]}",
+            "model_name": svc.model_name,
+        }
+
+    answer = ""
+    choices = completion.get("choices") or []
+    if choices:
+        answer = ((choices[0].get("message") or {}).get("content") or "").strip()
+
+    write_audit(
+        db,
+        screen_session_id=screen_session_id,
+        vela_session_id="",
+        agent_id="",
+        action="vision",
+        risk_tier="T0",
+        screenshot_png=shot,
+        payload={"question": q[:200], "model": svc.model_name, "answer_len": len(answer)},
+    )
+    return {
+        "success": True,
+        "screen_session_id": screen_session_id,
+        "answer": answer,
+        "model_name": svc.model_name,
+        "used_som": bool(use_som and live.last_som_image),
+    }
+
+
 TOOL_HANDLERS = {
-    "ui_navigate": navigate_ui,
-    "ui_observe": lambda db, **kw: observe_session(db, kw["screen_session_id"]),
-    "ui_act": act_ui,
-    "ui_extract": lambda db, **kw: extract_ui(db, kw["screen_session_id"]),
-    "ui_replay_skill": replay_skill,
-    "ui_compile_skill": compile_skill,
-    "ui_search_skills": search_skills,
+    "cu_navigate": navigate_ui,
+    "cu_observe": lambda db, **kw: observe_session(db, kw["screen_session_id"]),
+    "cu_act": act_ui,
+    "cu_extract": lambda db, **kw: extract_ui(db, kw["screen_session_id"]),
+    "cu_replay_skill": replay_skill,
+    "cu_compile_skill": compile_skill,
+    "cu_search_skills": search_skills,
+    "cu_wait_for_otp": wait_for_otp_ui,
+    "cu_vision": vision_query,
 }

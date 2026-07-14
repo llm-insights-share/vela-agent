@@ -142,3 +142,59 @@ def update_query_rewrite_agent_mounts(
         updated += 1
     db.commit()
     return {"message": "Query改写引擎挂载配置已保存", "updated": updated}
+
+
+class ScreenpilotToggle(BaseModel):
+    enabled: bool
+
+
+@router.get("/screenpilot")
+def get_screenpilot_config(db: Session = Depends(get_db)):
+    from services.screenpilot.config import CU_TOOL_NAMES, is_screenpilot_enabled
+    from services.screenpilot.mcp_tools import list_registered_cu_tools, register_cu_mcp_tools
+
+    enabled = is_screenpilot_enabled()
+    tools = list_registered_cu_tools(db)
+    # 已打开但工具缺失（例如新增 cu_vision）时自动补齐并同步 Agent 绑定
+    if enabled and len(tools) < len(CU_TOOL_NAMES):
+        from services.screenpilot.mcp_tools import ensure_cu_tools_registered_and_bound
+
+        ensure_cu_tools_registered_and_bound(db)
+        tools = list_registered_cu_tools(db)
+    return {
+        "enabled": enabled,
+        "mcp_registered": len(tools) >= len(CU_TOOL_NAMES),
+        "expected_tools": list(CU_TOOL_NAMES),
+        "tools": tools,
+    }
+
+
+@router.put("/screenpilot")
+def update_screenpilot_config(data: ScreenpilotToggle, db: Session = Depends(get_db)):
+    """打开驭屏系统：注册 cu_* MCP；关闭：移除相关 MCP。"""
+    from services.screenpilot.config import set_screenpilot_enabled
+    from services.screenpilot.mcp_tools import (
+        list_registered_cu_tools,
+        register_cu_mcp_tools,
+        unregister_cu_mcp_tools,
+    )
+
+    if data.enabled:
+        set_screenpilot_enabled(True)
+        result = register_cu_mcp_tools(db)
+        tools = list_registered_cu_tools(db)
+        return {
+            "enabled": True,
+            "message": f"驭屏系统已打开，已注册 {len(tools)} 个 cu_* MCP 工具",
+            "register": result,
+            "tools": tools,
+        }
+
+    result = unregister_cu_mcp_tools(db)
+    set_screenpilot_enabled(False)
+    return {
+        "enabled": False,
+        "message": f"驭屏系统已关闭，已移除 {len(result.get('removed') or [])} 个 MCP 工具",
+        "unregister": result,
+        "tools": [],
+    }

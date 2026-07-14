@@ -499,10 +499,10 @@ class WorkflowEngine:
         self, node_id: str, data: Dict[str, Any], state: WorkflowState
     ) -> Dict[str, Any]:
         """P2: ScreenPilot 工作流节点 — 直接调用驭屏服务。"""
-        from services.screenpilot.config import SCREENPILOT_ENABLED
+        from services.screenpilot.config import is_screenpilot_enabled
 
-        if not SCREENPILOT_ENABLED:
-            return {"status": "failed", "error": "ScreenPilot 未启用 (SCREENPILOT_ENABLED=false)"}
+        if not is_screenpilot_enabled():
+            return {"status": "failed", "error": "ScreenPilot 未启用，请在系统配置中打开驭屏系统"}
 
         from services.screenpilot.service import run_workflow_screenpilot
 

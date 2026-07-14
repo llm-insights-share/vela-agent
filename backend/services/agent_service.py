@@ -394,10 +394,11 @@ class AgentService:
         session: SessionModel,
         message: str,
         result: Dict[str, Any],
+        persist_user_message: bool = True,
     ) -> Dict[str, Any]:
         """WF: 统一处理工作流 chat 响应与 session 写入"""
         messages = session.messages or []
-        if message and message.strip():
+        if persist_user_message and message and message.strip():
             messages.append({"role": "user", "content": message})
 
         pending_approval_id = result.get("pending_approval_id")
@@ -456,6 +457,80 @@ class AgentService:
         }
 
     @staticmethod
+    def finalize_background_chat(
+        db: Session,
+        session: SessionModel,
+        result: Dict[str, Any],
+    ) -> None:
+        """后台任务完成后：合并响应元数据到 messages 并更新会话状态。"""
+        from sqlalchemy.orm.attributes import flag_modified
+
+        messages = list(session.messages or [])
+        pending_approval_id = result.get("pending_approval_id")
+        session_status = result.get("session_status")
+        success = result.get("success", True)
+        content = result.get("content", "")
+
+        if messages and messages[-1].get("role") == "user" and content:
+            messages.append({"role": "assistant", "content": content})
+        elif content and not messages:
+            messages.append({"role": "assistant", "content": content})
+
+        for msg in reversed(messages):
+            if msg.get("role") != "assistant":
+                continue
+            if result.get("thinking"):
+                msg["thinking"] = result["thinking"]
+            if result.get("execution_trace"):
+                msg["executionTrace"] = result["execution_trace"]
+            if result.get("execution_mode"):
+                msg["executionMode"] = result["execution_mode"]
+            if result.get("active_skill"):
+                msg["activeSkill"] = result["active_skill"]
+            if result.get("files"):
+                msg["files"] = result["files"]
+            if result.get("files_truncated"):
+                msg["filesTruncated"] = True
+            if pending_approval_id:
+                msg["pendingApprovalId"] = pending_approval_id
+            if result.get("pending_delivery"):
+                msg["pendingDelivery"] = True
+            if result.get("pending_workflow"):
+                msg["pendingWorkflow"] = True
+            if result.get("pending_tool_name"):
+                msg["pendingToolName"] = result["pending_tool_name"]
+            if result.get("preview_payload"):
+                msg["previewPayload"] = result["preview_payload"]
+            if result.get("pending_otp"):
+                msg["pendingOtp"] = True
+            break
+
+        session.messages = messages
+        flag_modified(session, "messages")
+
+        if pending_approval_id or session_status == "HITL_WAIT":
+            session.status = SessionStatus.HITL_WAIT
+        elif result.get("aborted"):
+            session.status = SessionStatus.ACTIVE
+        elif success is False:
+            session.status = SessionStatus.ERROR
+        else:
+            session.status = SessionStatus.ACTIVE
+
+        pending = dict(session.pending_context or {})
+        pending.pop("background_job", None)
+        session.pending_context = pending
+        session.last_active_at = now_utc()
+        db.commit()
+
+        try:
+            from services.session_abort import clear_abort
+
+            clear_abort(session.session_id)
+        except Exception:
+            pass
+
+    @staticmethod
     async def chat_with_agent(
         db: Session,
         agent_id: str,
@@ -465,6 +540,7 @@ class AgentService:
         timeout_seconds: Optional[int] = None,
         execution_mode: Optional[str] = "auto",
         skip_history: bool = False,
+        persist_user_message: bool = True,
     ) -> Dict[str, Any]:
         agent = db.query(Agent).filter(Agent.agent_id == agent_id).first()
         if not agent:
@@ -488,6 +564,10 @@ class AgentService:
         if not session:
             raise ValueError("会话不存在")
 
+        from services.session_abort import clear_abort
+
+        clear_abort(session_id)
+
         from models import AgentType
 
         # WF: 工作流恢复（HITL 审批后由前端触发 resume 或 chat 空消息）
@@ -508,7 +588,7 @@ class AgentService:
                 timeout=float(timeout_seconds) if timeout_seconds else 300.0,
             )
             return await AgentService._finalize_workflow_chat(
-                db, session, message, result
+                db, session, message, result, persist_user_message=persist_user_message
             )
 
         # MA: 如果是 COMPOSITE 类型，走 CoordinatorEngine
@@ -527,7 +607,8 @@ class AgentService:
             )
             # 写入 session 消息历史（HITL 挂起时不写 final_result，留待审批通过后再写）
             messages = session.messages or []
-            messages.append({"role": "user", "content": message})
+            if persist_user_message:
+                messages.append({"role": "user", "content": message})
             pending_approval_id = result.get("pending_approval_id")
             if not pending_approval_id:
                 messages.append({"role": "assistant", "content": result.get("result", "")})
@@ -575,7 +656,7 @@ class AgentService:
                 timeout=float(timeout_seconds) if timeout_seconds else 300.0,
             )
             return await AgentService._finalize_workflow_chat(
-                db, session, message, result
+                db, session, message, result, persist_user_message=persist_user_message
             )
 
         original_message = message
@@ -604,7 +685,8 @@ class AgentService:
                 if rewrite_result.need_clarification and rewrite_result.clarification:
                     # 记忆锚定无法确定时直接澄清，避免硬造检索式
                     messages = session.messages or []
-                    messages.append({"role": "user", "content": original_message})
+                    if persist_user_message:
+                        messages.append({"role": "user", "content": original_message})
                     messages.append({"role": "assistant", "content": rewrite_result.clarification})
                     session.messages = messages
                     session.last_active_at = now_utc()
@@ -680,6 +762,40 @@ class AgentService:
         tool_bindings = db.query(AgentToolBinding).filter(
             AgentToolBinding.agent_id == agent_id
         ).all()
+        # If agent already uses ScreenPilot, ensure newly added cu_* (e.g. cu_vision) are registered+bound.
+        try:
+            from services.screenpilot.config import is_screenpilot_enabled
+            from services.screenpilot.mcp_tools import ensure_cu_tools_registered_and_bound
+
+            if is_screenpilot_enabled() and tool_bindings:
+                bound_names = []
+                for tb in tool_bindings:
+                    t0 = db.query(Tool).filter(Tool.tool_id == tb.tool_id).first()
+                    if t0:
+                        bound_names.append(t0.name)
+                if any(n.startswith("cu_") for n in bound_names):
+                    ensure_cu_tools_registered_and_bound(db)
+                    tool_bindings = db.query(AgentToolBinding).filter(
+                        AgentToolBinding.agent_id == agent_id
+                    ).all()
+        except Exception as _e:
+            # #region agent log
+            try:
+                import json as _json, time as _time
+                with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-66b153.log", "a") as _f:
+                    _f.write(_json.dumps({
+                        "sessionId": "66b153",
+                        "runId": "fix",
+                        "hypothesisId": "C",
+                        "location": "agent_service.py:load_tools",
+                        "message": "ensure_cu_tools failed",
+                        "data": {"error": str(_e)[:200]},
+                        "timestamp": int(_time.time() * 1000),
+                    }, ensure_ascii=False) + "\n")
+            except Exception:
+                pass
+            # #endregion
+
         available_tools = []
         for tb in tool_bindings:
             tool = db.query(Tool).filter(
@@ -688,6 +804,29 @@ class AgentService:
             ).first()
             if tool:
                 available_tools.append(tool)
+
+        # #region agent log
+        try:
+            import json as _json, time as _time
+            cu_names = [t.name for t in available_tools if getattr(t, "name", "").startswith("cu_")]
+            with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-66b153.log", "a") as _f:
+                _f.write(_json.dumps({
+                    "sessionId": "66b153",
+                    "runId": "post-fix",
+                    "hypothesisId": "A+B",
+                    "location": "agent_service.py:available_tools",
+                    "message": "agent available cu tools after ensure",
+                    "data": {
+                        "agent_id": agent_id,
+                        "cu_tools": cu_names,
+                        "has_cu_vision": "cu_vision" in cu_names,
+                        "has_cu_wait_for_otp": "cu_wait_for_otp" in cu_names,
+                    },
+                    "timestamp": int(_time.time() * 1000),
+                }, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+        # #endregion
 
         available_tools.extend(BUILTIN_TOOLS)
 
@@ -698,6 +837,44 @@ class AgentService:
         mode = execution_mode or "auto"
         if mode == "auto":
             mode = _analyze_execution_mode(message, has_tools, has_kb, has_skills)
+            # OTP codes typed into chat must keep tools so agent can fill & submit.
+            if (
+                has_tools
+                and mode == "direct"
+                and _looks_like_otp_message(original_message)
+                and _session_has_screenpilot_context(session)
+            ):
+                mode = "react"
+                # Expand for LLM only; history still stores original_message via AgentLoop.
+                message = (
+                    f"用户提供了登录验证码：{(original_message or '').strip()}。"
+                    "请立即调用 cu_observe 查看当前页面，将验证码填入验证码输入框，"
+                    "然后点击登录按钮完成登录。必须调用工具，不要只回复文字。"
+                )
+        # #region agent log
+        try:
+            import json as _json, time as _time
+            with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-8b0267.log", "a") as _f:
+                _f.write(_json.dumps({
+                    "sessionId": "8b0267",
+                    "runId": "otp-continue",
+                    "hypothesisId": "H3",
+                    "location": "agent_service.py:chat_with_agent:mode",
+                    "message": "execution mode selected",
+                    "data": {
+                        "mode": mode,
+                        "has_tools": has_tools,
+                        "tool_count": len(available_tools),
+                        "looks_like_otp": _looks_like_otp_message(original_message),
+                        "has_sp_context": _session_has_screenpilot_context(session),
+                        "otp_forced_react": "用户提供了登录验证码" in (message or ""),
+                        "msg_len": len((original_message or "").strip()),
+                    },
+                    "timestamp": int(_time.time() * 1000),
+                }, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+        # #endregion
 
         loop = AgentLoop(
             db=db,
@@ -743,10 +920,28 @@ class AgentService:
                 ).first()
                 if approval and approval.tool_args:
                     preview_payload = approval.tool_args.get("preview_payload") or {}
+                    if not preview_payload and approval.tool_name == "cu_login_otp":
+                        preview_payload = {
+                            "flow_kind": "otp_wait",
+                            "prompt": approval.tool_args.get("prompt") or "请输入短信验证码",
+                        }
             except Exception:
                 pass
+            if he.tool_name == "cu_login_otp" or preview_payload.get("flow_kind") == "otp_wait":
+                prompt = preview_payload.get("prompt") or "请输入短信验证码"
+                hitl_content = (
+                    f"⏸️ 登录需要验证码：{prompt}\n"
+                    f"审批工单 ID: `{he.approval_id}`\n\n"
+                    "请在对话下方输入验证码并提交。"
+                )
+            else:
+                hitl_content = (
+                    f"⏸️ 工具 [{he.tool_name}] 需要人工审批后才能继续执行。\n"
+                    f"审批工单 ID: `{he.approval_id}`\n\n"
+                    "请在审批中心处理后继续对话。"
+                )
             hitl_result = {
-                "content": f"⏸️ 工具 [{he.tool_name}] 需要人工审批后才能继续执行。\n审批工单 ID: `{he.approval_id}`\n\n请在审批中心处理后继续对话。",
+                "content": hitl_content,
                 "thinking": "\n".join(loop.thinking_log) if loop else "",
                 "tokens_used": 0,
                 "total_tokens": session.token_used or 0,
@@ -755,6 +950,8 @@ class AgentService:
                 "pending_approval_id": he.approval_id,
                 "pending_tool_name": he.tool_name,
                 "preview_payload": preview_payload,
+                "pending_otp": he.tool_name == "cu_login_otp"
+                or preview_payload.get("flow_kind") == "otp_wait",
                 "session_status": "HITL_WAIT",
             }
             if rewrite_meta:
@@ -922,8 +1119,28 @@ class AgentLoop:
             for msg in history[-self.MAX_CONTEXT_MESSAGES:]:
                 messages.append(msg)
 
-        messages.append({"role": "user", "content": self.user_message})
+        last_msg = messages[-1] if messages else None
+        already_has_user = (
+            last_msg
+            and last_msg.get("role") == "user"
+            and last_msg.get("content") == self.original_user_message
+        )
+        if already_has_user:
+            if self.user_message != self.original_user_message:
+                messages[-1] = {"role": "user", "content": self.user_message}
+        else:
+            messages.append({"role": "user", "content": self.user_message})
         return messages
+
+    def _build_history_with_user(self, extra_messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        history = list(self.session.messages or [])
+        if not (
+            history
+            and history[-1].get("role") == "user"
+            and history[-1].get("content") == self.original_user_message
+        ):
+            history.append({"role": "user", "content": self.original_user_message})
+        return history + extra_messages
 
     def _truncate_context(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if len(messages) <= self.MAX_CONTEXT_MESSAGES + 1:
@@ -986,6 +1203,7 @@ class AgentLoop:
         self._check_token_budget(self._estimate_tokens(messages) + effective_max_tokens)
 
         self.thinking_log.append(f"[LLM 调用] {len(messages)} 条消息, max_tokens={effective_max_tokens}")
+
 
         completion = await model_provider_service.chat_completion(
             provider=self.provider,
@@ -1085,6 +1303,75 @@ class AgentLoop:
             pass
 
         return {}
+
+    def _compact_tool_result_for_llm(self, tool_name: str, result_str: str) -> str:
+        """Strip large binary fields before feeding ScreenPilot tool JSON back to the LLM."""
+        if not result_str:
+            return result_str
+        text = result_str if isinstance(result_str, str) else str(result_str)
+        if not text.lstrip().startswith("{"):
+            return text[:12000] if len(text) > 12000 else text
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            return text[:12000] if len(text) > 12000 else text
+        if not isinstance(data, dict):
+            return text[:12000] if len(text) > 12000 else text
+
+        for key in ("screenshot_b64", "som_image_b64", "screenshot", "image_b64"):
+            if key in data and data[key]:
+                data[key] = f"[omitted {len(str(data[key]))} chars]"
+
+        elements = data.get("elements")
+        if isinstance(elements, list) and len(elements) > 40:
+            data["elements"] = elements[:40]
+            data["elements_truncated"] = True
+
+        compact = json.dumps(data, ensure_ascii=False)
+        if len(compact) > 16000:
+            compact = compact[:16000] + "…[truncated]"
+        return compact
+
+    @staticmethod
+    def _parse_screenpilot_blocker(tool_result: str) -> Optional[Dict[str, Any]]:
+        """Parse structured ScreenPilot risk_blocked / no-effect failures from tool JSON."""
+        if not tool_result or not isinstance(tool_result, str):
+            return None
+        text = tool_result
+        data = None
+        if text.lstrip().startswith("{"):
+            try:
+                data = json.loads(text)
+            except json.JSONDecodeError:
+                data = None
+        if not isinstance(data, dict):
+            try:
+                outer = json.loads(text)
+                if isinstance(outer, dict) and isinstance(outer.get("result"), str):
+                    data = json.loads(outer["result"])
+            except Exception:
+                data = None
+        if not isinstance(data, dict):
+            return None
+        if data.get("risk_blocked"):
+            return {
+                "error_code": str(data.get("error_code") or "RISK_BLOCK"),
+                "url": str(data.get("url") or ""),
+                "warning": str(data.get("warning") or ""),
+                "recovery_hint": str(data.get("recovery_hint") or ""),
+                "kind": "risk_blocked",
+            }
+        if data.get("executed") and data.get("effect_ok") is False:
+            return {
+                "error_code": "NO_EFFECT",
+                "url": str((data.get("observe") or {}).get("url") or data.get("url") or ""),
+                "warning": str(data.get("warning") or "动作已执行但未检测到 UI 变化"),
+                "recovery_hint": (
+                    "请更换目标控件、确认前置条件，或改用 login_macro / value=text=/css="
+                ),
+                "kind": "no_effect",
+            }
+        return None
 
     def _check_dead_loop(self, tool_name: str, args: dict) -> bool:
         """SGL-IMP-03: 死循环检测 - 连续N次调用同一工具且参数相同时强制中断"""
@@ -1255,7 +1542,7 @@ class AgentLoop:
     def _check_screenpilot_hitl_pending(self, tool, result: Dict[str, Any]) -> Optional[str]:
         """ScreenPilot MCP 返回 hitl_pending 时挂起 ReAct 循环。"""
         name = getattr(tool, "name", "") or ""
-        if not name.startswith("ui_") or not result.get("success"):
+        if not name.startswith(("cu_", "ui_")) or not result.get("success"):
             return None
         raw = result.get("result", "")
         if not isinstance(raw, str):
@@ -1441,9 +1728,9 @@ class AgentLoop:
         reasoning_content = completion.get("reasoning_content", "")
         response_truncated = self._get_finish_reason(completion) == "length"
 
-        history = self.session.messages or []
-        history.append({"role": "user", "content": self.original_user_message})
-        history.append({"role": "assistant", "content": assistant_content})
+        history = self._build_history_with_user([
+            {"role": "assistant", "content": assistant_content},
+        ])
         self._persist_session(history)
 
         self._extract_and_save_files_from_content(assistant_content, response_truncated=response_truncated)
@@ -1462,7 +1749,26 @@ class AgentLoop:
                 defs.append(tool_execution_service.build_openai_tool_def(t))
         return defs
 
+    def _abort_if_requested(self) -> Optional[Dict[str, Any]]:
+        from services.session_abort import is_aborted
+
+        sid = getattr(self.session, "session_id", "") or ""
+        if not is_aborted(sid):
+            return None
+        self.thinking_log.append("[中止] 用户取消任务")
+        content = "任务已由用户中止。"
+        history = self._build_history_with_user([
+            {"role": "assistant", "content": content},
+        ])
+        self._persist_session(history)
+        result = self._build_result(content, "\n".join(self.thinking_log), getattr(self, "_abort_mode", "react"))
+        result["aborted"] = True
+        result["success"] = True
+        result["session_status"] = "ACTIVE"
+        return result
+
     async def _run_react(self) -> Dict[str, Any]:
+        self._abort_mode = "react"
         openai_tools = self._build_tool_defs(self.available_tools)
 
         self.thinking_log.append(f"[ReAct] 开始执行, 可用工具: {len(self.available_tools)}")
@@ -1475,10 +1781,18 @@ class AgentLoop:
         iteration = 0
         planning_done = False
         while iteration < self.max_iterations:
+            aborted = self._abort_if_requested()
+            if aborted:
+                return aborted
+
             iteration += 1
             self.thinking_log.append(f"[ReAct 迭代 {iteration}/{self.max_iterations}]")
 
             completion = await self._call_llm(messages, tools=openai_tools)
+
+            aborted = self._abort_if_requested()
+            if aborted:
+                return aborted
 
             choices = completion.get("choices", [])
             if not choices:
@@ -1519,6 +1833,10 @@ class AgentLoop:
                 new_messages.append(assistant_entry)
 
                 for tc in tool_calls:
+                    aborted = self._abort_if_requested()
+                    if aborted:
+                        return aborted
+
                     func_name = tc["function"]["name"]
                     raw_args = tc["function"].get("arguments", "")
                     func_args = self._safe_parse_tool_args(raw_args)
@@ -1545,7 +1863,8 @@ class AgentLoop:
                                     tool_result_str = exec_result.get("result", "")
                                 else:
                                     tool_result_str = f"工具执行错误: {exec_result.get('error', '')}"
-                            self._extract_files_from_result(tool_result_str)
+                                self._extract_files_from_result(tool_result_str)
+                                tool_result_str = self._compact_tool_result_for_llm(func_name, tool_result_str)
                             self.thinking_log.append(f"  工具 [{func_name}] 结果: {tool_result_str[:200]}")
                     else:
                         tool_result_str = f"工具 {func_name} 未找到，可用工具: {[t.name for t in self.available_tools]}"
@@ -1568,14 +1887,14 @@ class AgentLoop:
 
             new_messages.append({"role": "assistant", "content": assistant_content})
 
-            history = (self.session.messages or []) + [{"role": "user", "content": self.original_user_message}] + new_messages
+            history = self._build_history_with_user(new_messages)
             self._persist_session(history)
 
             self._extract_and_save_files_from_content(assistant_content, response_truncated=response_truncated)
 
             return self._build_result(assistant_content, reasoning_content, "react")
 
-        history = (self.session.messages or []) + [{"role": "user", "content": self.original_user_message}] + new_messages
+        history = self._build_history_with_user(new_messages)
         if not new_messages:
             history.append({"role": "assistant", "content": "已达到最大迭代次数，任务未完成。"})
         self._persist_session(history)
@@ -1587,7 +1906,12 @@ class AgentLoop:
         )
 
     async def _run_plan_and_execute(self) -> Dict[str, Any]:
+        self._abort_mode = "plan_and_execute"
         self.thinking_log.append("[Plan-and-Execute] 开始规划阶段")
+
+        aborted = self._abort_if_requested()
+        if aborted:
+            return aborted
 
         messages = self._build_initial_messages()
         messages = self._truncate_context(messages)
@@ -1601,6 +1925,10 @@ class AgentLoop:
         plan_messages.append({"role": "user", "content": plan_prompt})
 
         plan_completion = await self._call_llm(plan_messages)
+
+        aborted = self._abort_if_requested()
+        if aborted:
+            return aborted
 
         plan_choices = plan_completion.get("choices", [])
         if not plan_choices:
@@ -1635,6 +1963,10 @@ class AgentLoop:
         step_results = []
 
         for i, step in enumerate(steps):
+            aborted = self._abort_if_requested()
+            if aborted:
+                return aborted
+
             step_text = step.strip()[:500]
             self.thinking_log.append(f"  执行步骤 {i + 1}/{len(steps)}: {step_text[:100]}")
 
@@ -1650,6 +1982,10 @@ class AgentLoop:
                 max_tokens=2048,
             )
 
+            aborted = self._abort_if_requested()
+            if aborted:
+                return aborted
+
             step_choices = step_completion.get("choices", [])
             if step_choices:
                 step_msg = step_choices[0].get("message", {})
@@ -1658,6 +1994,10 @@ class AgentLoop:
                 tool_calls = self._parse_tool_calls(step_msg)
                 if tool_calls:
                     for tc in tool_calls:
+                        aborted = self._abort_if_requested()
+                        if aborted:
+                            return aborted
+
                         func_name = tc["function"]["name"]
                         raw_args = tc["function"].get("arguments", "")
                         func_args = self._safe_parse_tool_args(raw_args)
@@ -1684,9 +2024,39 @@ class AgentLoop:
                                         tool_result_str = exec_result.get("result", "")
                                     else:
                                         tool_result_str = f"工具执行错误: {exec_result.get('error', '')}"
-                                self._extract_files_from_result(tool_result_str)
+                                    self._extract_files_from_result(tool_result_str)
+                                    tool_result_str = self._compact_tool_result_for_llm(func_name, tool_result_str)
                                 self.thinking_log.append(f"    工具 [{func_name}]: {tool_result_str[:200]}")
                             step_content += f"\n\n工具结果: {tool_result_str}"
+                            blocker = self._parse_screenpilot_blocker(tool_result_str)
+                            if blocker and blocker.get("kind") == "risk_blocked":
+                                self.thinking_log.append(
+                                    f"[风控中止] 步骤 {i + 1}/{len(steps)} 检测到 "
+                                    f"error_code={blocker.get('error_code')}，停止后续步骤"
+                                )
+                                step_results.append(step_content)
+                                final_content = (
+                                    "当前操作被页面安全/网络限制拦截，流程已中止。\n\n"
+                                    f"- error_code: `{blocker.get('error_code')}`\n"
+                                    f"- 当前 URL: `{blocker.get('url') or '未知'}`\n"
+                                    f"- 说明: {blocker.get('warning') or '风险页'}\n\n"
+                                    f"**恢复建议:** {blocker.get('recovery_hint') or '请检查系统 risk_rules / entry_url 与网络环境后重试。'}"
+                                )
+                                history = self._build_history_with_user([
+                                    {"role": "assistant", "content": final_content},
+                                ])
+                                self._persist_session(history)
+                                return self._build_result(
+                                    final_content, "\n".join(self.thinking_log), "plan_and_execute"
+                                )
+                            if blocker and blocker.get("kind") == "no_effect":
+                                self.thinking_log.append(
+                                    f"[无效果] 步骤 {i + 1}/{len(steps)}: {blocker.get('warning')}"
+                                )
+                                step_content += (
+                                    f"\n\n注意: {blocker.get('warning')}；"
+                                    f"{blocker.get('recovery_hint')}"
+                                )
 
                 step_results.append(step_content)
                 execute_messages.append({"role": "assistant", "content": step_content})
@@ -1712,10 +2082,9 @@ class AgentLoop:
 
         self._extract_and_save_files_from_content(final_content, response_truncated=response_truncated)
 
-        history = (self.session.messages or []) + [
-            {"role": "user", "content": self.original_user_message},
+        history = self._build_history_with_user([
             {"role": "assistant", "content": final_content},
-        ]
+        ])
         self._persist_session(history)
 
         return self._build_result(final_content, reasoning_content, "plan_and_execute")
@@ -2084,6 +2453,36 @@ def _compute_skill_relevance(message: str, skill) -> float:
 
     overlap = query_words & skill_words
     return len(overlap) / min(len(query_words), len(skill_words) or 1)
+
+
+def _looks_like_otp_message(message: str) -> bool:
+    """User pasted a short numeric OTP into chat."""
+    import re
+    return bool(re.fullmatch(r"\d{4,8}", (message or "").strip()))
+
+
+def _session_has_screenpilot_context(session) -> bool:
+    """True if this chat recently used ScreenPilot / is mid login-OTP flow."""
+    pending = session.pending_context or {}
+    if pending.get("kind") in ("screenpilot", "otp_wait", "tool_call"):
+        return True
+    blob_parts = []
+    for msg in (session.messages or [])[-16:]:
+        if not isinstance(msg, dict):
+            continue
+        blob_parts.append(str(msg.get("content") or ""))
+        meta = msg.get("meta") or {}
+        if isinstance(meta, dict):
+            blob_parts.append(str(meta.get("pending_tool_name") or ""))
+            pp = meta.get("preview_payload") or {}
+            if isinstance(pp, dict):
+                blob_parts.append(str(pp.get("flow_kind") or ""))
+    blob = "\n".join(blob_parts).lower()
+    markers = (
+        "cu_navigate", "cu_act", "cu_observe", "cu_wait_for_otp", "cu_login_otp",
+        "screen_session", "otp_wait", "screenpilot", "验证码", "login_macro",
+    )
+    return any(m.lower() in blob for m in markers)
 
 
 def _analyze_execution_mode(message: str, has_tools: bool, has_kb: bool, has_skills: bool) -> str:

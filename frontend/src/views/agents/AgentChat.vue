@@ -16,8 +16,9 @@
         >
           <div class="session-item-top">
             <span class="session-item-id">{{ s.session_id?.substring(0, 8) }}...</span>
-            <a-tag :color="s.status === 'ACTIVE' ? 'green' : 'default'" size="small">
-              {{ s.status === 'ACTIVE' ? '活跃' : s.status }}
+            <a-tag :color="sessionStatusColor(s.status)" size="small">
+              <LoadingOutlined v-if="s.status === 'RUNNING'" style="margin-right: 4px;" />
+              {{ sessionStatusLabel(s.status) }}
             </a-tag>
           </div>
           <div class="session-item-meta">
@@ -41,6 +42,10 @@
         </a-button>
         <span class="chat-title">{{ agent.name }} - 对话测试</span>
         <a-tag color="green">会话: {{ sessionId?.substring(0, 8) }}...</a-tag>
+        <a-tag v-if="isRunning" color="orange">
+          <LoadingOutlined style="margin-right: 4px;" />运行中
+        </a-tag>
+        <a-tag v-else-if="isHitlWait" color="gold">待审批</a-tag>
         <a-select
           v-if="agent.agent_type === 'SINGLE'"
           v-model:value="executionMode"
@@ -127,7 +132,11 @@
 
         <div v-if="msg.pendingApprovalId && !msg.approvalStatus" class="chat-hitl-actions">
           <a-alert
-            :message="msg.pendingWorkflow ? '工作流 HITL 等待审批' : msg.pendingDelivery ? '多 Agent 交付物等待审批' : `工具 [${msg.pendingToolName}] 等待审批`"
+            :message="msg.pendingOtp || msg.previewPayload?.flow_kind === 'otp_wait'
+              ? (msg.previewPayload?.prompt || '请输入短信验证码')
+              : msg.pendingWorkflow ? '工作流 HITL 等待审批'
+              : msg.pendingDelivery ? '多 Agent 交付物等待审批'
+              : `工具 [${msg.pendingToolName}] 等待审批`"
             type="warning"
             show-icon
             style="margin-bottom: 8px;"
@@ -144,7 +153,22 @@
               class="hitl-som-image"
             />
           </div>
-          <a-space>
+          <div v-if="msg.pendingOtp || msg.previewPayload?.flow_kind === 'otp_wait'" class="hitl-otp-form">
+            <a-input
+              v-model:value="msg.otpCode"
+              placeholder="请输入验证码"
+              maxlength="12"
+              style="width: 200px;"
+              @pressEnter="submitOtpHitl(msg)"
+            />
+            <a-button type="primary" size="small" :loading="msg.approving" @click="submitOtpHitl(msg)">
+              提交验证码
+            </a-button>
+            <a-button size="small" :loading="msg.approving" @click="rejectHitl(msg)">
+              取消
+            </a-button>
+          </div>
+          <a-space v-else>
             <a-button type="primary" size="small" :loading="msg.approving" @click="approveHitl(msg)">
               批准
             </a-button>
@@ -173,7 +197,7 @@
         </div>
       </div>
 
-      <div v-if="sending" class="chat-msg chat-msg-assistant">
+      <div v-if="isSending" class="chat-msg chat-msg-assistant">
         <div class="chat-msg-role">
           {{ agent.name }}
           <a-tag v-if="activeSkill" color="orange" style="margin-left: 6px; font-size: 10px;">
@@ -226,12 +250,24 @@
             :auto-size="{ minRows: 1, maxRows: 4 }"
             @pressEnter="onEnter"
             @input="onInput"
-            :disabled="sending"
+            :disabled="isSending"
           />
           <a-button
+            v-if="canAbort"
             type="primary"
-            :loading="sending"
-            :disabled="!inputText.trim()"
+            danger
+            :loading="aborting"
+            :disabled="aborting"
+            @click="abortCurrentSession"
+            class="send-btn"
+          >
+            <StopOutlined v-if="!aborting" />
+          </a-button>
+          <a-button
+            v-else
+            type="primary"
+            :loading="isSending"
+            :disabled="!inputText.trim() || isSending"
             @click="sendMessage"
             class="send-btn"
           >
@@ -239,7 +275,7 @@
           </a-button>
         </div>
         <div class="chat-timeout-setting">
-          <a-checkbox v-model:checked="skipHistory" :disabled="sending" style="white-space: nowrap; font-size: 12px;">
+          <a-checkbox v-model:checked="skipHistory" :disabled="isSending" style="white-space: nowrap; font-size: 12px;">
             不引用历史
           </a-checkbox>
           <span class="timeout-label">超时</span>
@@ -375,11 +411,16 @@ import { useRoute } from 'vue-router'
 import {
   ArrowLeftOutlined, CaretRightOutlined, CaretDownOutlined,
   ThunderboltOutlined, SendOutlined, PlusOutlined, DownloadOutlined,
-  FileOutlined, CloseOutlined,
+  FileOutlined, CloseOutlined, LoadingOutlined, StopOutlined,
 } from '@ant-design/icons-vue'
 import { agentApi, sessionApi, hitlApi, skillApi } from '../../api'
 import { message } from 'ant-design-vue'
 import { marked } from 'marked'
+import {
+  watchBackgroundSession,
+  setActiveViewing,
+  unwatchBackgroundSession,
+} from '../../composables/useBackgroundSessions'
 
 marked.setOptions({
   breaks: true,
@@ -411,6 +452,132 @@ const skipHistory = ref(false)
 const creatingSession = ref(false)
 const sessions = ref([])
 const loadingSessions = ref(false)
+const currentSessionStatus = ref('ACTIVE')
+const aborting = ref(false)
+let sessionPollTimer = null
+
+const isRunning = computed(() => currentSessionStatus.value === 'RUNNING')
+const isHitlWait = computed(() => currentSessionStatus.value === 'HITL_WAIT')
+const canAbort = computed(() => isRunning.value || isHitlWait.value)
+const isSending = computed(() => sending.value || isRunning.value)
+
+async function abortCurrentSession() {
+  if (!sessionId.value || !canAbort.value || aborting.value) return
+  aborting.value = true
+  try {
+    const res = await sessionApi.abort(sessionId.value)
+    message.success(res.message || '已请求中止')
+    if (res.status) {
+      currentSessionStatus.value = res.status
+    }
+    startSessionPollIfNeeded()
+    await fetchSessions()
+    const s = await sessionApi.get(sessionId.value)
+    currentSessionStatus.value = s.status
+    if (s.messages) {
+      messages.value = mapSessionMessages(s.messages)
+    }
+  } catch (e) {
+    message.error(e.message || '中止失败')
+  } finally {
+    aborting.value = false
+  }
+}
+
+function sessionStatusLabel(status) {
+  const map = {
+    ACTIVE: '活跃',
+    RUNNING: '运行中',
+    HITL_WAIT: '待审批',
+    ERROR: '错误',
+    CLOSED: '已关闭',
+    IDLE: '空闲',
+  }
+  return map[status] || status
+}
+
+function sessionStatusColor(status) {
+  const map = {
+    ACTIVE: 'green',
+    RUNNING: 'orange',
+    HITL_WAIT: 'gold',
+    ERROR: 'red',
+  }
+  return map[status] || 'default'
+}
+
+function mapSessionMessages(msgs) {
+  return (msgs || []).map(msg => ({
+    ...msg,
+    thinking: msg.thinking || '',
+    thinkingExpanded: !!msg.thinking,
+    traceExpanded: true,
+    executionTrace: msg.executionTrace || msg.execution_trace || [],
+    executionMode: msg.executionMode || msg.execution_mode || '',
+    activeSkill: msg.activeSkill || msg.active_skill || null,
+    files: msg.files || [],
+    filesTruncated: msg.filesTruncated || msg.files_truncated || false,
+    pendingApprovalId: msg.pendingApprovalId || msg.pending_approval_id || null,
+    pendingDelivery: msg.pendingDelivery || msg.pending_delivery || false,
+    pendingWorkflow: msg.pendingWorkflow || msg.pending_workflow || false,
+    pendingToolName: msg.pendingToolName || msg.pending_tool_name || '',
+    previewPayload: msg.previewPayload || msg.preview_payload || null,
+    pendingOtp: msg.pendingOtp || msg.pending_otp
+      || (msg.previewPayload || msg.preview_payload || {})?.flow_kind === 'otp_wait',
+    otpCode: msg.otpCode || '',
+    approvalStatus: msg.approvalStatus || null,
+    approvalFinalResult: msg.approvalFinalResult || '',
+  }))
+}
+
+async function loadSessionById(id) {
+  const s = await sessionApi.get(id)
+  currentSessionStatus.value = s.status
+  messages.value = mapSessionMessages(s.messages)
+  await nextTick()
+  scrollToBottom()
+}
+
+async function refreshCurrentSession() {
+  if (!sessionId.value) return
+  try {
+    const s = await sessionApi.get(sessionId.value)
+    const prevStatus = currentSessionStatus.value
+    currentSessionStatus.value = s.status
+    messages.value = mapSessionMessages(s.messages)
+
+    const idx = sessions.value.findIndex(x => x.session_id === s.session_id)
+    if (idx >= 0) {
+      sessions.value[idx] = s
+    } else if ((s.messages || []).length > 0 || s.status === 'RUNNING') {
+      sessions.value.unshift(s)
+    }
+
+    if (prevStatus === 'RUNNING' && s.status !== 'RUNNING') {
+      unwatchBackgroundSession(sessionId.value)
+      await fetchSessions()
+      stopSessionPoll()
+    }
+    await nextTick()
+    scrollToBottom()
+  } catch (e) {
+    console.error('刷新会话失败:', e)
+  }
+}
+
+function startSessionPollIfNeeded() {
+  stopSessionPoll()
+  if (currentSessionStatus.value === 'RUNNING') {
+    sessionPollTimer = setInterval(refreshCurrentSession, 2500)
+  }
+}
+
+function stopSessionPoll() {
+  if (sessionPollTimer) {
+    clearInterval(sessionPollTimer)
+    sessionPollTimer = null
+  }
+}
 const executionModeOptions = [
   { label: '自动选择模式', value: 'auto' },
   { label: 'ReAct 模式', value: 'react' },
@@ -451,14 +618,23 @@ onMounted(async () => {
 
     skills.value = (await skillApi.list({ page_size: 100 })).items || []
 
-    const session = await sessionApi.create({
-      agent_id: agentId,
-      caller_type: 'web_playground',
-      caller_id: 'anonymous',
-    })
-    sessionId.value = session.session_id
+    const querySessionId = route.query.session_id
+    if (querySessionId) {
+      sessionId.value = querySessionId
+      await loadSessionById(querySessionId)
+    } else {
+      const session = await sessionApi.create({
+        agent_id: agentId,
+        caller_type: 'web_playground',
+        caller_id: 'anonymous',
+      })
+      sessionId.value = session.session_id
+      currentSessionStatus.value = session.status || 'ACTIVE'
+    }
 
+    setActiveViewing(sessionId.value, agentId)
     await fetchSessions()
+    startSessionPollIfNeeded()
   } catch (e) {
     message.error(e.message)
   }
@@ -468,7 +644,9 @@ async function fetchSessions() {
   loadingSessions.value = true
   try {
     const res = await sessionApi.list({ agent_id: agentId, page_size: 50 })
-    sessions.value = (res.items || []).filter(s => (s.messages || []).length > 0)
+    sessions.value = (res.items || []).filter(
+      s => (s.messages || []).length > 0 || s.status === 'RUNNING'
+    )
   } catch (e) {
     console.error('获取会话列表失败:', e)
   } finally {
@@ -479,15 +657,16 @@ async function fetchSessions() {
 async function switchSession(s) {
   if (s.session_id === sessionId.value) return
   sessionId.value = s.session_id
-  messages.value = (s.messages || []).map(msg => ({
-    ...msg,
-    thinkingExpanded: false,
-  }))
+  setActiveViewing(sessionId.value, agentId)
   activeSkill.value = null
   activeSkillId.value = null
   skipHistory.value = false
-  await nextTick()
-  scrollToBottom()
+  try {
+    await loadSessionById(s.session_id)
+    startSessionPollIfNeeded()
+  } catch (e) {
+    message.error(e.message)
+  }
 }
 
 function formatTime(t) {
@@ -511,6 +690,9 @@ async function createNewSession() {
     })
     sessionId.value = session.session_id
     messages.value = []
+    currentSessionStatus.value = session.status || 'ACTIVE'
+    setActiveViewing(sessionId.value, agentId)
+    stopSessionPoll()
     activeSkill.value = null
     activeSkillId.value = null
     skipHistory.value = false
@@ -550,6 +732,7 @@ function onEnter(e) {
   }
   if (!e.shiftKey) {
     e.preventDefault()
+    if (canAbort.value) return
     sendMessage()
   }
 }
@@ -691,13 +874,15 @@ function onResizeEnd() {
 }
 
 onUnmounted(() => {
+  stopSessionPoll()
+  setActiveViewing(null, null)
   document.removeEventListener('mousemove', onResize)
   document.removeEventListener('mouseup', onResizeEnd)
 })
 
 async function sendMessage() {
   const text = inputText.value.trim()
-  if (!text || sending.value) return
+  if (!text || isSending.value) return
 
   const skillPackId = activeSkillId.value
   const skillName = activeSkill.value
@@ -719,38 +904,38 @@ async function sendMessage() {
       payload.skill_pack_id = skillPackId
     }
 
-    const res = await sessionApi.chat(sessionId.value, payload)
-
-    const assistantMsg = {
-      role: 'assistant',
-      content: res.content,
-      thinking: res.thinking || '',
-      thinkingExpanded: false,
-      traceExpanded: true,
-      activeSkill: res.active_skill || skillName,
-      executionMode: res.execution_mode || executionMode.value,
-      executionTrace: res.execution_trace || [],
-      files: res.files || [],
-      filesTruncated: !!res.files_truncated,
-      pendingApprovalId: res.pending_approval_id || null,
-      pendingDelivery: !!res.pending_delivery,
-      pendingWorkflow: !!res.pending_workflow,
-      pendingToolName: res.pending_tool_name || '',
-      previewPayload: res.preview_payload || null,
-      approvalStatus: null,
-      approvalFinalResult: '',
-    }
-
-    if (res.thinking) {
-      assistantMsg.thinkingExpanded = true
-    }
-
-    messages.value.push(assistantMsg)
-    scrollToBottom()
+    await sessionApi.chatAsync(sessionId.value, payload)
+    currentSessionStatus.value = 'RUNNING'
+    watchBackgroundSession(sessionId.value, agentId, agent.name)
+    startSessionPollIfNeeded()
+    await fetchSessions()
   } catch (e) {
     message.error(e.message)
   } finally {
     sending.value = false
+  }
+}
+
+async function submitOtpHitl(msg) {
+  const code = (msg.otpCode || '').trim()
+  if (!code) {
+    message.warning('请输入验证码')
+    return
+  }
+  msg.approving = true
+  try {
+    const res = await hitlApi.approve(sessionId.value, msg.pendingApprovalId, {
+      approved: true,
+      reviewer: 'current_user',
+      comment: '',
+      otp_code: code,
+    })
+    msg.approvalStatus = 'approved'
+    message.success(res.message || '验证码已提交')
+  } catch (e) {
+    message.error('提交失败: ' + e.message)
+  } finally {
+    msg.approving = false
   }
 }
 
@@ -1053,6 +1238,12 @@ function renderMarkdown(text) {
   max-width: 100%;
   border-radius: 6px;
   border: 1px solid #f0f0f0;
+}
+.hitl-otp-form {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 .chat-hitl-result {
   margin-top: 10px;

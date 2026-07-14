@@ -55,9 +55,39 @@ app.include_router(screenpilot_router)
 app.include_router(query_rewrite_router)
 
 
+def _recover_stale_running_sessions():
+    """服务重启后，在途后台任务已丢失，将 RUNNING 会话标记为 ERROR。"""
+    from sqlalchemy.orm.attributes import flag_modified
+    from database import SessionLocal
+    from models import Session as SessionModel, SessionStatus
+
+    db = SessionLocal()
+    try:
+        running_sessions = db.query(SessionModel).filter(
+            SessionModel.status == SessionStatus.RUNNING
+        ).all()
+        for session in running_sessions:
+            messages = list(session.messages or [])
+            messages.append({
+                "role": "assistant",
+                "content": "❌ 服务重启导致任务中断，请重新发送消息。",
+            })
+            session.messages = messages
+            flag_modified(session, "messages")
+            session.status = SessionStatus.ERROR
+            pending = dict(session.pending_context or {})
+            pending.pop("background_job", None)
+            session.pending_context = pending
+        if running_sessions:
+            db.commit()
+    finally:
+        db.close()
+
+
 @app.on_event("startup")
 async def on_startup():
     init_db()
+    _recover_stale_running_sessions()
     from services.workflow_cron_scheduler import cron_scheduler
     cron_scheduler.start()
     from models import ModelProvider, ModelService, ProviderStatus, gen_uuid
@@ -90,6 +120,28 @@ async def on_startup():
             db.commit()
     finally:
         db.close()
+
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    try:
+        from services.screenpilot.session_manager import shutdown_browser_pool
+
+        await shutdown_browser_pool()
+    except Exception as e:
+        print(f"[shutdown] ScreenPilot browser pool: {e}")
+    try:
+        from services.screenpilot.mcp_pool import screenpilot_mcp_pool
+
+        await screenpilot_mcp_pool.shutdown()
+    except Exception as e:
+        print(f"[shutdown] ScreenPilot MCP pool: {e}")
+    try:
+        from services.workflow_cron_scheduler import cron_scheduler
+
+        cron_scheduler.stop()
+    except Exception:
+        pass
 
 
 @app.get("/api/v1/health")

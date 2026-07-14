@@ -91,7 +91,7 @@ def compile_trajectory_to_skill(
 
     trajectory = get_trajectory(db, screen_session_id)
     if not trajectory:
-        return {"success": False, "error": "轨迹为空，请先通过 ui_act 执行若干步骤"}
+        return {"success": False, "error": "轨迹为空，请先通过 cu_act 执行若干步骤"}
 
     compiled_steps = []
     for item in trajectory:

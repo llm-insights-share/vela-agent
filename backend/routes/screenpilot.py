@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from database import get_db
 from models import ScreenCredential, ScreenSystem, UiAuditLog, gen_uuid, now_utc
-from services.screenpilot.config import SCREENPILOT_ENABLED
+from services.screenpilot.config import is_screenpilot_enabled
 from services.screenpilot.crypto_util import decrypt_secret, encrypt_secret
 
 logger = logging.getLogger(__name__)
@@ -16,8 +16,8 @@ router = APIRouter(prefix="/api/v1/screenpilot", tags=["screenpilot"])
 
 
 def _require_enabled():
-    if not SCREENPILOT_ENABLED:
-        raise HTTPException(status_code=503, detail="ScreenPilot 未启用，请设置 SCREENPILOT_ENABLED=true")
+    if not is_screenpilot_enabled():
+        raise HTTPException(status_code=503, detail="ScreenPilot 未启用，请在系统配置中打开驭屏系统")
 
 
 class ScreenSystemCreate(BaseModel):
@@ -95,8 +95,16 @@ def mcp_pool_status():
 
 
 @router.get("/status")
-def screenpilot_status():
-    return {"enabled": SCREENPILOT_ENABLED, "service": "vela-screenpilot"}
+def screenpilot_status(db: Session = Depends(get_db)):
+    from services.screenpilot.mcp_tools import list_registered_cu_tools
+
+    tools = list_registered_cu_tools(db)
+    return {
+        "enabled": is_screenpilot_enabled(),
+        "service": "vela-screenpilot",
+        "mcp_registered": len(tools) >= 8,
+        "mcp_tools": tools,
+    }
 
 
 @router.get("/systems", response_model=List[ScreenSystemResponse])
@@ -144,7 +152,18 @@ def update_system(system_id: str, data: ScreenSystemUpdate, db: Session = Depend
     row = db.query(ScreenSystem).filter(ScreenSystem.system_id == system_id).first()
     if not row:
         raise HTTPException(status_code=404, detail="系统不存在")
-    for k, v in data.model_dump(exclude_unset=True).items():
+    payload = data.model_dump(exclude_unset=True)
+    if "status" in payload and payload["status"] not in ("ACTIVE", "INACTIVE"):
+        raise HTTPException(status_code=400, detail="status 仅支持 ACTIVE 或 INACTIVE")
+    if "name" in payload and payload["name"] != row.name:
+        clash = (
+            db.query(ScreenSystem)
+            .filter(ScreenSystem.name == payload["name"], ScreenSystem.system_id != system_id)
+            .first()
+        )
+        if clash:
+            raise HTTPException(status_code=400, detail="系统名称已存在")
+    for k, v in payload.items():
         setattr(row, k, v)
     row.updated_at = now_utc()
     db.commit()
@@ -155,9 +174,27 @@ def update_system(system_id: str, data: ScreenSystemUpdate, db: Session = Depend
 @router.delete("/systems/{system_id}")
 def delete_system(system_id: str, db: Session = Depends(get_db)):
     _require_enabled()
+    from models import ScreenSession, UiSkill, UiSkillStep
+
     row = db.query(ScreenSystem).filter(ScreenSystem.system_id == system_id).first()
     if not row:
         raise HTTPException(status_code=404, detail="系统不存在")
+
+    skill_ids = [
+        s.skill_id
+        for s in db.query(UiSkill).filter(UiSkill.system_id == system_id).all()
+    ]
+    if skill_ids:
+        db.query(UiSkillStep).filter(UiSkillStep.skill_id.in_(skill_ids)).delete(
+            synchronize_session=False
+        )
+        db.query(UiSkill).filter(UiSkill.system_id == system_id).delete(synchronize_session=False)
+    db.query(ScreenCredential).filter(ScreenCredential.system_id == system_id).delete(
+        synchronize_session=False
+    )
+    db.query(ScreenSession).filter(ScreenSession.system_id == system_id).delete(
+        synchronize_session=False
+    )
     db.delete(row)
     db.commit()
     return {"success": True}
@@ -237,24 +274,16 @@ def list_audit_logs(
 
 @router.get("/mcp-template", response_model=McpTemplateResponse)
 def get_mcp_template():
-    """一键注册 ScreenPilot MCP 工具的配置模板。"""
-    import sys
-    import os
+    """ScreenPilot MCP 工具配置模板（cu_*）。"""
+    from services.screenpilot.config import CU_TOOL_NAMES
+    from services.screenpilot.mcp_tools import mcp_runtime_config
 
-    backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    python = sys.executable
+    cfg = mcp_runtime_config()
+    cfg["mcp_tool_name"] = ",".join(CU_TOOL_NAMES)
     return McpTemplateResponse(
         name="vela-screenpilot",
         tool_type="MCP",
-        config={
-            "adapter": "screenpilot",
-            "mcp_pool": True,
-            "mcp_command": python,
-            "mcp_args": ["-m", "services.screenpilot.mcp_server"],
-            "mcp_env": {"SCREENPILOT_ENABLED": "true", "PYTHONPATH": backend_dir},
-            "mcp_tool_name": "ui_navigate,ui_observe,ui_act,ui_extract,ui_replay_skill,ui_compile_skill,ui_search_skills,ui_run_task",
-            "description": "驭屏引擎 ScreenPilot — 推荐 adapter=screenpilot 进程内直调；亦可 mcp_pool 长驻进程",
-        },
+        config=cfg,
     )
 
 

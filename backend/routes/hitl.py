@@ -86,9 +86,40 @@ def approve_action(
         db.commit()
         return result_data
 
-    # ScreenPilot: ui_* 延迟动作审批通过后执行
+    # ScreenPilot 登录验证码 HITL
     tool_args = approval.tool_args or {}
-    if approval.tool_name.startswith("ui_") and tool_args.get("deferred"):
+    if approval.tool_name == "cu_login_otp" or tool_args.get("flow_kind") == "otp_wait":
+        otp_code = (payload.otp_code or payload.comment or "").strip()
+        if not otp_code:
+            raise HTTPException(status_code=400, detail="请提供验证码")
+
+        tool_result_str = ""
+        if session:
+            from services.screenpilot.service import resume_login_after_otp_approval
+            tool_result_str = __import__("asyncio").run(
+                resume_login_after_otp_approval(db, approval, otp_code)
+            )
+            messages = session.messages or []
+            preview = tool_args.get("preview_payload") or {}
+            messages.append({
+                "role": "system",
+                "content": f"[HITL 验证码已提交] ScreenPilot 登录继续执行，结果如下：\n{tool_result_str}",
+                "meta": {"approved": True, "approval_id": approval_id, "preview_payload": preview},
+            })
+            session.messages = messages
+            session.pending_context = {}
+        db.commit()
+        return {
+            "success": True,
+            "message": "验证码已提交",
+            "tool_name": approval.tool_name,
+            "kind": "screenpilot_otp",
+            "tool_result": tool_result_str,
+        }
+
+    # ScreenPilot: cu_*（兼容历史 ui_*）延迟动作审批通过后执行
+    tool_args = approval.tool_args or {}
+    if approval.tool_name.startswith(("cu_", "ui_")) and tool_args.get("deferred"):
         pending = (session.pending_context or {}) if session else {}
         is_workflow = pending.get("kind") == "workflow"
 

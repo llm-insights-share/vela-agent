@@ -47,22 +47,13 @@
           <ToolOutlined />
           <span>工具</span>
         </a-menu-item>
-        <a-menu-item key="/screenpilot/systems">
-          <DesktopOutlined />
-          <span>驭屏系统</span>
-        </a-menu-item>
-        <a-menu-item key="/screenpilot/skills">
-          <DesktopOutlined />
-          <span>UI 技能</span>
-        </a-menu-item>
-        <a-menu-item key="/screenpilot/shop">
-          <DesktopOutlined />
-          <span>技能商店</span>
-        </a-menu-item>
-        <a-menu-item key="/screenpilot/approvals">
-          <DesktopOutlined />
-          <span>驭屏审批</span>
-        </a-menu-item>
+        <a-sub-menu key="screenpilot">
+          <template #icon><DesktopOutlined /></template>
+          <template #title>驭屏系统</template>
+          <a-menu-item key="/screenpilot/systems">驭屏系统管理</a-menu-item>
+          <a-menu-item key="/screenpilot/skills">UI 技能库</a-menu-item>
+          <a-menu-item key="/screenpilot/approvals">驭屏审批收件箱</a-menu-item>
+        </a-sub-menu>
         <a-menu-item key="/settings">
           <SettingOutlined />
           <span>系统配置</span>
@@ -81,7 +72,7 @@
 </template>
 
 <script setup>
-import { ref, watch } from 'vue'
+import { ref, watch, onMounted, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import {
   DashboardOutlined,
@@ -95,11 +86,23 @@ import {
   BulbOutlined,
   DesktopOutlined,
 } from '@ant-design/icons-vue'
+import {
+  startBackgroundSessionWatcher,
+  stopBackgroundSessionWatcher,
+} from './composables/useBackgroundSessions'
 
 const router = useRouter()
 const route = useRoute()
 const collapsed = ref(false)
 const selectedKeys = ref(['/'])
+
+onMounted(() => {
+  startBackgroundSessionWatcher()
+})
+
+onUnmounted(() => {
+  stopBackgroundSessionWatcher()
+})
 
 watch(
   () => route.path,

@@ -9,7 +9,7 @@ from models import HITLApproval
 
 
 def _is_screenpilot_approval(row: HITLApproval) -> bool:
-    return (row.tool_name or "").startswith("ui_")
+    return (row.tool_name or "").startswith(("cu_", "ui_"))
 
 
 def _risk_tier(row: HITLApproval) -> str:

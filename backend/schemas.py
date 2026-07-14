@@ -193,6 +193,7 @@ class HITLReview(BaseModel):
     approved: bool
     reviewer: str = Field(default="", max_length=128)
     comment: str = Field(default="", max_length=2048)
+    otp_code: Optional[str] = Field(default=None, max_length=32)
 
 
 class ToolBindingItem(BaseModel):
@@ -372,6 +373,19 @@ class SessionChatRequest(BaseModel):
     timeout_seconds: Optional[int] = None
     execution_mode: Optional[str] = Field(default="auto", pattern="^(auto|react|plan_and_execute|direct)$")
     skip_history: bool = False
+
+
+class SessionChatAsyncResponse(BaseModel):
+    accepted: bool = True
+    session_id: str
+    status: str = "RUNNING"
+
+
+class SessionAbortResponse(BaseModel):
+    accepted: bool = True
+    session_id: str
+    status: str
+    message: str = ""
 
 
 class SessionResponse(BaseModel):

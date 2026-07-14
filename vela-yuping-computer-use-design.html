@@ -1,0 +1,947 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>驭屏引擎 ScreenPilot · Vela 企业内系统操作能力设计方案</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;500;600;700;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --night:#0a0e1a;
+    --night-2:#0c1224;
+    --panel:#10182e;
+    --panel-2:#141d3a;
+    --panel-3:#182246;
+    --border:#212c4d;
+    --border-soft:rgba(255,255,255,.07);
+    --blue:#1a6fff;
+    --cyan:#00c4ff;
+    --gold:#f5c842;
+    --danger:#ff5470;
+    --text:#e8ecf7;
+    --text-dim:#98a1c0;
+    --text-mute:#5c6690;
+    --font-serif:'Noto Serif SC','Songti SC','STSong',serif;
+    --font-mono:'JetBrains Mono','SF Mono',monospace;
+    --radius:14px;
+    --sidebar-w:288px;
+  }
+  *,*::before,*::after{box-sizing:border-box;}
+  html{scroll-behavior:smooth;}
+  body{
+    margin:0;
+    background:
+      radial-gradient(1100px 620px at 82% -8%, rgba(26,111,255,.16), transparent 60%),
+      radial-gradient(900px 500px at -10% 18%, rgba(0,196,255,.10), transparent 55%),
+      var(--night);
+    color:var(--text);
+    font-family:var(--font-serif);
+    font-weight:400;
+    line-height:1.75;
+    -webkit-font-smoothing:antialiased;
+  }
+  a{color:inherit;}
+  h1,h2,h3,h4{font-family:var(--font-serif);font-weight:700;margin:0;color:#fff;letter-spacing:.01em;}
+  p{margin:0 0 16px;color:var(--text-dim);}
+  code,pre{font-family:var(--font-mono);}
+  ::selection{background:rgba(26,111,255,.35);}
+
+  /* ---------- layout ---------- */
+  .layout{display:flex;align-items:flex-start;min-height:100vh;}
+  .sidebar{
+    position:sticky;top:0;height:100vh;width:var(--sidebar-w);flex-shrink:0;
+    border-right:1px solid var(--border-soft);
+    background:linear-gradient(180deg, rgba(16,24,46,.7), rgba(10,14,26,.55));
+    backdrop-filter:blur(6px);
+    overflow-y:auto;
+    padding:28px 22px 40px;
+    z-index:40;
+  }
+  .brand{display:flex;align-items:center;gap:11px;margin-bottom:6px;text-decoration:none;}
+  .brand__mark{width:30px;height:30px;flex-shrink:0;}
+  .brand__name{font-size:16.5px;font-weight:700;color:#fff;letter-spacing:.02em;}
+  .brand__sub{font-size:11px;color:var(--text-mute);letter-spacing:.14em;text-transform:uppercase;margin:2px 0 26px 41px;}
+  .navlist{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:2px;}
+  .navlist a{
+    display:flex;gap:10px;align-items:baseline;
+    padding:9px 10px;border-radius:9px;
+    font-size:13px;color:var(--text-dim);text-decoration:none;
+    border-left:2px solid transparent;
+    transition:background .15s,color .15s;
+  }
+  .navlist a:hover{background:rgba(255,255,255,.04);color:var(--text);}
+  .navlist a.is-active{background:rgba(26,111,255,.14);color:#fff;border-left:2px solid var(--cyan);}
+  .navlist .no{font-family:var(--font-mono);font-size:11px;color:var(--text-mute);min-width:16px;}
+  .navlist a.is-active .no{color:var(--cyan);}
+  .navgroup-label{font-size:10.5px;color:var(--text-mute);text-transform:uppercase;letter-spacing:.14em;margin:22px 0 8px 10px;}
+  .sidebar__foot{margin-top:28px;padding:14px 12px;border:1px solid var(--border-soft);border-radius:10px;font-size:11.5px;color:var(--text-mute);line-height:1.6;}
+
+  .main{flex:1;min-width:0;}
+  .content{max-width:900px;margin:0 auto;padding:0 48px 140px;}
+
+  /* ---------- hero ---------- */
+  .hero{padding:86px 48px 54px;max-width:996px;margin:0 auto;}
+  .eyebrow{
+    display:inline-flex;align-items:center;gap:8px;
+    font-family:var(--font-mono);font-size:11.5px;letter-spacing:.16em;text-transform:uppercase;
+    color:var(--cyan);margin-bottom:22px;
+  }
+  .eyebrow::before{content:'';width:7px;height:7px;border-radius:50%;background:var(--cyan);box-shadow:0 0 10px var(--cyan);}
+  .hero h1{font-size:44px;line-height:1.22;max-width:15ch;}
+  .hero h1 .accent{background:linear-gradient(90deg,var(--cyan),var(--blue) 70%);-webkit-background-clip:text;background-clip:text;color:transparent;}
+  .hero__lede{font-size:16.5px;color:var(--text-dim);max-width:640px;margin:22px 0 0;line-height:1.85;}
+  .hero__q{
+    margin-top:30px;display:flex;flex-direction:column;gap:9px;
+    font-size:13.5px;color:var(--text-mute);
+  }
+  .hero__q b{color:var(--text-dim);font-weight:600;}
+
+  .hero__stage{
+    margin-top:52px;display:grid;grid-template-columns:1.35fr .95fr;gap:22px;align-items:start;
+  }
+  @media (max-width:820px){.hero__stage{grid-template-columns:1fr;}}
+
+  /* fake browser window */
+  .mockwin{
+    border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;
+    background:var(--panel);box-shadow:0 30px 70px -30px rgba(0,0,0,.6);
+  }
+  .mockwin__bar{
+    display:flex;align-items:center;gap:8px;padding:10px 14px;
+    background:var(--panel-2);border-bottom:1px solid var(--border-soft);
+  }
+  .mockwin__dot{width:8px;height:8px;border-radius:50%;background:var(--border);}
+  .mockwin__url{
+    margin-left:8px;flex:1;font-family:var(--font-mono);font-size:11px;color:var(--text-mute);
+    background:var(--night-2);border:1px solid var(--border-soft);border-radius:6px;padding:4px 10px;
+  }
+  .mockwin__body{padding:20px 20px 22px;display:flex;flex-direction:column;gap:13px;}
+  .mockwin__title{font-size:12px;color:var(--text-mute);font-family:var(--font-mono);letter-spacing:.05em;margin-bottom:2px;}
+  .mock-field{position:relative;}
+  .mock-field label{display:block;font-size:11.5px;color:var(--text-mute);margin-bottom:5px;font-family:var(--font-mono);}
+  .mock-field .box{
+    border:1px solid var(--border);border-radius:8px;background:var(--night-2);
+    padding:9px 11px;font-size:13px;color:var(--text-dim);
+  }
+  .mock-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
+  .tag-chip{
+    position:absolute;top:-8px;left:-8px;
+    width:18px;height:18px;border-radius:5px;
+    background:var(--panel-3);border:1px solid var(--border);
+    font-family:var(--font-mono);font-size:9.5px;color:var(--cyan);
+    display:flex;align-items:center;justify-content:center;z-index:2;
+  }
+  .mock-submit{
+    margin-top:3px;align-self:flex-start;
+    background:linear-gradient(90deg,var(--blue),var(--cyan));
+    color:#04101f;font-weight:700;font-size:12.5px;
+    padding:9px 18px;border-radius:8px;position:relative;
+  }
+  .mock-submit .tag-chip{background:var(--gold);color:#2a1e00;border-color:var(--gold);}
+  .mock-submit .pulse-ring{
+    position:absolute;inset:-6px;border-radius:12px;border:1.5px solid var(--gold);
+    opacity:0;animation:pulseRing 2.6s ease-out infinite;
+  }
+  @keyframes pulseRing{
+    0%{opacity:.85;transform:scale(1);}
+    75%{opacity:0;transform:scale(1.18);}
+    100%{opacity:0;transform:scale(1.18);}
+  }
+  .mock-cursor{
+    position:absolute;right:-16px;bottom:-14px;font-size:15px;
+    animation:cursorNudge 2.6s ease-in-out infinite;
+    filter:drop-shadow(0 2px 4px rgba(0,0,0,.5));
+  }
+  @keyframes cursorNudge{
+    0%,100%{transform:translate(0,0) rotate(0deg);}
+    45%{transform:translate(-3px,-2px) rotate(-6deg);}
+    55%{transform:translate(-3px,-2px) rotate(-6deg);}
+  }
+
+  .hero__anno{
+    border:1px solid var(--border);border-radius:var(--radius);background:var(--panel);
+    padding:18px 18px 20px;display:flex;flex-direction:column;gap:12px;
+  }
+  .hero__anno-label{font-family:var(--font-mono);font-size:10.5px;color:var(--text-mute);text-transform:uppercase;letter-spacing:.1em;}
+  .code-block{
+    background:var(--night-2);border:1px solid var(--border-soft);border-radius:9px;
+    padding:13px 14px;font-family:var(--font-mono);font-size:12px;line-height:1.7;overflow-x:auto;
+  }
+  .tok-kw{color:var(--cyan);}
+  .tok-str{color:var(--gold);}
+  .tok-fn{color:#7fb0ff;}
+  .tok-com{color:var(--text-mute);font-style:italic;}
+  .tok-punct{color:var(--text-dim);}
+  .tok-num{color:#a7f5c8;}
+  .badge{
+    display:inline-flex;align-items:center;gap:6px;font-family:var(--font-mono);
+    font-size:11px;padding:3px 9px;border-radius:100px;border:1px solid var(--border);
+    color:var(--text-dim);white-space:nowrap;
+  }
+  .badge--t0{color:#7fd8ff;border-color:rgba(0,196,255,.35);background:rgba(0,196,255,.07);}
+  .badge--t1{color:#8fe3b8;border-color:rgba(90,220,160,.3);background:rgba(90,220,160,.06);}
+  .badge--t2{color:var(--gold);border-color:rgba(245,200,66,.4);background:rgba(245,200,66,.08);}
+  .badge--t3{color:var(--danger);border-color:rgba(255,84,112,.4);background:rgba(255,84,112,.08);}
+  .badge--reuse{color:#b9c2e6;border-color:var(--border);background:var(--panel-2);}
+  .hero__anno-note{font-size:12.5px;color:var(--text-mute);line-height:1.65;}
+
+  /* ---------- sections ---------- */
+  .section{padding:64px 0 8px;border-top:1px solid var(--border-soft);}
+  .section:first-of-type{border-top:none;}
+  .section-head{margin-bottom:26px;}
+  .section-no{font-family:var(--font-mono);color:var(--cyan);font-size:13px;letter-spacing:.06em;}
+  .section h2{font-size:27px;margin-top:8px;line-height:1.35;}
+  .section-tag{font-family:var(--font-mono);font-size:11px;color:var(--text-mute);letter-spacing:.08em;text-transform:uppercase;margin-top:8px;}
+  .lede{font-size:15.5px;color:var(--text-dim);max-width:740px;}
+  .section h3{font-size:17.5px;color:#fff;margin:30px 0 12px;}
+  .section h3 .mono-code{font-family:var(--font-mono);font-size:14px;color:var(--cyan);background:rgba(0,196,255,.08);padding:2px 8px;border-radius:6px;margin-right:8px;border:1px solid rgba(0,196,255,.25);}
+  .section ul,.section ol{color:var(--text-dim);padding-left:22px;margin:0 0 16px;}
+  .section li{margin-bottom:8px;}
+  .section li::marker{color:var(--text-mute);}
+  strong{color:#fff;font-weight:600;}
+
+  .callout{
+    display:flex;gap:14px;border:1px solid var(--border);border-radius:12px;
+    background:var(--panel);padding:16px 18px;margin:22px 0;
+  }
+  .callout--gold{border-color:rgba(245,200,66,.3);background:rgba(245,200,66,.05);}
+  .callout__icon{flex-shrink:0;font-family:var(--font-mono);font-size:11px;color:var(--gold);border:1px solid rgba(245,200,66,.4);border-radius:6px;padding:2px 7px;height:fit-content;}
+  .callout p{margin:0;font-size:14px;color:var(--text-dim);}
+
+  .card-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:16px;margin:20px 0;}
+  @media (max-width:720px){.card-grid{grid-template-columns:1fr;}}
+  .card{border:1px solid var(--border);border-radius:12px;background:var(--panel);padding:18px 19px;}
+  .card h4{font-size:14.5px;color:#fff;margin-bottom:8px;display:flex;align-items:center;gap:8px;}
+  .card p{font-size:13.5px;margin:0;color:var(--text-dim);}
+  .card .k{font-family:var(--font-mono);font-size:10.5px;color:var(--cyan);background:rgba(0,196,255,.1);border:1px solid rgba(0,196,255,.25);padding:2px 6px;border-radius:5px;}
+
+  .table-wrap{overflow-x:auto;margin:20px 0 28px;border:1px solid var(--border);border-radius:12px;}
+  table{width:100%;border-collapse:collapse;font-size:13.5px;min-width:560px;}
+  th{
+    text-align:left;font-family:var(--font-mono);font-weight:600;font-size:11px;letter-spacing:.05em;text-transform:uppercase;
+    color:var(--text-mute);background:var(--panel-2);padding:12px 16px;border-bottom:1px solid var(--border);white-space:nowrap;
+  }
+  td{padding:12px 16px;border-bottom:1px solid var(--border-soft);color:var(--text-dim);vertical-align:top;}
+  tr:last-child td{border-bottom:none;}
+  td strong{display:block;color:#fff;margin-bottom:2px;}
+  .table-wrap table tr:hover td{background:rgba(255,255,255,.02);}
+
+  pre.code{
+    background:var(--panel);border:1px solid var(--border);border-radius:12px;
+    padding:18px 20px;overflow-x:auto;font-size:12.5px;line-height:1.8;margin:18px 0 24px;
+  }
+  pre.code .ln{color:var(--text-mute);margin-right:14px;user-select:none;}
+
+  /* layer stack diagram */
+  .layerstack{display:flex;flex-direction:column;gap:9px;margin:26px 0 30px;}
+  .layer{
+    display:grid;grid-template-columns:64px 170px 1fr auto;gap:16px;align-items:center;
+    border:1px solid var(--border);border-radius:10px;background:var(--panel);
+    padding:14px 18px;position:relative;
+  }
+  @media (max-width:720px){.layer{grid-template-columns:44px 1fr;grid-template-rows:auto auto;}
+    .layer .layer__desc{grid-column:2;}
+    .layer .layer__reuse{grid-column:2;}
+  }
+  .layer::before{content:'';position:absolute;left:32px;top:100%;width:1px;height:9px;background:var(--border);}
+  .layer:last-child::before{display:none;}
+  .layer__code{font-family:var(--font-mono);font-size:12px;color:var(--cyan);text-align:center;border:1px solid rgba(0,196,255,.3);border-radius:8px;padding:8px 0;background:rgba(0,196,255,.06);}
+  .layer__name{font-size:14.5px;color:#fff;font-weight:600;}
+  .layer__desc{font-size:12.5px;color:var(--text-dim);}
+  .layer__reuse{font-size:10.5px;}
+  .layer--io{border-style:dashed;background:transparent;}
+  .layer--io .layer__code{color:var(--gold);border-color:rgba(245,200,66,.35);background:rgba(245,200,66,.07);}
+
+  /* timeline / case walk */
+  .timeline{display:flex;flex-direction:column;margin:22px 0 10px;}
+  .tl-step{display:grid;grid-template-columns:40px 1fr;gap:16px;position:relative;padding-bottom:26px;}
+  .tl-step:last-child{padding-bottom:0;}
+  .tl-step__dot{
+    width:26px;height:26px;border-radius:50%;background:var(--panel-2);border:1px solid var(--border);
+    display:flex;align-items:center;justify-content:center;font-family:var(--font-mono);font-size:11px;color:var(--cyan);
+    flex-shrink:0;z-index:1;
+  }
+  .tl-step::after{content:'';position:absolute;left:12px;top:26px;bottom:0;width:1px;background:var(--border);}
+  .tl-step:last-child::after{display:none;}
+  .tl-step__body{padding-top:1px;}
+  .tl-step__title{font-size:14px;color:#fff;font-weight:600;margin-bottom:4px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
+  .tl-step__desc{font-size:13px;color:var(--text-dim);}
+
+  /* roadmap */
+  .roadmap{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin:22px 0;}
+  @media (max-width:760px){.roadmap{grid-template-columns:1fr;}}
+  .rm-phase{border:1px solid var(--border);border-radius:12px;padding:18px;background:var(--panel);}
+  .rm-phase__tag{font-family:var(--font-mono);font-size:11px;color:var(--night);background:var(--cyan);display:inline-block;padding:3px 10px;border-radius:100px;font-weight:700;margin-bottom:12px;}
+  .rm-phase--p1 .rm-phase__tag{background:var(--blue);color:#fff;}
+  .rm-phase--p2 .rm-phase__tag{background:var(--gold);color:#241a00;}
+  .rm-phase ul{padding-left:18px;margin:0;}
+  .rm-phase li{font-size:12.8px;margin-bottom:9px;color:var(--text-dim);}
+
+  footer.doc-foot{margin-top:70px;padding-top:26px;border-top:1px solid var(--border-soft);font-size:12px;color:var(--text-mute);}
+  footer.doc-foot a{color:var(--cyan);text-decoration:none;}
+
+  @media (max-width:960px){
+    .layout{flex-direction:column;}
+    .sidebar{
+      position:sticky;top:0;width:100%;height:auto;flex-direction:row;
+      display:flex;align-items:center;padding:12px 14px;overflow-x:auto;overflow-y:hidden;
+      white-space:nowrap;gap:4px;
+    }
+    .brand,.brand__sub,.navgroup-label,.sidebar__foot{display:none;}
+    .navlist{flex-direction:row;gap:4px;}
+    .navlist a{padding:7px 11px;border-left:none;border-bottom:2px solid transparent;white-space:nowrap;}
+    .navlist a.is-active{border-left:none;border-bottom:2px solid var(--cyan);}
+    .hero{padding:44px 22px 30px;}
+    .hero h1{font-size:32px;}
+    .content{padding:0 22px 100px;}
+  }
+</style>
+</head>
+<body>
+<div class="layout">
+
+  <nav class="sidebar" id="sidebar">
+    <a href="#hero" class="brand">
+      <svg class="brand__mark" viewBox="0 0 32 32" fill="none">
+        <path d="M16 2 L28 26 L16 21 L4 26 Z" fill="url(#sailgrad)"/>
+        <defs><linearGradient id="sailgrad" x1="4" y1="2" x2="28" y2="26"><stop offset="0" stop-color="#00c4ff"/><stop offset="1" stop-color="#1a6fff"/></linearGradient></defs>
+      </svg>
+      <span class="brand__name">Vela · 织帆</span>
+    </a>
+    <div class="brand__sub">驭屏引擎设计方案</div>
+    <ul class="navlist">
+      <li><a href="#sec-01"><span class="no">01</span>问题定义</a></li>
+      <li><a href="#sec-02"><span class="no">02</span>核心机制拆解</a></li>
+      <li><a href="#sec-03"><span class="no">03</span>场景差异对比</a></li>
+      <li><a href="#sec-04"><span class="no">04</span>总体架构</a></li>
+      <li><a href="#sec-05"><span class="no">05</span>关键机制详解</a></li>
+      <li><a href="#sec-06"><span class="no">06</span>既有架构集成</a></li>
+      <li><a href="#sec-07"><span class="no">07</span>接入指南</a></li>
+      <li><a href="#sec-08"><span class="no">08</span>风险分级矩阵</a></li>
+      <li><a href="#sec-09"><span class="no">09</span>落地路线图</a></li>
+      <li><a href="#sec-10"><span class="no">10</span>开源方案对照</a></li>
+      <li><a href="#sec-11"><span class="no">11</span>参考资料</a></li>
+    </ul>
+    <div class="sidebar__foot">面向 Vela·织帆 平台的架构设计文档<br>技术栈:FastAPI · Vue3 · LangGraph · Playwright · MCP</div>
+  </nav>
+
+  <div class="main">
+    <header class="hero" id="hero">
+      <div class="eyebrow">Vela Architecture Design · 驭屏引擎 ScreenPilot</div>
+      <h1>让 Agent 像新员工一样<br><span class="accent">直接操作</span>企业内系统</h1>
+      <p class="hero__lede">参照 Computer Use 与浏览器智能体的核心实现机制,为 Vela 设计一套可私有化部署、可强制治理、可完整审计的企业内应用系统操作能力 —— 当系统没有 API,界面就是最后一公里的接口。</p>
+      <div class="hero__q">
+        <div><b>Q1 ·</b> 这类能力的实现机制是什么</div>
+        <div><b>Q2 ·</b> 如何为已有 Agent 增加这个能力</div>
+        <div><b>Q3 ·</b> Vela 的具体实现方案</div>
+      </div>
+
+      <div class="hero__stage">
+        <div class="mockwin">
+          <div class="mockwin__bar">
+            <div class="mockwin__dot"></div><div class="mockwin__dot"></div><div class="mockwin__dot"></div>
+            <div class="mockwin__url">oa.internal.corp/expense/new</div>
+          </div>
+          <div class="mockwin__body">
+            <div class="mockwin__title">// 差旅报销单 · 无障碍树 + 截图双通道观测,已由 GND 层完成 SoM 标注</div>
+            <div class="mock-field">
+              <span class="tag-chip">1</span>
+              <label>费用类型</label>
+              <div class="box">出差 · 交通</div>
+            </div>
+            <div class="mock-row">
+              <div class="mock-field">
+                <span class="tag-chip">2</span>
+                <label>金额</label>
+                <div class="box">¥ 1,280.00</div>
+              </div>
+              <div class="mock-field">
+                <span class="tag-chip">3</span>
+                <label>附件</label>
+                <div class="box">发票_09.pdf</div>
+              </div>
+            </div>
+            <div class="mock-field">
+              <span class="tag-chip">4</span>
+              <label>摘要</label>
+              <div class="box">7月出差往返机票及地面交通</div>
+            </div>
+            <div class="mock-submit">
+              <div class="pulse-ring"></div>
+              <span class="tag-chip">7</span>
+              提交审批
+              <span class="mock-cursor">🖱️</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="hero__anno">
+          <div class="hero__anno-label">驭屏引擎 · 即将下发的动作</div>
+          <div class="code-block"><span class="tok-fn">ui_act</span><span class="tok-punct">(</span>{
+  <span class="tok-kw">action</span><span class="tok-punct">:</span> <span class="tok-str">"click"</span>,
+  <span class="tok-kw">target_ref</span><span class="tok-punct">:</span> <span class="tok-str">"[7]"</span>,
+  <span class="tok-kw">risk_tier</span><span class="tok-punct">:</span> <span class="tok-str">"T3"</span>
+<span class="tok-punct">})</span></div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <span class="badge badge--t3">T3 · 关键动作</span>
+            <span class="badge badge--reuse">命中 HITL 网关</span>
+          </div>
+          <p class="hero__anno-note">"提交审批"被识别为状态变更类关键动作,执行前将暂停并把表单摘要推送给人工确认 —— 这条规则不受 Agent 自主模式开关影响,详见第 05、08 节。</p>
+        </div>
+      </div>
+    </header>
+
+    <div class="content">
+
+      <section class="section" id="sec-01">
+        <div class="section-head">
+          <div class="section-no">01</div>
+          <h2>问题定义:为什么企业内系统需要 Computer Use 能力</h2>
+        </div>
+        <p class="lede">大型国企 / 央企内部系统的现实是:OA、ERP、财务、采购、一码通等系统大量缺乏可用 API,或 API 开放程度低、审批链路复杂、系统年代久远。人工在界面上点击操作,是当前唯一稳定、覆盖所有系统的交互方式。</p>
+
+        <h3>核心价值:把"人工操作界面"变成 Agent 的通用集成手段</h3>
+        <p>Computer Use 类技术的价值在于让 Agent 通过"看屏幕、点鼠标、敲键盘"的方式,像一个新入职员工一样直接使用现有系统界面完成任务 —— 不需要每接入一个系统就单独开发一套 API 集成、申请一次接口权限、等待一轮系统改造排期。这对本来就存在大量"长尾系统"的大型企业尤其有吸引力:一年可能只用到十几次的老系统,值不得做 API 对接,但值得让 Agent 学会怎么点。</p>
+
+        <div class="card-grid">
+          <div class="card">
+            <h4><span class="k">现状</span>系统碎片化</h4>
+            <p>央企 / 国企内部往往并存几十上百套系统,新老交替、厂商不一,API 成熟度参差不齐,统一集成成本极高。</p>
+          </div>
+          <div class="card">
+            <h4><span class="k">现状</span>长尾系统占比高</h4>
+            <p>大量低频但关键的系统(某类审批、某个填报入口)使用量不足以支撑专门的 API 对接投入,长期只能靠人工操作。</p>
+          </div>
+          <div class="card">
+            <h4><span class="k">诉求</span>可私有化、可治理</h4>
+            <p>不同于面向个人用户的浏览器智能体,企业场景要求私有化部署、强制人工在环、完整审计留痕,不能只靠模型自律。</p>
+          </div>
+          <div class="card">
+            <h4><span class="k">诉求</span>可复用既有基础设施</h4>
+            <p>不应重新发明凭据管理、风险治理、审计体系,而要接入 Vela 已有的 Integration Gateway、HITL 网关、MemoryGateway 风险打分范式。</p>
+          </div>
+        </div>
+
+        <div class="callout callout--gold">
+          <div class="callout__icon">边界</div>
+          <p>驭屏引擎不是要替代更可靠的 API / MCP 集成方式 —— 凡是能走标准 API 或已有 MCP Server 的场景,应当优先走 API。操作界面是"没有 API,或改造成本 / 周期不可接受"时的补充路径与兜底手段,不是默认路径。这一定位贯穿全文的架构取舍。</p>
+        </div>
+      </section>
+
+      <section class="section" id="sec-02">
+        <div class="section-head">
+          <div class="section-no">02</div>
+          <h2>Computer Use / 浏览器智能体的核心实现机制拆解</h2>
+          <div class="section-tag">回答 Q1 · 这类能力的实现机制是什么</div>
+        </div>
+        <p class="lede">不管是 Anthropic 的 Computer Use API、Claude in Chrome,还是各类研究型 Web Agent(WebVoyager、VisualWebArena 等),背后都是同一套"感知 → 定位 → 动作 → 验证"的循环,差异主要体现在感知与定位这两个环节。</p>
+
+        <h3><span class="mono-code">01</span>感知(Perception):Agent 怎么"看到"当前界面</h3>
+        <p>Agent 每一步决策前,都需要先获得当前界面状态,常见有两种基础信息源,通常配合使用:</p>
+        <ul>
+          <li><strong>截图(Screenshot)</strong> —— 像素级视觉信息,普适性最强:不管背后是网页、桌面客户端,还是十年前的 C/S 架构老系统,只要能截屏就能观测。这也是 Anthropic Computer Use 工具采取的核心方式 —— 模型直接接收截图作为输入来判断下一步动作。</li>
+          <li><strong>DOM / 无障碍树(Accessibility Tree)</strong> —— 针对标准 Web 应用,可以拿到结构化的元素树(角色、文本、坐标、可交互状态),信息更精确、噪音更小,但依赖页面本身的实现质量;大量使用 canvas 绘制或无语义 div 堆砌的页面,无障碍树的价值会明显打折。</li>
+        </ul>
+
+        <h3><span class="mono-code">02</span>定位(Grounding):机制里最关键的一环</h3>
+        <p>模型知道"要点提交按钮"还不够,必须把这个意图转换成可执行的坐标或元素引用 —— 这一步叫 grounding。主流有三种范式:</p>
+
+        <div class="table-wrap">
+          <table>
+            <tr><th>范式</th><th>原理</th><th>优势</th><th>局限</th></tr>
+            <tr>
+              <td><strong>视觉坐标定位</strong></td>
+              <td>模型直接从截图预测像素坐标,从屏幕边缘、已知元素等参照点"数像素"确定目标位置</td>
+              <td>普适性最强,任何 GUI(网页 / 桌面 / 遗留控件)都能用</td>
+              <td>坐标预测本身有误差,分辨率与缩放变化会带来干扰</td>
+            </tr>
+            <tr>
+              <td><strong>标记定位(Set-of-Marks)</strong></td>
+              <td>程序先在截图上给每个可交互元素画编号框,模型只需在动作里引用编号而非猜坐标</td>
+              <td>可靠性显著优于纯坐标预测,常与无障碍树文本信息配合使用</td>
+              <td>依赖能拿到较完整的可交互元素列表,对纯 canvas 渲染效果有限</td>
+            </tr>
+            <tr>
+              <td><strong>纯结构化定位</strong></td>
+              <td>直接用 DOM 选择器 / ARIA 属性定位元素,不依赖视觉</td>
+              <td>速度最快、成本最低,最易做确定性重放</td>
+              <td>覆盖不了 canvas 图表、遗留控件等非标准渲染场景</td>
+            </tr>
+          </table>
+        </div>
+        <p style="font-size:12.5px;color:var(--text-mute);margin-top:-12px;">标记定位(Set-of-Marks / SoM)由学术界于 2023 年提出并在 WebVoyager、VisualWebArena 等研究型 Web Agent 中被广泛采用,通常与无障碍树信息配合,兼顾精确性与语义理解 —— 详见第 11 节参考资料。</p>
+
+        <h3><span class="mono-code">03</span>动作空间(Action Space):收敛成一套原子操作</h3>
+        <p>不管底层走哪种定位范式,暴露给模型的动作集合通常都收敛成一套很小的原子操作:导航、点击、输入、选择、滚动、等待、上传、截图、提取。这套集合通过标准的工具调用(tool_use)机制交给模型 —— 模型返回结构化的动作请求,执行侧负责真正落地,再把结果(通常是新的截图 / 状态)传回去。这也是 Anthropic Computer Use API 的基本工作方式:模型返回 <code style="color:var(--cyan)">tool_use</code> 动作,应用在受控的沙箱环境里执行,再把结果作为 <code style="color:var(--cyan)">tool_result</code> 回传,如此循环往复。</p>
+
+        <h3><span class="mono-code">04</span>Agent Loop:观察 → 思考 → 行动 → 验证</h3>
+        <p>循环持续到任务完成或需要人工介入。"验证"环节最容易被低估却至关重要 —— 每次动作后都要确认界面是否真的发生了预期变化(页面跳转了吗?字段真的填进去了吗?),而不是假设动作一定成功;一旦发现异常,要能回退重新观察规划,而不是继续闷头往下走。</p>
+
+        <h3><span class="mono-code">05</span>安全机制:护栏思路是企业化设计的直接依据</h3>
+        <p>这类能力天生高风险,因为 Agent"看到什么就可能被什么误导"。Anthropic 在 Claude for Chrome 上验证过几条很值得借鉴的护栏设计:按站点 / 域名做权限颗粒度控制;对"发布、购买、分享个人数据"这类高风险动作,即便用户开启了自主模式也仍保留强制确认;并专门训练了针对提示词注入的分类器 —— 检测到疑似注入指令时,会引导模型停下来向用户确认而非直接执行。公开的红队测试数据显示,这类专项防护能把浏览器特定攻击的成功率从 35.7% 降到 0%,整体提示词注入攻击成功率从 23.6% 降到 11.2%。</p>
+        <div class="callout">
+          <div class="callout__icon">启示</div>
+          <p>11.2% 仍意味着约九分之一的攻击可能得手 —— 这说明"模型自律 + 用户临场确认"在企业无人值守场景里远远不够。第 05、08 节里,驭屏引擎把"关键动作强制确认"做成不可关闭的硬约束,而非可选项,正是对这一点的直接回应。</p>
+        </div>
+      </section>
+
+      <section class="section" id="sec-03">
+        <div class="section-head">
+          <div class="section-no">03</div>
+          <h2>企业内系统场景 vs 开放 Web 场景的关键差异</h2>
+        </div>
+        <p class="lede">通用 Computer Use / 浏览器智能体面向的是开放互联网、有人实时在场监督的场景。企业内系统操作的假设完全不同 —— 这些差异直接决定了驭屏引擎不能照搬通用方案,而要做针对性的架构取舍。</p>
+        <div class="table-wrap">
+          <table>
+            <tr><th>维度</th><th>开放互联网场景</th><th>企业内系统场景(Vela 需应对)</th></tr>
+            <tr><td><strong>部署边界</strong></td><td>可调用云端 API / 云端模型</td><td>必须私有化部署,截图 / DOM / 模型推理均不出内网</td></tr>
+            <tr><td><strong>系统形态</strong></td><td>以现代 B/S 网页为主</td><td>大量遗留 C/S 桌面客户端与老旧 B/S 系统并存</td></tr>
+            <tr><td><strong>定位范式优先级</strong></td><td>视觉坐标定位为主(通用性优先)</td><td>DOM / 无障碍树 + SoM 优先(更快、更省、更可审计),视觉兜底遗留控件</td></tr>
+            <tr><td><strong>凭据处理</strong></td><td>用户当场手动登录 / 授权</td><td>必须走 Vault / KMS 托管代理,凭据不进入模型上下文</td></tr>
+            <tr><td><strong>执行频率</strong></td><td>多为一次性 / 低频任务</td><td>大量周期性重复任务(报销、对账、审批查询)→ 需要"编译固化 + 确定性重放"</td></tr>
+            <tr><td><strong>风险容忍度</strong></td><td>用户实时在场,可随时打断</td><td>无人值守场景居多,必须靠强制网关兜底,而非临场监督</td></tr>
+            <tr><td><strong>审计要求</strong></td><td>一般无强制留痕要求</td><td>需要完整、不可篡改的操作留痕,对齐企业审计 / 合规要求</td></tr>
+            <tr><td><strong>注入攻击暴露面</strong></td><td>面对整个公网,暴露面极大</td><td>相对封闭的内网环境,但一旦发生,影响涉及真实业务数据</td></tr>
+          </table>
+        </div>
+      </section>
+
+      <section class="section" id="sec-04">
+        <div class="section-head">
+          <div class="section-no">04</div>
+          <h2>驭屏引擎总体架构:七层 + 一个接口层</h2>
+          <div class="section-tag">回答 Q3 · Vela 的实现方案</div>
+        </div>
+        <p class="lede">对应第 03 节的差异,驭屏引擎(内部代号 <strong>驭屏 · ScreenPilot</strong>,与既有 <strong>驭码</strong> 代码 Agent Harness 体系并列)划分为七个能力层,并以标准 MCP 协议对外暴露 —— 任何 Vela 内的 LangGraph Agent 都能像调用其他工具一样调用它。</p>
+
+        <div class="layerstack">
+          <div class="layer layer--io">
+            <div class="layer__code">MCP</div>
+            <div class="layer__name">接口暴露层</div>
+            <div class="layer__desc">以标准 MCP Server 提供 ui_navigate / ui_observe / ui_act / ui_extract / ui_replay_skill 等工具</div>
+            <div class="layer__reuse"><span class="badge badge--reuse">对外统一接口</span></div>
+          </div>
+          <div class="layer">
+            <div class="layer__code">L4<br>RSN</div>
+            <div class="layer__name">推理决策层</div>
+            <div class="layer__desc">LangGraph 构建的 Observe–Plan–Act–Verify 子图,由 Qwen / DeepSeek 驱动任务分解与逐步规划</div>
+            <div class="layer__reuse"></div>
+          </div>
+          <div class="layer">
+            <div class="layer__code">L1<br>PER</div>
+            <div class="layer__name">感知层</div>
+            <div class="layer__desc">截图 + DOM / 无障碍树双通道采集,时间戳对齐,消除"看到的"与"能点的"不一致</div>
+            <div class="layer__reuse"></div>
+          </div>
+          <div class="layer">
+            <div class="layer__code">L2<br>GND</div>
+            <div class="layer__name">定位层</div>
+            <div class="layer__desc">Set-of-Marks 编号标注 + 多候选选择器指纹库,支撑失效自愈</div>
+            <div class="layer__reuse"></div>
+          </div>
+          <div class="layer">
+            <div class="layer__code">L3<br>ACT</div>
+            <div class="layer__name">动作执行层</div>
+            <div class="layer__desc">Playwright 驱动池(浏览器模式)+ 桌面控制通道(截图 + 坐标,兜底遗留 C/S 客户端)</div>
+            <div class="layer__reuse"></div>
+          </div>
+          <div class="layer">
+            <div class="layer__code">L5<br>SKL</div>
+            <div class="layer__name">技能编译与缓存层</div>
+            <div class="layer__desc">首次探索执行的轨迹编译为可参数化、可确定性重放的技能,异常自愈退回 L4</div>
+            <div class="layer__reuse"><span class="badge badge--reuse">复用 Milvus / Neo4j</span></div>
+          </div>
+          <div class="layer">
+            <div class="layer__code">L6<br>CRD</div>
+            <div class="layer__name">凭据与会话代理层</div>
+            <div class="layer__desc">OAuth2.1 / Vault / KMS 托管,新增表单登录宏与 SSO 令牌交换适配器</div>
+            <div class="layer__reuse"><span class="badge badge--reuse">复用 Integration Gateway</span></div>
+          </div>
+          <div class="layer">
+            <div class="layer__code">L7<br>GOV</div>
+            <div class="layer__name">治理与审计层</div>
+            <div class="layer__desc">动作级风险分级、强制人工确认网关、不可篡改留痕</div>
+            <div class="layer__reuse"><span class="badge badge--reuse">复用 HITL 网关 + MemoryGateway 风险打分</span></div>
+          </div>
+        </div>
+        <p style="font-size:12.5px;color:var(--text-mute);">排列顺序即数据流向:MCP 接口接收任务 → RSN 规划 → PER 感知 → GND 定位 → ACT 执行 → 结果经 SKL 决定是否固化为技能 → 全程由 CRD 提供凭据、GOV 提供风险网关与审计。</p>
+      </section>
+
+      <section class="section" id="sec-05">
+        <div class="section-head">
+          <div class="section-no">05</div>
+          <h2>关键机制详解</h2>
+        </div>
+        <p class="lede">逐层展开实现要点,并以"提交一张差旅报销单"为例做端到端案例走查。</p>
+
+        <h3><span class="mono-code">L1 · PER</span>感知层:双通道采集</h3>
+        <ul>
+          <li>浏览器模式下,通过 Playwright 的无障碍树快照 API 拿到结构化元素信息,配合 CDP 截屏,两者按时间戳对齐,减少"看到的"和"能点的"不一致。</li>
+          <li>桌面模式(遗留 C/S 客户端)下无 DOM 可用,退化为纯截图观测。</li>
+        </ul>
+
+        <h3><span class="mono-code">L2 · GND</span>定位层:SoM 标注 + 选择器指纹库</h3>
+        <ul>
+          <li><strong>SoM 标注器</strong>:遍历无障碍树中可交互节点(role 为 button / link / textbox / combobox 等),在对应截图区域画编号框,生成"标注截图 + 编号↔元素映射表",提供给 RSN 层引用。</li>
+          <li><strong>选择器指纹库</strong>:为每个元素同时记录多种候选定位方式(id、稳定 CSS 路径、XPath、ARIA label、相对视觉位置),供 L5 技能重放时"自愈" —— 某一种定位方式失效时按优先级尝试下一种,而不是整任务失败。</li>
+          <li><strong>桌面模式兜底</strong>:无法获得无障碍树时(遗留控件、canvas 看板),回落到视觉坐标定位,与 Anthropic 原生 Computer Use 工具"从参照点数像素"的方式一致。</li>
+        </ul>
+
+        <h3><span class="mono-code">L3 · ACT</span>动作执行层:双执行后端</h3>
+        <ul>
+          <li><strong>浏览器模式</strong>:Playwright 驱动池,每个任务分配独立、隔离的浏览器上下文(不共享 cookie / 缓存),网络出口限定在系统注册表登记的域名白名单内。</li>
+          <li><strong>桌面模式</strong>:虚拟显示容器 + 坐标级鼠标键盘合成,覆盖浏览器触达不到的老旧 C/S 客户端(部分财务 / 一码通桌面端)。</li>
+          <li>每个动作执行后做<strong>验证</strong>:比较动作前后的 DOM / 截图差异或等待网络空闲,确认状态确实发生了预期变化,而非默认动作已成功。</li>
+        </ul>
+
+        <pre class="code"><span class="tok-com">// ui_action 工具 Schema —— L3/L4 之间的动作契约</span>
+{
+  <span class="tok-kw">"name"</span><span class="tok-punct">:</span> <span class="tok-str">"ui_action"</span>,
+  <span class="tok-kw">"description"</span><span class="tok-punct">:</span> <span class="tok-str">"在企业内系统页面上执行一个原子操作"</span>,
+  <span class="tok-kw">"input_schema"</span><span class="tok-punct">:</span> {
+    <span class="tok-kw">"type"</span><span class="tok-punct">:</span> <span class="tok-str">"object"</span>,
+    <span class="tok-kw">"properties"</span><span class="tok-punct">:</span> {
+      <span class="tok-kw">"action"</span><span class="tok-punct">:</span> {
+        <span class="tok-kw">"type"</span><span class="tok-punct">:</span> <span class="tok-str">"string"</span>,
+        <span class="tok-kw">"enum"</span><span class="tok-punct">:</span> [<span class="tok-str">"navigate"</span>,<span class="tok-str">"click"</span>,<span class="tok-str">"type"</span>,<span class="tok-str">"select"</span>,<span class="tok-str">"upload"</span>,<span class="tok-str">"scroll"</span>,<span class="tok-str">"wait"</span>,<span class="tok-str">"extract"</span>,<span class="tok-str">"screenshot"</span>]
+      },
+      <span class="tok-kw">"target_ref"</span><span class="tok-punct">:</span> {
+        <span class="tok-kw">"type"</span><span class="tok-punct">:</span> <span class="tok-str">"string"</span>,
+        <span class="tok-com">"description"</span><span class="tok-punct">:</span> <span class="tok-str">"元素引用编号,来自上一次 observe 返回的 SoM 标注,如 [12]"</span>
+      },
+      <span class="tok-kw">"risk_tier"</span><span class="tok-punct">:</span> {
+        <span class="tok-kw">"type"</span><span class="tok-punct">:</span> <span class="tok-str">"string"</span>,
+        <span class="tok-kw">"enum"</span><span class="tok-punct">:</span> [<span class="tok-str">"T0"</span>,<span class="tok-str">"T1"</span>,<span class="tok-str">"T2"</span>,<span class="tok-str">"T3"</span>],
+        <span class="tok-com">"description"</span><span class="tok-punct">:</span> <span class="tok-str">"由 GOV 层预标注,Agent 只读不可篡改"</span>
+      }
+    },
+    <span class="tok-kw">"required"</span><span class="tok-punct">:</span> [<span class="tok-str">"action"</span>]
+  }
+}</pre>
+
+        <h3><span class="mono-code">L4 · RSN</span>推理决策层:LangGraph 子图</h3>
+        <p>Observe–Plan–Act–Verify 循环用一个 LangGraph 子图表达,失败时回退重新观察规划,连续失败则升级人工:</p>
+        <pre class="code"><span class="tok-kw">from</span> langgraph.graph <span class="tok-kw">import</span> StateGraph, END
+
+<span class="tok-kw">def</span> <span class="tok-fn">observe_node</span>(state):
+    <span class="tok-com"># PER + GND:截图 + 无障碍树 + SoM 标注</span>
+    state[<span class="tok-str">"obs"</span>] = perceive(state[<span class="tok-str">"session"</span>])
+    <span class="tok-kw">return</span> state
+
+<span class="tok-kw">def</span> <span class="tok-fn">plan_node</span>(state):
+    <span class="tok-com"># RSN:调用 Qwen / DeepSeek 规划下一步动作</span>
+    state[<span class="tok-str">"action"</span>] = llm_plan(state[<span class="tok-str">"goal"</span>], state[<span class="tok-str">"obs"</span>], state[<span class="tok-str">"history"</span>])
+    <span class="tok-kw">return</span> state
+
+<span class="tok-kw">def</span> <span class="tok-fn">act_node</span>(state):
+    <span class="tok-com"># ACT:Playwright 驱动池 / 桌面控制通道执行,GOV 网关在此拦截 T2/T3 动作</span>
+    state[<span class="tok-str">"result"</span>] = execute(state[<span class="tok-str">"action"</span>])
+    <span class="tok-kw">return</span> state
+
+<span class="tok-kw">def</span> <span class="tok-fn">verify_node</span>(state):
+    state[<span class="tok-str">"ok"</span>] = verify(state[<span class="tok-str">"result"</span>], state[<span class="tok-str">"action"</span>])
+    <span class="tok-kw">return</span> state
+
+<span class="tok-kw">def</span> <span class="tok-fn">route</span>(state):
+    <span class="tok-kw">if</span> state[<span class="tok-str">"ok"</span>] <span class="tok-kw">and</span> state[<span class="tok-str">"done"</span>]:
+        <span class="tok-kw">return</span> END
+    <span class="tok-kw">if</span> <span class="tok-kw">not</span> state[<span class="tok-str">"ok"</span>] <span class="tok-kw">and</span> state[<span class="tok-str">"retries"</span>] < <span class="tok-num">3</span>:
+        <span class="tok-kw">return</span> <span class="tok-str">"observe"</span>
+    <span class="tok-kw">if</span> <span class="tok-kw">not</span> state[<span class="tok-str">"ok"</span>]:
+        <span class="tok-kw">return</span> <span class="tok-str">"escalate_human"</span>  <span class="tok-com"># 超过重试上限,升级人工而非继续尝试</span>
+    <span class="tok-kw">return</span> <span class="tok-str">"observe"</span>
+
+graph = StateGraph(dict)
+graph.add_node(<span class="tok-str">"observe"</span>, observe_node)
+graph.add_node(<span class="tok-str">"plan"</span>, plan_node)
+graph.add_node(<span class="tok-str">"act"</span>, act_node)
+graph.add_node(<span class="tok-str">"verify"</span>, verify_node)
+graph.add_conditional_edges(<span class="tok-str">"verify"</span>, route)</pre>
+
+        <h3><span class="mono-code">L5 · SKL</span>技能编译与缓存层:探索一次,确定性重放</h3>
+        <p>企业里大量任务是周期性重复的(周报销、月对账)。若每次都全程 LLM 逐步推理,成本高、结果有波动、也难以向审计解释"为什么这次点了不同的按钮"。因此:</p>
+        <ul>
+          <li><strong>首次执行</strong>走完整 Agent Loop,同时把每一步(动作类型、目标元素指纹、输入值来源、验证结果)记录为轨迹。</li>
+          <li><strong>技能编译</strong>把轨迹抽象成参数化模板(具体输入值替换为参数占位符),存入技能库 —— Neo4j 存"任务 – 步骤 – 系统"关系图,Milvus 存任务描述向量,供后续按语义相似度检索匹配。</li>
+          <li><strong>确定性重放</strong>后续同类任务直接按模板执行,不逐步过 LLM;只在某一步全部候选定位方式都失效时,才触发自愈 —— 升级回 L4 做局部重新规划,修复成功后更新技能模板。</li>
+        </ul>
+        <div class="callout">
+          <div class="callout__icon">对照</div>
+          <p>这一思路与开源项目 Skyvern 的做法接近:先在真实浏览器里跑一遍并记录动作,生成可缓存复用的工作流,界面变化时靠 AI 能力自愈而无需人工重写脚本。区别在于,驭屏引擎需要在私有化环境内闭环完成整个编译 / 重放过程,并把它纳入 GOV 层的审计留痕。</p>
+        </div>
+
+        <h3><span class="mono-code">L6 · CRD</span>凭据与会话代理层:复用 Integration Gateway</h3>
+        <ul>
+          <li>直接复用既有 Integration Gateway 的 OAuth 2.1、RFC 9728/8707 令牌绑定、Vault / KMS 托管体系,不重新发明凭据管理。</li>
+          <li>新增<strong>表单登录宏</strong>:遇到不支持 OAuth 的老系统,预置一段确定性的、非 LLM 驱动的登录脚本,由 GND 层固定选择器执行 —— 登录环节风险太高,不适合交给推理型 Agent 临场决定。</li>
+          <li>会话生命周期:任务开始时从 Vault 取凭据、建立会话;任务结束或超时后主动销毁会话,不做凭据持久化。</li>
+        </ul>
+
+        <h3><span class="mono-code">L7 · GOV</span>治理与审计层:强制网关,而非可选项</h3>
+        <ul>
+          <li><strong>风险打分</strong>:参照 MemoryGateway 已有的风险打分范式,对每个即将执行的动作按"读 / 写 / 关键"三级打分(详见第 08 节矩阵)。</li>
+          <li><strong>强制网关</strong>:关键动作(提交、删除、审批通过、资金相关)必须命中 HITL 网关,展示预览 / diff 后才能继续 —— 且这条策略不受 Agent 自主模式开关影响,呼应第 02 节里 Claude for Chrome"即使自主模式也保留高风险确认"的护栏思路,但在企业场景里做成不可关闭的硬约束。</li>
+          <li><strong>审计留痕</strong>:每一步截图 / DOM 快照 / 动作 / 校验结果 / 人工确认记录写入既有仅追加审计日志,支持双时态溯源,复用 MemoryGateway 已确立的 provenance 模式。</li>
+        </ul>
+
+        <h3>案例走查:在 OA 系统中提交一张差旅报销单</h3>
+        <div class="timeline">
+          <div class="tl-step">
+            <div class="tl-step__dot">1</div>
+            <div class="tl-step__body">
+              <div class="tl-step__title">任务下发 <span class="badge badge--reuse">RSN</span></div>
+              <div class="tl-step__desc">Agent 收到"帮我提交上周的差旅报销单",RSN 层将其分解为登录 → 定位表单 → 填写 → 提交等子目标。</div>
+            </div>
+          </div>
+          <div class="tl-step">
+            <div class="tl-step__dot">2</div>
+            <div class="tl-step__body">
+              <div class="tl-step__title">凭据代理登录 <span class="badge badge--reuse">CRD</span></div>
+              <div class="tl-step__desc">从 Vault 取 OA 系统凭据,建立隔离浏览器会话,走预置登录宏完成登录 —— 由固定脚本执行,非 LLM 临场决策。</div>
+            </div>
+          </div>
+          <div class="tl-step">
+            <div class="tl-step__dot">3</div>
+            <div class="tl-step__body">
+              <div class="tl-step__title">感知与标注 <span class="badge badge--reuse">PER · GND</span></div>
+              <div class="tl-step__desc">观测"报销申请"页面,SoM 标注出"费用类型""金额""附件上传""提交审批"等元素及编号。</div>
+            </div>
+          </div>
+          <div class="tl-step">
+            <div class="tl-step__dot">4</div>
+            <div class="tl-step__body">
+              <div class="tl-step__title">逐字段填写与校验 <span class="badge badge--reuse">RSN · ACT</span></div>
+              <div class="tl-step__desc">依次选择费用类型、填写金额、上传附件、填写摘要;每步后 VERIFY 确认字段已生效再进入下一步。</div>
+            </div>
+          </div>
+          <div class="tl-step">
+            <div class="tl-step__dot">5</div>
+            <div class="tl-step__body">
+              <div class="tl-step__title">命中强制网关 <span class="badge badge--t3">T3 · GOV</span></div>
+              <div class="tl-step__desc">到达"提交审批"按钮,GOV 层识别为关键动作,暂停执行,把表单摘要推送给人工确认。</div>
+            </div>
+          </div>
+          <div class="tl-step">
+            <div class="tl-step__dot">6</div>
+            <div class="tl-step__body">
+              <div class="tl-step__title">人工确认后提交 <span class="badge badge--reuse">ACT</span></div>
+              <div class="tl-step__desc">人工确认后执行提交,VERIFY 确认页面出现新的单据编号,判定任务成功。</div>
+            </div>
+          </div>
+          <div class="tl-step">
+            <div class="tl-step__dot">7</div>
+            <div class="tl-step__body">
+              <div class="tl-step__title">技能固化 <span class="badge badge--reuse">SKL</span></div>
+              <div class="tl-step__desc">整个轨迹编译为"OA 差旅报销提交"技能模板,供下次同类任务确定性重放。</div>
+            </div>
+          </div>
+          <div class="tl-step">
+            <div class="tl-step__dot">8</div>
+            <div class="tl-step__body">
+              <div class="tl-step__title">审计留痕 <span class="badge badge--reuse">GOV</span></div>
+              <div class="tl-step__desc">写入完整审计记录:发起人、执行 Agent、确认人、时间戳、前后截图,支持事后追溯。</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="sec-06">
+        <div class="section-head">
+          <div class="section-no">06</div>
+          <h2>与 Vela 既有架构的集成关系</h2>
+        </div>
+        <p class="lede">驭屏引擎不是孤立新增的模块,而是最大程度复用已有基础设施 —— 这也是它能较快落地、且天然继承既有治理水位的原因。</p>
+        <div class="table-wrap">
+          <table>
+            <tr><th>已有 Vela 模块</th><th>被哪一层复用</th><th>具体复用内容</th></tr>
+            <tr><td><strong>Integration Gateway</strong></td><td>L6 · CRD</td><td>OAuth 2.1、RFC 9728/8707 令牌绑定、Vault / KMS 凭据托管体系</td></tr>
+            <tr><td><strong>HITL 网关状态机</strong></td><td>L7 · GOV</td><td>gate-check 状态机与强制确认流程</td></tr>
+            <tr><td><strong>MemoryGateway 风险打分范式</strong></td><td>L7 · GOV</td><td>动作级风险打分方法论与阈值路由逻辑</td></tr>
+            <tr><td><strong>Milvus / Neo4j</strong></td><td>L5 · SKL</td><td>技能库的语义向量检索(Milvus)与任务 – 步骤 – 系统关系图谱(Neo4j)</td></tr>
+            <tr><td><strong>MCP / A2A 协议层</strong></td><td>接口暴露层</td><td>与既有 Agent 工具调用体系保持一致的对外接入方式</td></tr>
+          </table>
+        </div>
+        <p>换句话说:驭屏引擎新增的核心是 <strong>PER / GND / ACT / RSN / SKL</strong> 这套"看屏幕、点鼠标"的能力本身;凭据怎么管、风险怎么控、审计怎么留,直接沿用平台已经验证过的成熟范式,不重新发明。</p>
+      </section>
+
+      <section class="section" id="sec-07">
+        <div class="section-head">
+          <div class="section-no">07</div>
+          <h2>接入指南:如何为你的 Agent 增加这个能力</h2>
+          <div class="section-tag">回答 Q2 · 如何为已有 Agent 增加此能力</div>
+        </div>
+        <p class="lede">对已有的 Vela LangGraph Agent 而言,接入驭屏引擎是一次标准的 MCP 工具接入,不需要改动 Agent 自身的编排逻辑。</p>
+
+        <div class="timeline">
+          <div class="tl-step">
+            <div class="tl-step__dot">1</div>
+            <div class="tl-step__body">
+              <div class="tl-step__title">注册目标系统</div>
+              <div class="tl-step__desc">在系统注册表登记入口地址、登录方式(表单 / SSO / CAS)、执行模式(浏览器 / 桌面)。</div>
+            </div>
+          </div>
+          <div class="tl-step">
+            <div class="tl-step__dot">2</div>
+            <div class="tl-step__body">
+              <div class="tl-step__title">选择执行后端</div>
+              <div class="tl-step__desc">B/S 系统默认走浏览器模式;确认为遗留 C/S 桌面客户端时启用桌面控制通道。</div>
+            </div>
+          </div>
+          <div class="tl-step">
+            <div class="tl-step__dot">3</div>
+            <div class="tl-step__body">
+              <div class="tl-step__title">接入凭据代理</div>
+              <div class="tl-step__desc">通过 Integration Gateway 把目标系统凭据托管进 Vault;不支持 OAuth 的老系统需录制一次登录宏。</div>
+            </div>
+          </div>
+          <div class="tl-step">
+            <div class="tl-step__dot">4</div>
+            <div class="tl-step__body">
+              <div class="tl-step__title">标注风险分级策略</div>
+              <div class="tl-step__desc">参照第 08 节矩阵,为该系统的关键动作打 T0–T3 标签,明确哪些必须命中强制确认。</div>
+            </div>
+          </div>
+          <div class="tl-step">
+            <div class="tl-step__dot">5</div>
+            <div class="tl-step__body">
+              <div class="tl-step__title">注册为 MCP 工具并启用</div>
+              <div class="tl-step__desc">在 Agent 的工具清单里加入 ui_navigate / ui_observe / ui_act / ui_extract / ui_replay_skill,像调用其他 MCP 工具一样调用即可。</div>
+            </div>
+          </div>
+        </div>
+
+        <pre class="code"><span class="tok-com">// mcp.config.json —— 将驭屏引擎注册为 MCP Server</span>
+{
+  <span class="tok-kw">"mcpServers"</span><span class="tok-punct">:</span> {
+    <span class="tok-kw">"vela-screenpilot"</span><span class="tok-punct">:</span> {
+      <span class="tok-kw">"url"</span><span class="tok-punct">:</span> <span class="tok-str">"https://screenpilot.vela.internal/mcp"</span>,
+      <span class="tok-kw">"tools"</span><span class="tok-punct">:</span> [<span class="tok-str">"ui_navigate"</span>,<span class="tok-str">"ui_observe"</span>,<span class="tok-str">"ui_act"</span>,<span class="tok-str">"ui_extract"</span>,<span class="tok-str">"ui_replay_skill"</span>]
+    }
+  }
+}</pre>
+        <pre class="code"><span class="tok-com"># 已有 Agent 侧几乎零改动 —— 追加工具即可</span>
+screenpilot_tools = load_mcp_tools(server=<span class="tok-str">"vela-screenpilot"</span>)
+agent = create_agent(
+    model=qwen_max,
+    tools=[*existing_tools, *screenpilot_tools],
+)</pre>
+      </section>
+
+      <section class="section" id="sec-08">
+        <div class="section-head">
+          <div class="section-no">08</div>
+          <h2>风险分级矩阵与治理策略</h2>
+        </div>
+        <p class="lede">GOV 层据此矩阵对每个待执行动作打分,决定是自动放行、抽样复核,还是强制暂停等待人工确认。</p>
+        <div class="table-wrap">
+          <table>
+            <tr><th>等级</th><th>定义</th><th>示例动作</th><th>处理策略</th></tr>
+            <tr><td><span class="badge badge--t0">T0</span></td><td>只读观测,不改变任何系统状态</td><td>navigate / screenshot / extract</td><td>自动执行,仅记录日志</td></tr>
+            <tr><td><span class="badge badge--t1">T1</span></td><td>改变页面 / 表单本地状态,尚未提交</td><td>type / select / scroll / 暂存上传</td><td>自动执行 + 事后抽样复核</td></tr>
+            <tr><td><span class="badge badge--t2">T2</span></td><td>触发系统侧持久化状态变更</td><td>点击"提交""保存""发送"</td><td>暂停,展示预览 / diff,人工确认后执行</td></tr>
+            <tr><td><span class="badge badge--t3">T3</span></td><td>涉及资金、审批、权限、删除的关键操作</td><td>审批通过、支付、删除记录、权限变更</td><td>强制双人复核,路由进企业既有审批流,Agent 不自主决定</td></tr>
+          </table>
+        </div>
+        <div class="callout callout--gold">
+          <div class="callout__icon">硬约束</div>
+          <p>T2/T3 的强制确认不受任何"自主模式"配置项影响 —— 这是驭屏引擎与消费级浏览器智能体最本质的差异:后者把风险控制做成用户可关闭的偏好,前者把它做成系统不可关闭的边界。</p>
+        </div>
+      </section>
+
+      <section class="section" id="sec-09">
+        <div class="section-head">
+          <div class="section-no">09</div>
+          <h2>落地路线图</h2>
+        </div>
+        <div class="roadmap">
+          <div class="rm-phase">
+            <div class="rm-phase__tag">P0 · 当前季度</div>
+            <ul>
+              <li>浏览器模式 MVP,覆盖 3–5 个高频 OA / 费控场景的只读查询与表单填写</li>
+              <li>不含自动提交,由人工完成最终点击确认</li>
+              <li>打通 CRD 层与 Integration Gateway 的凭据托管</li>
+            </ul>
+          </div>
+          <div class="rm-phase rm-phase--p1">
+            <div class="rm-phase__tag">P1 · 下一阶段</div>
+            <ul>
+              <li>SKL 层上线,支持技能编译与确定性自愈重放</li>
+              <li>桌面模式(C/S 客户端)接入 POC 验证</li>
+              <li>GOV 层风险分级规则化,审计日志接入既有留痕体系</li>
+            </ul>
+          </div>
+          <div class="rm-phase rm-phase--p2">
+            <div class="rm-phase__tag">P2 · 远期</div>
+            <ul>
+              <li>风险分级策略自动化优化,减少不必要的人工打断</li>
+              <li>T3 动作直接路由进企业既有审批流,而非仅弹窗确认</li>
+              <li>跨系统多步编排(如 OA 请假审批通过后自动同步至考勤系统)</li>
+              <li>技能模板纳入 Vela 技能商店,支持跨项目复用发布</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="sec-10">
+        <div class="section-head">
+          <div class="section-no">10</div>
+          <h2>与开源 / 商业方案对照</h2>
+        </div>
+        <p class="lede">驭屏引擎在机制上吸收了 Set-of-Marks 定位、Claude for Chrome 的护栏思路、Skyvern 式"探索一次 · 编译固化 · 自愈重放"模式,但企业化落地上做了显著增强。</p>
+        <div class="table-wrap">
+          <table>
+            <tr><th>维度</th><th>Anthropic Computer Use API</th><th>Claude for Chrome</th><th>Skyvern(开源)</th><th>Vela 驭屏引擎</th></tr>
+            <tr><td><strong>核心定位</strong></td><td>通用 GUI 自动化能力,开发者自建执行环境</td><td>消费级浏览器智能体产品</td><td>开源浏览器工作流自动化,面向 RPA 替代</td><td>内嵌进 Vela 平台的企业内系统操作层</td></tr>
+            <tr><td><strong>执行后端</strong></td><td>应用自建 VM / 容器 + 截图坐标控制</td><td>Chrome 扩展,浏览器内原生事件</td><td>Playwright</td><td>Playwright(浏览器模式)+ 桌面控制通道(C/S 兜底)</td></tr>
+            <tr><td><strong>定位范式</strong></td><td>视觉坐标定位为主</td><td>DOM 与视觉结合</td><td>视觉优先,弱依赖 DOM 选择器</td><td>DOM / 无障碍树 + SoM 优先,视觉兜底遗留控件</td></tr>
+            <tr><td><strong>私有化部署</strong></td><td>执行环境可自建,模型调用走云端</td><td>不支持,消费产品形态</td><td>支持自托管</td><td>强制要求 —— 模型 / 执行 / 存储均在客户内网闭环</td></tr>
+            <tr><td><strong>治理与确认</strong></td><td>应用侧自行实现,内置提示词注入分类器</td><td>站点权限 + 高风险动作确认 + 自主模式护栏</td><td>面向自动化效率,治理需自行搭建</td><td>强制 HITL 网关 + 风险分级 + 不可篡改审计,复用平台既有治理体系</td></tr>
+            <tr><td><strong>技能编译重放</strong></td><td>不提供,每次全量推理</td><td>不提供</td><td>提供:录制 → 生成可缓存工作流 → 自愈</td><td>提供,并纳入审计与私有化闭环</td></tr>
+          </table>
+        </div>
+      </section>
+
+      <section class="section" id="sec-11">
+        <div class="section-head">
+          <div class="section-no">11</div>
+          <h2>参考资料</h2>
+        </div>
+        <ul style="font-size:13px;">
+          <li>Anthropic, <em>Computer use tool</em> — Claude Platform Docs<br><a href="https://platform.claude.com/docs/en/agents-and-tools/tool-use/computer-use-tool" target="_blank" rel="noopener" style="color:var(--cyan);">platform.claude.com/docs/.../computer-use-tool</a></li>
+          <li>Anthropic, <em>Piloting Claude in Chrome</em><br><a href="https://www.anthropic.com/news/claude-for-chrome" target="_blank" rel="noopener" style="color:var(--cyan);">anthropic.com/news/claude-for-chrome</a></li>
+          <li>Yang et al., <em>Set-of-Mark Prompting Unleashes Extraordinary Visual Grounding in GPT-4V</em>, 2023<br><a href="https://arxiv.org/abs/2310.11441" target="_blank" rel="noopener" style="color:var(--cyan);">arxiv.org/abs/2310.11441</a></li>
+          <li>He et al., <em>WebVoyager: Building an End-to-End Web Agent with Large Multimodal Models</em>, 2024<br><a href="https://arxiv.org/abs/2401.13919" target="_blank" rel="noopener" style="color:var(--cyan);">arxiv.org/abs/2401.13919</a></li>
+          <li>Skyvern —— 开源浏览器自动化项目<br><a href="https://github.com/Skyvern-AI/skyvern" target="_blank" rel="noopener" style="color:var(--cyan);">github.com/Skyvern-AI/skyvern</a></li>
+        </ul>
+        <footer class="doc-foot">
+          Vela · 织帆 内部架构设计文档 &nbsp;·&nbsp; 驭屏引擎 ScreenPilot v0.1 &nbsp;·&nbsp; 与既有「驭码」代码 Agent Harness 体系并列
+        </footer>
+      </section>
+
+    </div>
+  </div>
+</div>
+<script>
+(function(){
+  var sections = document.querySelectorAll('.section[id], .hero[id]');
+  var links = document.querySelectorAll('.navlist a');
+  var map = {};
+  links.forEach(function(a){ map[a.getAttribute('href').slice(1)] = a; });
+  if('IntersectionObserver' in window){
+    var obs = new IntersectionObserver(function(entries){
+      entries.forEach(function(e){
+        if(e.isIntersecting){
+          links.forEach(function(a){ a.classList.remove('is-active'); });
+          var link = map[e.target.id];
+          if(link) link.classList.add('is-active');
+        }
+      });
+    }, {rootMargin:'-15% 0px -75% 0px', threshold:0});
+    sections.forEach(function(s){ obs.observe(s); });
+  }
+})();
+</script>
+</body>
+</html>

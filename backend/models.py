@@ -69,6 +69,7 @@ class KnowledgeBaseStatus(str, enum.Enum):
 
 class SessionStatus(str, enum.Enum):
     ACTIVE = "ACTIVE"
+    RUNNING = "RUNNING"
     HITL_WAIT = "HITL_WAIT"
     IDLE = "IDLE"
     CLOSED = "CLOSED"
