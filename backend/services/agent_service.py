@@ -779,6 +779,20 @@ class AgentService:
                         AgentToolBinding.agent_id == agent_id
                     ).all()
         except Exception as _e:
+            # #region agent log
+            try:
+                import json as _json, time as _time
+                with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-66b153.log", "a") as _f:
+                    _f.write(_json.dumps({
+                        "sessionId": "66b153", "runId": "startup", "hypothesisId": "H1",
+                        "location": "agent_service.py:ensure_cu_tools",
+                        "message": "ensure_cu_tools skipped",
+                        "data": {"error": str(_e)[:200]},
+                        "timestamp": int(_time.time() * 1000),
+                    }, ensure_ascii=False) + "\n")
+            except Exception:
+                pass
+            # #endregion
 
         available_tools = []
         for tb in tool_bindings:
@@ -1048,6 +1062,34 @@ class AgentLoop:
             system_prompt += truncated
         if self._memory_context:
             system_prompt += self._memory_context
+        has_cu = any(
+            (getattr(t, "name", "") or "").startswith("cu_")
+            for t in (self.available_tools or [])
+        )
+        if has_cu:
+            try:
+                from models import ScreenSystem
+
+                active_systems = (
+                    self.db.query(ScreenSystem)
+                    .filter(ScreenSystem.status == "ACTIVE")
+                    .order_by(ScreenSystem.name.asc())
+                    .all()
+                )
+                if active_systems:
+                    lines = []
+                    for s in active_systems:
+                        lines.append(
+                            f"- name={s.name}; system_id={s.system_id}; entry_url={s.entry_url or ''}"
+                        )
+                    system_prompt += (
+                        "\n\n【驭屏已注册系统】调用 cu_navigate / cu_run_task 时，"
+                        "system_id 必须使用下列 name 或 UUID（也可使用 entry_url 中的域名词，如 asiainfo）；"
+                        "优先省略 url，使用 entry_url，勿猜测官网域名。\n"
+                        + "\n".join(lines)
+                    )
+            except Exception:
+                pass
         return system_prompt
 
     def _build_initial_messages(self) -> List[Dict[str, Any]]:
@@ -2142,6 +2184,20 @@ class AgentLoop:
                         for c in compiled
                     ]
             except Exception as _e:
+                # #region agent log
+                try:
+                    import json as _json, time as _time
+                    with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-66b153.log", "a") as _f:
+                        _f.write(_json.dumps({
+                            "sessionId": "66b153", "runId": "startup", "hypothesisId": "H1",
+                            "location": "agent_service.py:_build_result:auto_compile",
+                            "message": "auto_compile skipped",
+                            "data": {"error": str(_e)[:200]},
+                            "timestamp": int(_time.time() * 1000),
+                        }, ensure_ascii=False) + "\n")
+                except Exception:
+                    pass
+                # #endregion
 
         return result
 

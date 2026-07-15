@@ -50,6 +50,17 @@
             <a-form-item label="审批人">
               <a-input v-model:value="reviewer" placeholder="您的姓名" />
             </a-form-item>
+            <a-form-item
+              v-if="isOtpApproval(selected)"
+              label="验证码"
+              required
+            >
+              <a-input
+                v-model:value="otpCode"
+                placeholder="请输入短信/邮箱验证码"
+                allow-clear
+              />
+            </a-form-item>
             <a-form-item label="备注">
               <a-textarea v-model:value="comment" :rows="3" placeholder="审批意见（可选）" />
             </a-form-item>
@@ -83,6 +94,7 @@ const drawerOpen = ref(false)
 const selected = ref(null)
 const reviewer = ref('')
 const comment = ref('')
+const otpCode = ref('')
 
 const columns = [
   { title: '风险', dataIndex: 'risk_tier', key: 'risk_tier', width: 70 },
@@ -99,6 +111,15 @@ const previewImage = computed(() => {
   const b64 = p.som_image_b64 || p.screenshot_b64
   return b64 ? `data:image/png;base64,${b64}` : ''
 })
+
+function isOtpApproval(record) {
+  if (!record) return false
+  return (
+    record.tool_name === 'cu_login_otp' ||
+    record.flow_kind === 'otp_wait' ||
+    record.preview_payload?.flow_kind === 'otp_wait'
+  )
+}
 
 function customRow(record) {
   return {
@@ -124,21 +145,33 @@ function openDetail(record) {
   selected.value = record
   reviewer.value = ''
   comment.value = ''
+  otpCode.value = ''
   drawerOpen.value = true
 }
 
 async function doApprove() {
   if (!selected.value) return
+  if (isOtpApproval(selected.value) && !otpCode.value.trim()) {
+    message.warning('请输入验证码后再批准')
+    return
+  }
   acting.value = true
   try {
     await screenpilotApi.approveApproval(selected.value.approval_id, {
       reviewer: reviewer.value,
       comment: comment.value,
+      otp_code: otpCode.value.trim() || undefined,
     })
-    message.success('已批准')
+    // #region agent log
+    fetch('http://127.0.0.1:7619/ingest/e4abc09e-cca5-4895-80e3-3c1a600bc5af',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'66b153'},body:JSON.stringify({sessionId:'66b153',location:'ApprovalInbox.vue:doApprove',message:'approve ok',data:{approval_id:selected.value.approval_id,is_otp:isOtpApproval(selected.value)},timestamp:Date.now(),runId:'hitl-fix',hypothesisId:'H1'})}).catch(()=>{});
+    // #endregion
+    message.success(isOtpApproval(selected.value) ? '验证码已提交' : '已批准')
     drawerOpen.value = false
     await loadApprovals()
   } catch (e) {
+    // #region agent log
+    fetch('http://127.0.0.1:7619/ingest/e4abc09e-cca5-4895-80e3-3c1a600bc5af',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'66b153'},body:JSON.stringify({sessionId:'66b153',location:'ApprovalInbox.vue:doApprove',message:'approve failed',data:{error:String(e.message||e).slice(0,200)},timestamp:Date.now(),runId:'hitl-fix',hypothesisId:'H1'})}).catch(()=>{});
+    // #endregion
     message.error(e.message)
   } finally {
     acting.value = false
@@ -153,10 +186,16 @@ async function doReject() {
       reviewer: reviewer.value,
       comment: comment.value,
     })
+    // #region agent log
+    fetch('http://127.0.0.1:7619/ingest/e4abc09e-cca5-4895-80e3-3c1a600bc5af',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'66b153'},body:JSON.stringify({sessionId:'66b153',location:'ApprovalInbox.vue:doReject',message:'reject ok',data:{approval_id:selected.value.approval_id},timestamp:Date.now(),runId:'hitl-fix',hypothesisId:'H1'})}).catch(()=>{});
+    // #endregion
     message.success('已拒绝')
     drawerOpen.value = false
     await loadApprovals()
   } catch (e) {
+    // #region agent log
+    fetch('http://127.0.0.1:7619/ingest/e4abc09e-cca5-4895-80e3-3c1a600bc5af',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'66b153'},body:JSON.stringify({sessionId:'66b153',location:'ApprovalInbox.vue:doReject',message:'reject failed',data:{error:String(e.message||e).slice(0,200)},timestamp:Date.now(),runId:'hitl-fix',hypothesisId:'H1'})}).catch(()=>{});
+    // #endregion
     message.error(e.message)
   } finally {
     acting.value = false

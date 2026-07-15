@@ -219,5 +219,21 @@ def _migrate_db():
                 "ON screen_credentials (system_id)"
             )
 
+    # ScreenPilot: reuse local browser (CDP) per system
+    cursor.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='screen_systems'"
+    )
+    if cursor.fetchone():
+        cursor.execute("PRAGMA table_info(screen_systems)")
+        sys_cols = {row[1] for row in cursor.fetchall()}
+        if "reuse_local_browser" not in sys_cols:
+            cursor.execute(
+                "ALTER TABLE screen_systems ADD COLUMN reuse_local_browser BOOLEAN DEFAULT 0"
+            )
+        if "cdp_url" not in sys_cols:
+            cursor.execute(
+                "ALTER TABLE screen_systems ADD COLUMN cdp_url VARCHAR(512) DEFAULT ''"
+            )
+
     conn.commit()
     conn.close()

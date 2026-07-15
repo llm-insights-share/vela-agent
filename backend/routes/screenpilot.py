@@ -28,6 +28,8 @@ class ScreenSystemCreate(BaseModel):
     allowed_domains: List[str] = Field(default_factory=list)
     login_macro: dict = Field(default_factory=dict)
     risk_rules: dict = Field(default_factory=dict)
+    reuse_local_browser: bool = False
+    cdp_url: str = Field(default="", max_length=512)
 
 
 class ScreenSystemUpdate(BaseModel):
@@ -38,6 +40,8 @@ class ScreenSystemUpdate(BaseModel):
     allowed_domains: Optional[List[str]] = None
     login_macro: Optional[dict] = None
     risk_rules: Optional[dict] = None
+    reuse_local_browser: Optional[bool] = None
+    cdp_url: Optional[str] = None
     status: Optional[str] = None
 
 
@@ -50,6 +54,8 @@ class ScreenSystemResponse(BaseModel):
     allowed_domains: List[str] = []
     login_macro: dict = {}
     risk_rules: dict = {}
+    reuse_local_browser: bool = False
+    cdp_url: str = ""
     status: str
     model_config = {"from_attributes": True}
 
@@ -108,6 +114,15 @@ def screenpilot_status(db: Session = Depends(get_db)):
     }
 
 
+@router.get("/cdp/status")
+async def cdp_status(url: Optional[str] = None):
+    """探测本机 Chrome/Edge CDP 是否可达（复用本地浏览器会话）。"""
+    _require_enabled()
+    from services.screenpilot.session_manager import probe_cdp
+
+    return await probe_cdp(url or "")
+
+
 @router.get("/systems", response_model=List[ScreenSystemResponse])
 def list_systems(db: Session = Depends(get_db)):
     _require_enabled()
@@ -128,6 +143,8 @@ def create_system(data: ScreenSystemCreate, db: Session = Depends(get_db)):
         allowed_domains=data.allowed_domains,
         login_macro=data.login_macro,
         risk_rules=data.risk_rules,
+        reuse_local_browser=bool(data.reuse_local_browser),
+        cdp_url=(data.cdp_url or "").strip(),
         status="ACTIVE",
         created_at=now_utc(),
         updated_at=now_utc(),
@@ -700,6 +717,7 @@ async def gateway_status():
 class ApprovalReviewRequest(BaseModel):
     reviewer: str = ""
     comment: str = ""
+    otp_code: str = ""
 
 
 @router.get("/approvals")
@@ -742,7 +760,32 @@ def approve_screenpilot(
     if not row:
         raise HTTPException(status_code=404, detail="审批工单不存在")
 
-    review = HITLReview(reviewer=body.reviewer or "vela_approver", comment=body.comment)
+    # #region agent log
+    try:
+        import json as _json, time as _time
+        with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-66b153.log", "a") as _f:
+            _f.write(_json.dumps({
+                "sessionId": "66b153", "runId": "hitl-fix", "hypothesisId": "H1",
+                "location": "routes/screenpilot.py:approve_screenpilot",
+                "message": "approve inbox request",
+                "data": {
+                    "approval_id": approval_id,
+                    "tool_name": row.tool_name,
+                    "session_id": (row.session_id or "")[:40],
+                    "has_otp": bool((body.otp_code or "").strip() or (body.comment or "").strip()),
+                },
+                "timestamp": int(_time.time() * 1000),
+            }, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+    # #endregion
+
+    review = HITLReview(
+        approved=True,
+        reviewer=body.reviewer or "vela_approver",
+        comment=body.comment or "",
+        otp_code=(body.otp_code or None) or None,
+    )
     return approve_action(row.session_id, approval_id, review, db)
 
 
@@ -761,5 +804,28 @@ def reject_screenpilot(
     if not row:
         raise HTTPException(status_code=404, detail="审批工单不存在")
 
-    review = HITLReview(reviewer=body.reviewer or "vela_approver", comment=body.comment)
+    # #region agent log
+    try:
+        import json as _json, time as _time
+        with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-66b153.log", "a") as _f:
+            _f.write(_json.dumps({
+                "sessionId": "66b153", "runId": "hitl-fix", "hypothesisId": "H1",
+                "location": "routes/screenpilot.py:reject_screenpilot",
+                "message": "reject inbox request",
+                "data": {
+                    "approval_id": approval_id,
+                    "tool_name": row.tool_name,
+                    "session_id": (row.session_id or "")[:40],
+                },
+                "timestamp": int(_time.time() * 1000),
+            }, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+    # #endregion
+
+    review = HITLReview(
+        approved=False,
+        reviewer=body.reviewer or "vela_approver",
+        comment=body.comment or "",
+    )
     return reject_action(row.session_id, approval_id, review, db)

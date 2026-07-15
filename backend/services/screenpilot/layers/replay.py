@@ -58,6 +58,9 @@ async def execute_by_fingerprints(
             if not value:
                 return {"success": False, "error": "navigate 需要 URL"}
             await page.goto(value, wait_until="domcontentloaded", timeout=60000)
+            from services.screenpilot.layers.act import wait_for_page_settle
+
+            await wait_for_page_settle(page, timeout_ms=12000)
         elif action == "wait":
             import asyncio
             await asyncio.sleep(int(value or 1000) / 1000.0)

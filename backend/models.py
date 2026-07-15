@@ -558,6 +558,9 @@ class ScreenSystem(Base):
     allowed_domains = Column(JSON, default=list)
     login_macro = Column(JSON, default=dict)
     risk_rules = Column(JSON, default=dict)
+    # CDP: reuse local Chrome/Edge profile cookies instead of launching isolated browser
+    reuse_local_browser = Column(Boolean, default=False)
+    cdp_url = Column(String(512), default="")
     status = Column(String(16), default="ACTIVE")
     created_at = Column(DateTime, default=now_utc)
     updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)

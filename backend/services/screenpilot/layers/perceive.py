@@ -410,6 +410,32 @@ def extract_a11y_elements(a11y_tree: Dict[str, Any]) -> List[Dict[str, Any]]:
 async def capture_page_state(page) -> Tuple[bytes, Dict[str, Any], str]:
     """截图 + 无障碍树，返回 (png_bytes, a11y_tree, url)。"""
     url = page.url
+    # #region agent log
+    try:
+        import json as _json, time as _time
+        _ready = {}
+        try:
+            _ready = await page.evaluate(
+                """() => ({
+                  readyState: document.readyState,
+                  title: (document.title || '').slice(0, 80),
+                  imgsIncomplete: [...document.images].filter(i => !i.complete).length,
+                  bodyTextLen: ((document.body && document.body.innerText) || '').length
+                })"""
+            )
+        except Exception as _e:
+            _ready = {"eval_error": str(_e)[:120]}
+        with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-66b153.log", "a") as _f:
+            _f.write(_json.dumps({
+                "sessionId": "66b153", "runId": "nav-timing", "hypothesisId": "H3",
+                "location": "perceive.py:capture_page_state:before_shot",
+                "message": "screenshot without waiting for networkidle",
+                "data": {"url": (url or "")[:160], "ready": _ready},
+                "timestamp": int(_time.time() * 1000),
+            }, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+    # #endregion
     screenshot = await page.screenshot(type="png", full_page=False)
     try:
         # interesting_only=False keeps custom widgets that screen readers may still expose.

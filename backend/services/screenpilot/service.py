@@ -42,7 +42,7 @@ def _b64(data: bytes) -> str:
 
 
 def _get_system(db: Session, system_id: str) -> Optional[ScreenSystem]:
-    """按 system_id（UUID）或系统名称解析已激活系统。"""
+    """按 system_id（UUID）、系统名称，或唯一域名别名解析已激活系统。"""
     key = (system_id or "").strip()
     if not key:
         return None
@@ -53,11 +53,35 @@ def _get_system(db: Session, system_id: str) -> Optional[ScreenSystem]:
     )
     if by_id:
         return by_id
-    return (
+    by_name = (
         db.query(ScreenSystem)
         .filter(ScreenSystem.name == key, ScreenSystem.status == "ACTIVE")
         .first()
     )
+    if by_name:
+        return by_name
+
+    # Alias: case-insensitive name, or unique match via entry_url / allowed_domains (e.g. asiainfo → 亚信)
+    active = db.query(ScreenSystem).filter(ScreenSystem.status == "ACTIVE").all()
+    key_l = key.lower()
+    ci_name = [r for r in active if (r.name or "").lower() == key_l]
+    if len(ci_name) == 1:
+        return ci_name[0]
+    if len(key_l) >= 3:
+        alias_hits = []
+        for r in active:
+            blob = " ".join(
+                [
+                    r.name or "",
+                    r.entry_url or "",
+                    " ".join(r.allowed_domains or []),
+                ]
+            ).lower()
+            if key_l in blob:
+                alias_hits.append(r)
+        if len(alias_hits) == 1:
+            return alias_hits[0]
+    return None
 
 
 def _system_lookup_error(db: Session, system_id: str) -> Dict[str, Any]:
@@ -121,16 +145,21 @@ async def _open_live_browser_session(
     system_id: str,
     system: Optional[ScreenSystem] = None,
 ) -> Any:
-    """获取或创建浏览器 LiveSession，优先恢复已持久化的 cookie（24h 内有效）。"""
+    """获取或创建浏览器 LiveSession；本地模式可恢复 cookie，CDP 复用则继承本机登录态。"""
     sys = system or _get_system(db, system_id)
     desktop_macro = ((sys.login_macro or {}).get("desktop") if sys else {}) or {}
-    storage_state = get_valid_storage_state(db, system_id)
+    reuse = bool(getattr(sys, "reuse_local_browser", False)) if sys else False
+    cdp_url = (getattr(sys, "cdp_url", None) or "") if sys else ""
+    # CDP 复用本地资料时不要注入隔离 storage_state
+    storage_state = None if reuse else get_valid_storage_state(db, system_id)
     return await create_live_session(
         screen_session_id,
         system_id,
         exec_mode=(sys.exec_mode if sys else "browser") or "browser",
         desktop_macro=desktop_macro,
         storage_state=storage_state,
+        reuse_local_browser=reuse,
+        cdp_url=cdp_url,
     )
 
 
@@ -337,15 +366,53 @@ async def observe_session(db: Session, screen_session_id: str) -> Dict[str, Any]
         result["candidate_send_code_refs"] = [e.get("ref") for e in send_code_candidates[:6]]
 
     # Vision fallback hint: sparse SoM or canvas-heavy page (agent may call cu_vision).
+    # Do NOT suggest vision on unloaded / decorative shells — VL will only see blur wallpaper.
     canvas_count = 0
+    ready_probe: Dict[str, Any] = {}
     try:
+        from services.screenpilot.layers.act import _page_readiness
+
+        ready_probe = await _page_readiness(live.page)
         canvas_count = int(
             await live.page.evaluate("() => document.querySelectorAll('canvas').length") or 0
         )
     except Exception:
         canvas_count = 0
     sparse = len(elements) < 3 or som_source in ("empty", "")
-    if sparse or canvas_count > 0:
+    text_len = int(ready_probe.get("bodyTextLen") or 0)
+    interactive_n = int(ready_probe.get("interactive") or 0)
+    page_not_ready = sparse and text_len < 20 and interactive_n < 3
+    if page_not_ready:
+        result["page_not_ready"] = True
+        result["suggest_vision"] = False
+        result["vision_hint"] = ""
+        result["warning"] = (
+            (result.get("warning") + " " if result.get("warning") else "")
+            + "页面尚未渲染出可用控件（可能是加载中或登录后白屏/模糊背景）。"
+            "请先 cu_act wait 后再次 cu_observe，或导航到明确登录页（如 /login），不要调用 cu_vision 解读装饰背景。"
+        )
+        result["recovery_hint"] = (
+            "cu_act action=wait value=2000 → cu_observe；若仍无元素则导航到系统登录 URL"
+        )
+        # #region agent log
+        try:
+            import json as _json, time as _time
+            with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-66b153.log", "a") as _f:
+                _f.write(_json.dumps({
+                    "sessionId": "66b153", "runId": "vision-guard", "hypothesisId": "H3",
+                    "location": "service.py:observe_session:page_not_ready",
+                    "message": "suppress suggest_vision on empty shell",
+                    "data": {
+                        "url": (url or "")[:160],
+                        "element_count": len(elements),
+                        "ready": ready_probe,
+                    },
+                    "timestamp": int(_time.time() * 1000),
+                }, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+        # #endregion
+    elif sparse or canvas_count > 0:
         result["suggest_vision"] = True
         result["vision_hint"] = (
             "可访问性/DOM 元素偏少或存在 canvas，建议调用 cu_vision 用截图回答布局问题"
@@ -375,6 +442,12 @@ def _resolve_navigate_url(system: ScreenSystem, url: str, allowed: List[str]) ->
             base = f"{entry_parsed.scheme}://{entry_parsed.netloc}"
             return urljoin(base.rstrip("/") + "/", segment)
         return raw
+    # Prefer registered entry when LLM invents another allowlisted host (e.g. www vs work).
+    if entry:
+        entry_host = (urlparse(entry).hostname or "").lower()
+        raw_host = (urlparse(raw).hostname or "").lower()
+        if entry_host and raw_host and entry_host != raw_host:
+            return entry
     if not allowed or check_domain_allowed(raw, allowed):
         return raw
     if entry and check_domain_allowed(entry, allowed):
@@ -398,6 +471,11 @@ async def navigate_ui(
     agent_id: str = "",
     auto_login: bool = True,
 ) -> Dict[str, Any]:
+    # #region agent log
+    import time as _time
+    _nav_t0 = _time.time()
+    _phases: Dict[str, int] = {}
+    # #endregion
     system = _get_system(db, system_id)
     if not system:
         return _system_lookup_error(db, system_id)
@@ -418,12 +496,25 @@ async def navigate_ui(
         if not ok_nav:
             return {"success": False, "error": reason_nav, "url": target_url}
 
-    live = await _open_live_browser_session(
-        db,
-        screen_session_id=row.screen_session_id,
-        system_id=resolved_id,
-        system=system,
-    )
+    # #region agent log
+    _t_open = _time.time()
+    # #endregion
+    try:
+        live = await _open_live_browser_session(
+            db,
+            screen_session_id=row.screen_session_id,
+            system_id=resolved_id,
+            system=system,
+        )
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "reuse_local_browser": bool(getattr(system, "reuse_local_browser", False)),
+        }
+    # #region agent log
+    _phases["open_browser_ms"] = int((_time.time() - _t_open) * 1000)
+    # #endregion
 
     if (system.exec_mode or "browser") == "desktop":
         obs = await observe_session(db, row.screen_session_id)
@@ -433,9 +524,14 @@ async def navigate_ui(
         return obs
 
     allowed = system.allowed_domains or []
+    reuse_local = bool(getattr(system, "reuse_local_browser", False))
+    cdp_attach = getattr(live, "attach_mode", "") == "cdp" or reuse_local
 
+    # CDP 复用本机已登录会话：跳过登录宏 / vault 自动填表，且不回写 storage_state。
     skip_login = False
-    if auto_login and get_valid_storage_state(db, resolved_id):
+    if cdp_attach:
+        skip_login = True
+    elif auto_login and get_valid_storage_state(db, resolved_id):
         check_url = target_url or system.entry_url
         if check_url and live.page:
             await execute_action(
@@ -463,7 +559,7 @@ async def navigate_ui(
                 return login_result
             if not login_result.get("success"):
                 return login_result
-            if live.context:
+            if live.context and not cdp_attach:
                 await save_storage_state(db, resolved_id, live.context)
         else:
             # No login_macro steps: fill vault credentials on login page via SoM.
@@ -482,20 +578,56 @@ async def navigate_ui(
                     system_id=resolved_id,
                     elements=probe.get("elements") or live.elements or [],
                 )
-                if fill.get("success") and live.context:
+                if fill.get("success") and live.context and not cdp_attach:
                     await save_storage_state(db, resolved_id, live.context)
 
     if target_url:
+        # #region agent log
+        _t_goto = _time.time()
+        # #endregion
         nav = await execute_action(
             live.page, "navigate", [], value=target_url, allowed_domains=allowed
         )
+        # #region agent log
+        _phases["final_goto_ms"] = int((_time.time() - _t_goto) * 1000)
+        # #endregion
         if not nav.get("success"):
             return nav
 
+    # #region agent log
+    _t_obs = _time.time()
+    # #endregion
     obs = await observe_session(db, row.screen_session_id)
+    # #region agent log
+    try:
+        import json as _json
+        _phases["final_observe_ms"] = int((_time.time() - _t_obs) * 1000)
+        _phases["total_ms"] = int((_time.time() - _nav_t0) * 1000)
+        with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-66b153.log", "a") as _f:
+            _f.write(_json.dumps({
+                "sessionId": "66b153", "runId": "nav-timing", "hypothesisId": "H2",
+                "location": "service.py:navigate_ui:exit",
+                "message": "navigate_ui phase timings",
+                "data": {
+                    "system_id": resolved_id[:12],
+                    "target_url": (target_url or "")[:160],
+                    "auto_login": auto_login,
+                    "phases_ms": _phases,
+                    "element_count": len(obs.get("elements") or []),
+                    "login_required": bool(obs.get("login_required")),
+                },
+                "timestamp": int(_time.time() * 1000),
+            }, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+    # #endregion
     obs["screen_session_id"] = row.screen_session_id
     obs["system_id"] = resolved_id
     obs["system_name"] = system.name
+    if cdp_attach:
+        obs["reuse_local_browser"] = True
+        obs["attach_mode"] = "cdp"
+        obs["browser_hint"] = "已附着本机浏览器会话（CDP），继承当前登录态；未执行登录宏"
     return obs
 
 
@@ -682,8 +814,10 @@ async def resume_login_after_otp_approval(
     if result.get("hitl_pending"):
         return json.dumps(result, ensure_ascii=False)
 
-    if result.get("success") and live.context:
+    if result.get("success") and live.context and getattr(live, "attach_mode", "") != "cdp":
         await save_storage_state(db, system.system_id, live.context)
+        return f"登录继续完成：{result.get('message', '')} 当前 URL: {result.get('url', live.page.url)}"
+    if result.get("success"):
         return f"登录继续完成：{result.get('message', '')} 当前 URL: {result.get('url', live.page.url)}"
 
     if not result.get("success"):
@@ -1389,13 +1523,62 @@ async def vision_query(
     if not q:
         return {"success": False, "error": "question 不能为空"}
 
-    shot = live.last_som_image if use_som and live.last_som_image else live.last_screenshot
-    if not shot and live.page:
+    # Refresh page state before VL: avoid answering questions against blur/wallpaper shells.
+    settle_info: Dict[str, Any] = {}
+    ready_probe: Dict[str, Any] = {}
+    if live.page and getattr(live, "exec_mode", "browser") != "desktop":
+        from services.screenpilot.layers.act import _page_readiness, wait_for_page_settle
+
+        settle_info = await wait_for_page_settle(live.page, timeout_ms=8000)
+        ready_probe = settle_info.get("ready") or await _page_readiness(live.page)
+        text_len = int(ready_probe.get("bodyTextLen") or 0)
+        interactive_n = int(ready_probe.get("interactive") or 0)
+        # #region agent log
+        try:
+            import json as _json, time as _time
+            with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-66b153.log", "a") as _f:
+                _f.write(_json.dumps({
+                    "sessionId": "66b153", "runId": "vision-guard", "hypothesisId": "H1",
+                    "location": "service.py:vision_query:precheck",
+                    "message": "vision readiness precheck",
+                    "data": {
+                        "url": (live.page.url or "")[:160],
+                        "settle_content": bool(settle_info.get("content")),
+                        "ready": ready_probe,
+                        "question": q[:80],
+                    },
+                    "timestamp": int(_time.time() * 1000),
+                }, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+        # #endregion
+        if text_len < 20 and interactive_n < 3:
+            return {
+                "success": False,
+                "page_not_ready": True,
+                "screen_session_id": screen_session_id,
+                "error": (
+                    "页面尚未渲染完成或仅有装饰背景，截图无法可靠识别登录控件。"
+                    "请先 cu_act wait 后 cu_observe，或导航到 /login 等登录页，勿对模糊背景调用视觉问答。"
+                ),
+                "ready": ready_probe,
+                "used_som": False,
+            }
         try:
             shot = await live.page.screenshot(type="png", full_page=False)
             live.last_screenshot = shot
         except Exception as e:
             return {"success": False, "error": f"截图失败: {e}"}
+    else:
+        shot = live.last_som_image if use_som and live.last_som_image else live.last_screenshot
+        if not shot and live.page:
+            try:
+                shot = await live.page.screenshot(type="png", full_page=False)
+                live.last_screenshot = shot
+            except Exception as e:
+                return {"success": False, "error": f"截图失败: {e}"}
+    if use_som and live.last_som_image:
+        shot = live.last_som_image
     if not shot:
         return {"success": False, "error": "无可用截图，请先 cu_observe"}
 

@@ -185,6 +185,9 @@ async def _execute_macro_steps(
                 wait_until="domcontentloaded",
                 timeout=60000,
             )
+            from services.screenpilot.layers.act import wait_for_page_settle
+
+            await wait_for_page_settle(page, timeout_ms=12000)
         elif action == "fill" and selector:
             await page.fill(selector, value)
         elif action == "click" and selector:

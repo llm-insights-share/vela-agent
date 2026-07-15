@@ -30,11 +30,14 @@ TOOLS = [
             "properties": {
                 "system_id": {
                     "type": "string",
-                    "description": "已注册系统的 system_id（UUID）或系统名称（如 xhs）",
+                    "description": (
+                        "已注册系统的 system_id（UUID）或系统名称（须与【驭屏已注册系统】中的 name 一致，"
+                        "例如 亚信 / 小红书；也可传域名别名如 asiainfo）。禁止 invent 未注册英文缩写"
+                    ),
                 },
                 "url": {
                     "type": "string",
-                    "description": "目标 URL，省略时使用系统 entry_url；勿自行猜测域名，优先省略或只传路径如 explore",
+                    "description": "目标 URL，省略时使用系统 entry_url；勿自行猜测域名，优先省略或只传同站路径",
                 },
                 "screen_session_id": {"type": "string", "description": "可选，已有浏览器会话 ID"},
                 "vela_session_id": {"type": "string", "description": "Vela Agent 会话 ID"},
@@ -181,7 +184,10 @@ TOOLS = [
             "properties": {
                 "system_id": {
                     "type": "string",
-                    "description": "已注册系统的 system_id（UUID）或系统名称（如 xhs）",
+                    "description": (
+                        "已注册系统的 system_id（UUID）或系统名称（须与【驭屏已注册系统】中的 name 一致；"
+                        "也可传域名别名）。禁止 invent 未注册英文缩写"
+                    ),
                 },
                 "goal": {"type": "string", "description": "任务目标描述"},
                 "screen_session_id": {"type": "string"},

@@ -206,6 +206,7 @@ export const screenpilotApi = {
   getSystem: (id) => api.get(`/screenpilot/systems/${id}`),
   updateSystem: (id, data) => api.put(`/screenpilot/systems/${id}`, data),
   deleteSystem: (id) => api.delete(`/screenpilot/systems/${id}`),
+  cdpStatus: (url) => api.get('/screenpilot/cdp/status', { params: url ? { url } : {} }),
   createCredential: (data) => api.post('/screenpilot/credentials', data),
   listCredentials: (systemId) => api.get(`/screenpilot/systems/${systemId}/credentials`),
   updateCredential: (id, data) => api.put(`/screenpilot/credentials/${id}`, data),

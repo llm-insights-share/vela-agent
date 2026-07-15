@@ -204,12 +204,11 @@ def sync_cu_tool_bindings_for_existing_agents(db: Session) -> Dict[str, Any]:
 
 
 def ensure_cu_tools_registered_and_bound(db: Session) -> Dict[str, Any]:
-    """Idempotent: register missing cu_* tools and bind them onto existing ScreenPilot agents."""
+    """Idempotent: refresh cu_* tool defs/schemas and bind them onto existing ScreenPilot agents."""
     before = {t["name"] for t in list_registered_cu_tools(db)}
     missing = [n for n in CU_TOOL_NAMES if n not in before]
-    reg = None
-    if missing:
-        reg = register_cu_mcp_tools(db)
+    # Always re-register so description / parameters_schema stay in sync with mcp_server.TOOLS.
+    reg = register_cu_mcp_tools(db)
     sync = sync_cu_tool_bindings_for_existing_agents(db)
     after = {t["name"] for t in list_registered_cu_tools(db)}
     return {"missing_before": missing, "register": reg, "sync": sync, "tools": sorted(after)}

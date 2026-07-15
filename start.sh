@@ -6,6 +6,7 @@ BACKEND_DIR="$PROJECT_DIR/backend"
 FRONTEND_DIR="$PROJECT_DIR/frontend"
 
 export SCREENPILOT_ENABLED=true
+export SCREENPILOT_HEADLESS=true   # 无头
 
 echo "=== 启动所有服务 ==="
 

@@ -31,6 +31,11 @@
             {{ record.status === 'ACTIVE' ? '已激活' : '未激活' }}
           </a-tag>
         </template>
+        <template v-else-if="column.key === 'browser_session'">
+          <a-tag :color="record.reuse_local_browser ? 'blue' : 'default'">
+            {{ record.reuse_local_browser ? '本地会话' : '新建浏览器' }}
+          </a-tag>
+        </template>
         <template v-else-if="column.key === 'action'">
           <a-space>
             <a @click="openEdit(record)">修改</a>
@@ -112,6 +117,7 @@
       @ok="saveSystem"
       :confirmLoading="saving"
       destroyOnClose
+      width="640px"
     >
       <a-form layout="vertical">
         <a-form-item label="系统名称" required>
@@ -136,6 +142,34 @@
             <a-select-option value="desktop">桌面</a-select-option>
           </a-select>
         </a-form-item>
+        <a-form-item label="复用本地浏览器会话（CDP）">
+          <a-switch v-model:checked="form.reuse_local_browser" />
+          <div style="margin-top: 6px; font-size: 12px; color: #888;">
+            开启后附着本机已登录的 Chrome/Edge，继承 Cookie，可绕过登录墙；关闭则启动独立无头浏览器。
+          </div>
+        </a-form-item>
+        <template v-if="form.reuse_local_browser">
+          <a-alert
+            type="info"
+            show-icon
+            style="margin-bottom: 12px"
+            message="请先以远程调试端口启动浏览器并手动登录目标系统"
+            description="macOS 示例：/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222 --user-data-dir=/tmp/chrome-cdp"
+          />
+          <a-form-item label="CDP 地址">
+            <a-input
+              v-model:value="form.cdp_url"
+              placeholder="http://127.0.0.1:9222"
+              allow-clear
+            />
+            <div style="margin-top: 8px">
+              <a-button size="small" :loading="cdpChecking" @click="checkCdp">检测连接</a-button>
+              <span v-if="cdpCheckHint" style="margin-left: 8px; font-size: 12px; color: #666">
+                {{ cdpCheckHint }}
+              </span>
+            </div>
+          </a-form-item>
+        </template>
         <a-form-item v-if="editingId" label="状态">
           <a-select v-model:value="form.status">
             <a-select-option value="ACTIVE">已激活</a-select-option>
@@ -322,6 +356,7 @@ const columns = [
   { title: '入口 URL', dataIndex: 'entry_url', key: 'entry_url', ellipsis: true },
   { title: '登录', dataIndex: 'login_type', key: 'login_type', width: 90 },
   { title: '模式', dataIndex: 'exec_mode', key: 'exec_mode', width: 90 },
+  { title: '浏览器', key: 'browser_session', width: 110 },
   { title: '状态', key: 'status', width: 100 },
   { title: '操作', key: 'action', width: 260 },
 ]
@@ -421,13 +456,39 @@ async function removeCredential(record) {
   }
 }
 
+const cdpChecking = ref(false)
+const cdpCheckHint = ref('')
+
 function emptyForm() {
   return {
     name: '',
     entry_url: '',
     login_type: 'form',
     exec_mode: 'browser',
+    reuse_local_browser: false,
+    cdp_url: '',
     status: 'ACTIVE',
+  }
+}
+
+async function checkCdp() {
+  cdpChecking.value = true
+  cdpCheckHint.value = ''
+  try {
+    const url = (form.value.cdp_url || '').trim()
+    const res = await screenpilotApi.cdpStatus(url || undefined)
+    if (res.connected) {
+      cdpCheckHint.value = `已连接 ${res.browser_version || ''} · contexts=${res.contexts} · pages=${res.pages}`
+      message.success('CDP 连接成功')
+    } else {
+      cdpCheckHint.value = res.error || '无法连接'
+      message.error(res.error || 'CDP 连接失败')
+    }
+  } catch (e) {
+    cdpCheckHint.value = e.message
+    message.error(e.message)
+  } finally {
+    cdpChecking.value = false
   }
 }
 
@@ -461,6 +522,7 @@ function openCreate() {
   domainsText.value = ''
   loginMacroText.value = '{\n  "steps": []\n}'
   riskRulesText.value = '{\n}\n'
+  cdpCheckHint.value = ''
   modalOpen.value = true
 }
 
@@ -471,11 +533,14 @@ function openEdit(record) {
     entry_url: record.entry_url || '',
     login_type: record.login_type || 'form',
     exec_mode: record.exec_mode || 'browser',
+    reuse_local_browser: !!record.reuse_local_browser,
+    cdp_url: record.cdp_url || '',
     status: record.status || 'ACTIVE',
   }
   domainsText.value = (record.allowed_domains || []).join(', ')
   loginMacroText.value = JSON.stringify(record.login_macro || { steps: [] }, null, 2)
   riskRulesText.value = JSON.stringify(record.risk_rules || {}, null, 2)
+  cdpCheckHint.value = ''
   modalOpen.value = true
 }
 
@@ -519,6 +584,10 @@ async function saveSystem() {
       saving.value = false
       return
     }
+    const reusePayload = {
+      reuse_local_browser: !!form.value.reuse_local_browser,
+      cdp_url: (form.value.cdp_url || '').trim(),
+    }
     if (editingId.value) {
       await screenpilotApi.updateSystem(editingId.value, {
         name: form.value.name.trim(),
@@ -529,6 +598,7 @@ async function saveSystem() {
         status: form.value.status,
         login_macro,
         risk_rules,
+        ...reusePayload,
       })
       message.success('系统已更新')
     } else {
@@ -540,6 +610,7 @@ async function saveSystem() {
         allowed_domains,
         login_macro,
         risk_rules,
+        ...reusePayload,
       })
       message.success('系统已注册')
     }

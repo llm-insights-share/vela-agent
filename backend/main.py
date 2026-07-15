@@ -54,6 +54,21 @@ app.include_router(memory_router)
 app.include_router(screenpilot_router)
 app.include_router(query_rewrite_router)
 
+# #region agent log
+try:
+    import json as _json, time as _time
+    with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-66b153.log", "a") as _f:
+        _f.write(_json.dumps({
+            "sessionId": "66b153", "runId": "startup", "hypothesisId": "H1",
+            "location": "main.py:import",
+            "message": "main app imported successfully",
+            "data": {"title": app.title, "version": app.version},
+            "timestamp": int(_time.time() * 1000),
+        }, ensure_ascii=False) + "\n")
+except Exception:
+    pass
+# #endregion
+
 
 def _recover_stale_running_sessions():
     """服务重启后，在途后台任务已丢失，将 RUNNING 会话标记为 ERROR。"""

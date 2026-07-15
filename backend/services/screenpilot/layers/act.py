@@ -1,4 +1,5 @@
 import asyncio
+import time
 from typing import Any, Dict, List, Optional
 
 from services.screenpilot.layers.govern import (
@@ -9,11 +10,120 @@ from services.screenpilot.layers.govern import (
 from services.screenpilot.layers.ground import find_element_by_ref
 
 
+async def _page_readiness(page) -> Dict[str, Any]:
+    try:
+        return await page.evaluate(
+            """() => ({
+              readyState: document.readyState,
+              title: (document.title || '').slice(0, 80),
+              scripts: document.scripts.length,
+              imgsIncomplete: [...document.images].filter(i => !i.complete).length,
+              bodyTextLen: ((document.body && (document.body.innerText || '').trim()) || '').length,
+              interactive: document.querySelectorAll(
+                'a,button,input,textarea,select,[role=button],[role=link],[role=textbox],[role=searchbox]'
+              ).length
+            })"""
+        )
+    except Exception as e:
+        return {"eval_error": str(e)[:120]}
+
+
+async def wait_for_page_settle(
+    page,
+    *,
+    timeout_ms: int = 12000,
+    min_text_len: int = 20,
+    min_interactive: int = 3,
+) -> Dict[str, Any]:
+    """After DCL: wait for load / brief networkidle / SPA content before observe."""
+    info: Dict[str, Any] = {
+        "load": False,
+        "networkidle": False,
+        "content": False,
+        "timeout_ms": timeout_ms,
+    }
+    try:
+        await page.wait_for_load_state("load", timeout=min(timeout_ms, 15000))
+        info["load"] = True
+    except Exception:
+        pass
+    try:
+        # Cap networkidle: SPAs often keep long-poll/WS alive.
+        await page.wait_for_load_state("networkidle", timeout=min(5000, timeout_ms))
+        info["networkidle"] = True
+    except Exception:
+        pass
+
+    deadline = time.time() + max(0.5, timeout_ms / 1000.0)
+    last: Dict[str, Any] = {}
+    while time.time() < deadline:
+        last = await _page_readiness(page)
+        text_len = int(last.get("bodyTextLen") or 0)
+        interactive = int(last.get("interactive") or 0)
+        if text_len >= min_text_len or interactive >= min_interactive:
+            info["content"] = True
+            info["ready"] = last
+            break
+        await asyncio.sleep(0.25)
+    if "ready" not in info:
+        info["ready"] = last
+    return info
+
+
 async def navigate(page, url: str, allowed_domains: List[str]) -> Dict[str, Any]:
     ok, reason = check_navigation_allowed(url, allowed_domains)
     if not ok:
         return {"success": False, "error": reason}
+    # #region agent log
+    _t0 = time.time()
+    # #endregion
     await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+    # #region agent log
+    try:
+        import json as _json
+        _ready = await _page_readiness(page)
+        with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-66b153.log", "a") as _f:
+            _f.write(_json.dumps({
+                "sessionId": "66b153", "runId": "post-fix", "hypothesisId": "H1",
+                "location": "act.py:navigate:after_goto",
+                "message": "goto returned (wait_until=domcontentloaded)",
+                "data": {
+                    "url": (url or "")[:160],
+                    "final_url": (page.url or "")[:160],
+                    "elapsed_ms": int((time.time() - _t0) * 1000),
+                    "ready": _ready,
+                },
+                "timestamp": int(time.time() * 1000),
+            }, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+    # #endregion
+
+    settle = await wait_for_page_settle(page, timeout_ms=12000)
+    # #region agent log
+    try:
+        import json as _json
+        with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-66b153.log", "a") as _f:
+            _f.write(_json.dumps({
+                "sessionId": "66b153", "runId": "post-fix", "hypothesisId": "H1",
+                "location": "act.py:navigate:after_settle",
+                "message": "page settle finished before observe",
+                "data": {
+                    "url": (page.url or "")[:160],
+                    "settle": {
+                        "load": settle.get("load"),
+                        "networkidle": settle.get("networkidle"),
+                        "content": settle.get("content"),
+                        "ready": settle.get("ready"),
+                    },
+                    "elapsed_ms": int((time.time() - _t0) * 1000),
+                },
+                "timestamp": int(time.time() * 1000),
+            }, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+    # #endregion
+
     final_url = page.url
     # Re-check after redirects to prevent allowlist escape.
     ok_final, reason_final = check_navigation_allowed(final_url, allowed_domains)
@@ -27,7 +137,7 @@ async def navigate(page, url: str, allowed_domains: List[str]) -> Dict[str, Any]
             "error": f"跳转后 URL 未通过安全检查: {reason_final}",
             "redirected_to": final_url,
         }
-    return {"success": True, "url": final_url}
+    return {"success": True, "url": final_url, "settle": settle}
 
 
 async def _click_by_value(page, value: str) -> Dict[str, Any]:
