@@ -1,6 +1,6 @@
 tools:
   tavily:
-    api_key: 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
+    api_key: tvly-dev-*****
 memory:
   letta:
     enabled: true
