@@ -1,5 +1,6 @@
 <template>
-  <a-layout style="min-height: 100vh">
+  <router-view v-if="isAuthPage" />
+  <a-layout v-else style="min-height: 100vh">
     <a-layout-sider v-model:collapsed="collapsed" collapsible theme="dark" width="220">
       <div class="logo">
         <div class="logo-dot"></div>
@@ -54,6 +55,10 @@
           <a-menu-item key="/screenpilot/skills">UI 技能库</a-menu-item>
           <a-menu-item key="/screenpilot/approvals">驭屏审批收件箱</a-menu-item>
         </a-sub-menu>
+        <a-menu-item v-if="auth.isAdmin" key="/users">
+          <TeamOutlined />
+          <span>用户管理</span>
+        </a-menu-item>
         <a-menu-item key="/settings">
           <SettingOutlined />
           <span>系统配置</span>
@@ -63,6 +68,22 @@
     <a-layout>
       <a-layout-header class="header">
         <span class="header-title">Agent Playground</span>
+        <div class="header-user">
+          <a-dropdown>
+            <a class="user-trigger" @click.prevent>
+              <a-avatar :size="28" :src="auth.user?.avatar_url || undefined">
+                <template #icon><UserOutlined /></template>
+              </a-avatar>
+              <span class="user-name">{{ auth.user?.display_name || auth.user?.username || '' }}</span>
+            </a>
+            <template #overlay>
+              <a-menu @click="onUserMenuClick">
+                <a-menu-item key="settings">用户设置</a-menu-item>
+                <a-menu-item key="logout">退出登录</a-menu-item>
+              </a-menu>
+            </template>
+          </a-dropdown>
+        </div>
       </a-layout-header>
       <a-layout-content class="content">
         <router-view />
@@ -72,7 +93,7 @@
 </template>
 
 <script setup>
-import { ref, watch, onMounted, onUnmounted } from 'vue'
+import { ref, watch, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import {
   DashboardOutlined,
@@ -85,19 +106,27 @@ import {
   SettingOutlined,
   BulbOutlined,
   DesktopOutlined,
+  TeamOutlined,
+  UserOutlined,
 } from '@ant-design/icons-vue'
 import {
   startBackgroundSessionWatcher,
   stopBackgroundSessionWatcher,
 } from './composables/useBackgroundSessions'
+import { useAuthStore } from './stores/auth'
 
 const router = useRouter()
 const route = useRoute()
+const auth = useAuthStore()
 const collapsed = ref(false)
 const selectedKeys = ref(['/'])
 
+const isAuthPage = computed(() => route.path === '/login' || route.path === '/register')
+
 onMounted(() => {
-  startBackgroundSessionWatcher()
+  if (!isAuthPage.value) {
+    startBackgroundSessionWatcher()
+  }
 })
 
 onUnmounted(() => {
@@ -108,12 +137,26 @@ watch(
   () => route.path,
   (path) => {
     selectedKeys.value = [path]
+    if (path === '/login' || path === '/register') {
+      stopBackgroundSessionWatcher()
+    } else {
+      startBackgroundSessionWatcher()
+    }
   },
   { immediate: true }
 )
 
 function onMenuClick({ key }) {
   router.push(key)
+}
+
+function onUserMenuClick({ key }) {
+  if (key === 'settings') {
+    router.push('/me/settings')
+  } else if (key === 'logout') {
+    auth.logout()
+    router.push('/login')
+  }
 }
 </script>
 
@@ -145,6 +188,7 @@ function onMenuClick({ key }) {
   padding: 0 24px;
   display: flex;
   align-items: center;
+  justify-content: space-between;
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
 }
 .header-title {
@@ -152,6 +196,19 @@ function onMenuClick({ key }) {
   font-size: 11px;
   color: rgba(255, 255, 255, 0.5);
   letter-spacing: 0.1em;
+}
+.header-user {
+  display: flex;
+  align-items: center;
+}
+.user-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: rgba(255, 255, 255, 0.85);
+}
+.user-name {
+  font-size: 13px;
 }
 .content {
   padding: 24px;

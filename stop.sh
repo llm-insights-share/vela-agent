@@ -2,8 +2,21 @@
 set -e
 
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
+LETTA_PORT="${LETTA_PORT:-8283}"
 
 echo "=== 停止所有服务 ==="
+
+# Stop Letta (port 8283)
+LETTA_PID=$(lsof -ti:"$LETTA_PORT" 2>/dev/null || true)
+if [ -n "$LETTA_PID" ]; then
+    echo "停止 Letta 记忆服务 (PID: $LETTA_PID)..."
+    kill $LETTA_PID 2>/dev/null || true
+    sleep 1
+    kill -9 $LETTA_PID 2>/dev/null || true
+    echo "Letta 已停止"
+else
+    echo "Letta 未运行"
+fi
 
 # Stop backend (port 8000)
 BACKEND_PID=$(lsof -ti:8000 2>/dev/null || true)

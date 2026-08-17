@@ -1,7 +1,7 @@
 import uuid
 import json
 from datetime import datetime, timezone
-from sqlalchemy import Column, String, Integer, Float, Boolean, DateTime, Text, ForeignKey, JSON, Enum as SAEnum
+from sqlalchemy import Column, String, Integer, Float, Boolean, DateTime, Text, ForeignKey, JSON, Enum as SAEnum, UniqueConstraint
 from sqlalchemy.orm import relationship
 from database import Base
 import enum
@@ -74,6 +74,21 @@ class SessionStatus(str, enum.Enum):
     IDLE = "IDLE"
     CLOSED = "CLOSED"
     ERROR = "ERROR"
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    user_id = Column(String, primary_key=True, default=gen_uuid)
+    username = Column(String(64), unique=True, nullable=False, index=True)
+    email = Column(String(256), unique=True, nullable=False, index=True)
+    display_name = Column(String(128), nullable=False, default="")
+    avatar_url = Column(String(512), default="")
+    hashed_password = Column(String(256), nullable=False)
+    roles = Column(String(128), nullable=False, default="member")
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=now_utc)
+    updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)
 
 
 class ModelProvider(Base):
@@ -184,6 +199,7 @@ class SkillPack(Base):
     description = Column(Text, default="")
     manifest = Column(JSON, default=dict)
     skill_content = Column(Text, default="")
+    package_files = Column(JSON, default=dict)
     status = Column(SAEnum(SkillPackStatus), default=SkillPackStatus.ACTIVE)
     created_at = Column(DateTime, default=now_utc)
     updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)
@@ -237,6 +253,7 @@ class Session(Base):
     token_budget = Column(Integer, default=100000)
     ttl_seconds = Column(Integer, default=1800)
     messages = Column(JSON, default=list)
+    llm_calls = Column(JSON, default=list)
     # SGL-CFG-06 / MA-IMP-09: HITL 挂起上下文（pending_tool_call / pending_delivery）
     pending_context = Column(JSON, default=dict)
     trace_id = Column(String(128), default="")
@@ -524,7 +541,7 @@ class MemoryEpisode(Base):
 
 
 class MemoryRecord(Base):
-    """L2/溯源语义记忆：双时态提交"""
+    """L2/溯源语义记忆：双时态提交（保留表；新写入走 Letta）"""
     __tablename__ = "memory_records"
 
     record_id = Column(String, primary_key=True, default=gen_uuid)
@@ -541,6 +558,20 @@ class MemoryRecord(Base):
     created_at = Column(DateTime, default=now_utc)
     updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)
     created_by = Column(String(128), default="system")
+
+
+class LettaMemoryAgent(Base):
+    """vela Agent(+user) → Letta 记忆 agent 映射"""
+    __tablename__ = "letta_memory_agents"
+    __table_args__ = (
+        UniqueConstraint("agent_id", "user_id", name="uq_letta_memory_agent_scope"),
+    )
+
+    mapping_id = Column(String, primary_key=True, default=gen_uuid)
+    agent_id = Column(String, ForeignKey("agents.agent_id"), nullable=False, index=True)
+    user_id = Column(String(128), default="", index=True)
+    letta_agent_id = Column(String(128), nullable=False, index=True)
+    created_at = Column(DateTime, default=now_utc)
 
 
 # --- ScreenPilot (驭屏引擎) ---

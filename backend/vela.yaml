@@ -1,3 +1,11 @@
 tools:
   tavily:
     api_key: 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
+memory:
+  letta:
+    enabled: true
+    base_url: http://127.0.0.1:8283
+    password: vela-letta-dev
+    gateway_base: http://127.0.0.1:8000
+    gateway_token: vela-local-gateway
+    distill_model_service_id: ""

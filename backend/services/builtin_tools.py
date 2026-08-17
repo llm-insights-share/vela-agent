@@ -572,16 +572,27 @@ async def _execute_tavily_search(args: Dict[str, Any]) -> Dict[str, Any]:
         answer = data.get("answer", "")
         results = data.get("results", [])
 
+        def _clip(text: str, limit: int = 220) -> str:
+            text = (text or "").strip()
+            if len(text) <= limit:
+                return text
+            return text[: limit - 1].rstrip() + "…"
+
         output_parts = []
         if answer:
-            output_parts.append(f"摘要答案:\n{answer}")
+            output_parts.append(f"## 摘要答案\n\n{_clip(answer, 500)}")
         if results:
-            output_parts.append("搜索结果:")
+            output_parts.append("## 搜索结果")
             for i, r in enumerate(results, 1):
-                title = r.get("title", "")
-                url = r.get("url", "")
-                content = r.get("content", "")
-                output_parts.append(f"{i}. {title}\n   链接: {url}\n   内容: {content}")
+                title = (r.get("title") or "无标题").strip()
+                url = (r.get("url") or "").strip()
+                snippet = _clip(r.get("content") or "", 220)
+                item_lines = [f"### {i}. {title}"]
+                if url:
+                    item_lines.append(f"- 链接: {url}")
+                if snippet:
+                    item_lines.append(f"- 摘要: {snippet}")
+                output_parts.append("\n".join(item_lines))
 
         return {
             "success": True,

@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 
@@ -293,6 +293,7 @@ class SkillPackResponse(BaseModel):
     description: str = ""
     manifest: Optional[Dict[str, Any]] = None
     skill_content: str = ""
+    package_files: Optional[Dict[str, Any]] = None
     status: str = "ACTIVE"
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
@@ -335,10 +336,15 @@ class DocumentAddRequest(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
+class KnowledgeFileStatusUpdate(BaseModel):
+    status: str = Field(..., pattern="^(ACTIVE|INACTIVE)$")
+
+
 class KnowledgeSearchRequest(BaseModel):
     query: str = Field(..., min_length=1)
     top_k: int = Field(default=5, ge=1, le=50)
-    rerank: bool = Field(default=False)
+    mode: str = Field(default="hybrid", description="hybrid | vector | bm25")
+    rerank: bool = Field(default=False, description="已忽略，保留兼容")
 
 
 class KnowledgeSearchResult(BaseModel):
@@ -346,6 +352,7 @@ class KnowledgeSearchResult(BaseModel):
     content: str
     score: float
     metadata: Dict[str, Any] = {}
+    sources: List[str] = []
 
 
 class KnowledgeSearchResponse(BaseModel):
@@ -368,11 +375,33 @@ class SessionMessage(BaseModel):
 
 
 class SessionChatRequest(BaseModel):
-    message: str = Field(..., min_length=1)
+    message: str = Field(default="", max_length=32000)
+    attachment_ids: List[str] = Field(default_factory=list)
     skill_pack_id: Optional[str] = None
     timeout_seconds: Optional[int] = None
     execution_mode: Optional[str] = Field(default="auto", pattern="^(auto|react|plan_and_execute|direct)$")
     skip_history: bool = False
+
+    @model_validator(mode="after")
+    def message_or_attachments(self):
+        if not self.message.strip() and not self.attachment_ids:
+            raise ValueError("消息和附件不能同时为空")
+        return self
+
+
+class SessionAttachmentResponse(BaseModel):
+    attachment_id: str
+    filename: str
+    mime_type: str
+    size_bytes: int
+    text_length: int = 0
+    is_image: bool = False
+    uploaded_at: Optional[str] = None
+
+
+class SessionAttachmentListResponse(BaseModel):
+    attachments: List[SessionAttachmentResponse] = Field(default_factory=list)
+    total: int = 0
 
 
 class SessionChatAsyncResponse(BaseModel):
@@ -399,10 +428,26 @@ class SessionResponse(BaseModel):
     token_budget: int = 100000
     ttl_seconds: int = 1800
     messages: List[Dict[str, Any]] = []
+    llm_calls: List[Dict[str, Any]] = []
     created_at: Optional[datetime] = None
     last_active_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
+
+
+class LlmCallLogItem(BaseModel):
+    call_id: str
+    seq: int
+    created_at: Optional[str] = None
+    source: str = ""
+    model_name: str = ""
+    duration_ms: int = 0
+    input: Dict[str, Any] = {}
+    output: Dict[str, Any] = {}
+
+
+class LlmCallLogListResponse(BaseModel):
+    items: List[LlmCallLogItem] = []
 
 
 class DataQueryAgentCreate(BaseModel):
@@ -826,6 +871,77 @@ class MemoryAgentMountResponse(BaseModel):
     memory_enabled: bool = False
 
 
+class MemoryBlockResponse(BaseModel):
+    label: str
+    value: str = ""
+    limit: int = 2000
+    description: str = ""
+    read_only: bool = False
+    id: Optional[str] = None
+
+
+class MemoryBlockUpdate(BaseModel):
+    agent_id: str
+    user_id: str = ""
+    value: str = ""
+
+
+class MemoryPassageResponse(BaseModel):
+    id: str
+    content: str = ""
+    tags: List[str] = []
+    created_at: Optional[Any] = None
+    metadata: Dict[str, Any] = {}
+    rank: Optional[int] = None
+
+
+class MemoryPassageCreate(BaseModel):
+    agent_id: str
+    user_id: str = ""
+    text: str = Field(..., min_length=1)
+    tags: List[str] = []
+
+
+class MemoryScopeResponse(BaseModel):
+    mapping_id: str
+    agent_id: str
+    user_id: str = ""
+    username: str = ""
+    letta_agent_id: str
+    created_at: Optional[datetime] = None
+
+
+class LettaStatusResponse(BaseModel):
+    enabled: bool = True
+    healthy: bool = False
+    base_url: str = ""
+    embedding_model: str = "vela-embedding"
+    embedding_dim: int = 1024
+    error: Optional[str] = None
+    version: Optional[str] = None
+    mapping_count: int = 0
+
+
+class LettaConfigResponse(BaseModel):
+    enabled: bool = True
+    base_url: str = "http://127.0.0.1:8283"
+    password: str = ""
+    gateway_base: str = "http://127.0.0.1:8000"
+    gateway_token: str = ""
+    distill_model_service_id: str = ""
+    embedding_model: str = "vela-embedding"
+    embedding_dim: int = 1024
+
+
+class LettaConfigUpdate(BaseModel):
+    enabled: Optional[bool] = None
+    base_url: Optional[str] = None
+    password: Optional[str] = None
+    gateway_base: Optional[str] = None
+    gateway_token: Optional[str] = None
+    distill_model_service_id: Optional[str] = None
+
+
 class QueryRewriteAgentMountItem(BaseModel):
     agent_id: str
     query_rewrite_enabled: bool
@@ -850,3 +966,56 @@ class QueryRewritePreviewRequest(BaseModel):
 
 class QueryRewritePreviewResponse(BaseModel):
     rewrite: Dict[str, Any]
+
+
+# ── Auth / User ──────────────────────────────────────────────
+
+class TokenOut(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+
+class UserOut(BaseModel):
+    user_id: str
+    username: str
+    email: str
+    display_name: str
+    avatar_url: str = ""
+    roles: str
+    is_active: bool = True
+    created_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+class RegisterIn(BaseModel):
+    email: str
+    username: str
+    password: str = Field(..., min_length=6)
+    display_name: str = ""
+
+
+class AdminCreateUserIn(BaseModel):
+    email: str
+    username: str
+    password: str = Field(..., min_length=6)
+    display_name: str = ""
+    roles: str = "member"
+
+
+class ActiveIn(BaseModel):
+    is_active: bool
+
+
+class RolesIn(BaseModel):
+    roles: str
+
+
+class ProfileUpdateIn(BaseModel):
+    display_name: str = ""
+    email: str
+
+
+class PasswordUpdateIn(BaseModel):
+    old_password: str
+    new_password: str = Field(..., min_length=6)

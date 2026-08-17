@@ -16,4 +16,12 @@ croniter>=2.0.0
 pymysql>=1.1.0
 playwright>=1.49.0
 Pillow>=10.0.0
+openpyxl>=3.1.0
+xlrd>=2.0.1
+jieba>=0.42.1
+rank-bm25>=0.2.2
 cryptography>=42.0.0
+python-jose[cryptography]>=3.3.0
+passlib[bcrypt]>=1.7.4
+bcrypt==4.0.1
+letta-client>=0.1.0

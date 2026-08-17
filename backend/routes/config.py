@@ -12,6 +12,8 @@ from schemas import (
     MemoryAgentMountResponse,
     QueryRewriteAgentMountUpdate,
     QueryRewriteAgentMountResponse,
+    LettaConfigResponse,
+    LettaConfigUpdate,
 )
 
 router = APIRouter(prefix="/api/v1/config", tags=["config"])
@@ -106,6 +108,62 @@ def update_memory_agent_mounts(data: MemoryAgentMountUpdate, db: Session = Depen
         updated += 1
     db.commit()
     return {"message": "记忆模块挂载配置已保存", "updated": updated}
+
+
+@router.get("/memory/letta", response_model=LettaConfigResponse)
+def get_letta_config():
+    from services.memory.letta_store import EMBEDDING_DIM, EMBEDDING_MODEL, load_letta_config
+
+    cfg = load_letta_config()
+    password = cfg.get("password") or ""
+    masked = password
+    if password and len(password) > 4:
+        masked = password[:2] + "*" * (len(password) - 4) + password[-2:]
+    elif password:
+        masked = "****"
+    token = cfg.get("gateway_token") or ""
+    masked_token = token
+    if token and len(token) > 4:
+        masked_token = token[:2] + "*" * (len(token) - 4) + token[-2:]
+    elif token:
+        masked_token = "****"
+    return LettaConfigResponse(
+        enabled=bool(cfg.get("enabled", True)),
+        base_url=cfg.get("base_url") or "",
+        password=masked,
+        gateway_base=cfg.get("gateway_base") or "",
+        gateway_token=masked_token,
+        distill_model_service_id=cfg.get("distill_model_service_id") or "",
+        embedding_model=EMBEDDING_MODEL,
+        embedding_dim=EMBEDDING_DIM,
+    )
+
+
+@router.put("/memory/letta")
+def update_letta_config(data: LettaConfigUpdate):
+    config = _load_config()
+    if "memory" not in config:
+        config["memory"] = {}
+    if "letta" not in config["memory"]:
+        config["memory"]["letta"] = {}
+    letta = config["memory"]["letta"]
+    payload = data.model_dump(exclude_unset=True)
+    for key, value in payload.items():
+        if value is None:
+            continue
+        # 跳过掩码密码/token（前端未改时可能回传掩码）
+        if key in ("password", "gateway_token") and "*" in str(value):
+            continue
+        letta[key] = value
+    _save_config(config)
+    # 清掉客户端缓存，下次用新配置
+    try:
+        from services.memory import letta_store
+        letta_store._client_cache = None
+        letta_store._client_cfg_key = None
+    except Exception:
+        pass
+    return {"message": "Letta 记忆服务配置已保存"}
 
 
 @router.get("/query-rewrite/agents", response_model=List[QueryRewriteAgentMountResponse])

@@ -356,6 +356,7 @@ class WorkflowEngine:
             messages=messages,
             max_tokens=max_tokens,
             timeout_seconds=data.get("timeout_seconds", 60),
+            source="workflow_llm",
         )
 
         content = completion.get("choices", [{}])[0].get("message", {}).get("content", "")

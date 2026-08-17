@@ -1,6 +1,20 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { getToken } from '../api'
+import { useAuthStore } from '../stores/auth'
 
 const routes = [
+  {
+    path: '/login',
+    name: 'Login',
+    component: () => import('../views/auth/Login.vue'),
+    meta: { public: true },
+  },
+  {
+    path: '/register',
+    name: 'Register',
+    component: () => import('../views/auth/Register.vue'),
+    meta: { public: true },
+  },
   {
     path: '/',
     name: 'Dashboard',
@@ -110,11 +124,48 @@ const routes = [
     name: 'SystemConfig',
     component: () => import('../views/settings/SystemConfig.vue'),
   },
+  {
+    path: '/users',
+    name: 'UserList',
+    component: () => import('../views/users/UserList.vue'),
+    meta: { requiresAdmin: true },
+  },
+  {
+    path: '/me/settings',
+    name: 'UserSettings',
+    component: () => import('../views/settings/UserSettings.vue'),
+  },
 ]
 
 const router = createRouter({
   history: createWebHistory(),
   routes,
+})
+
+router.beforeEach(async (to) => {
+  const token = getToken()
+  if (to.meta.public) {
+    if (token && (to.path === '/login' || to.path === '/register')) {
+      return '/'
+    }
+    return true
+  }
+  if (!token) {
+    return { path: '/login', query: { redirect: to.fullPath } }
+  }
+  const auth = useAuthStore()
+  if (!auth.user) {
+    try {
+      await auth.fetchMe()
+    } catch {
+      auth.logout()
+      return { path: '/login', query: { redirect: to.fullPath } }
+    }
+  }
+  if (to.meta.requiresAdmin && !auth.isAdmin) {
+    return '/'
+  }
+  return true
 })
 
 export default router

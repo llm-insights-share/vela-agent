@@ -15,19 +15,37 @@
       <a-table :columns="columns" :data-source="skills" :loading="loading" row-key="skill_pack_id" :pagination="false">
         <template #bodyCell="{ column, record }">
           <template v-if="column.key === 'status'">
-            <a-tag :color="record.status === 'ACTIVE' ? 'green' : 'default'">{{ record.status }}</a-tag>
+            <a-tag :color="record.status === 'ACTIVE' ? 'green' : 'default'">
+              {{ statusLabel(record.status) }}
+            </a-tag>
           </template>
           <template v-if="column.key === 'scope'">
-            <a-tag :color="record.scope === 'GLOBAL' ? 'blue' : 'orange'">{{ record.scope }}</a-tag>
-          </template>
-          <template v-if="column.key === 'tools'">
-            {{ (record.tools || []).length }} 个工具
+            <a-tag :color="record.scope === 'GLOBAL' ? 'blue' : 'orange'">{{ scopeLabel(record.scope) }}</a-tag>
           </template>
           <template v-if="column.key === 'action'">
             <a-space>
-              <a @click="openEdit(record)">编辑</a>
-              <a-popconfirm title="确认归档?" @confirm="handleDelete(record.skill_pack_id)">
-                <a style="color: #b5341c">归档</a>
+              <a @click="openDetail(record)">详情</a>
+              <a-popconfirm
+                v-if="record.status === 'ACTIVE'"
+                title="确认下架该 Skill 包？"
+                @confirm="handleUnpublish(record.skill_pack_id)"
+              >
+                <a style="color: #b5341c">下架</a>
+              </a-popconfirm>
+              <a-popconfirm
+                v-else
+                title="确认上架该 Skill 包？"
+                @confirm="handlePublish(record.skill_pack_id)"
+              >
+                <a>上架</a>
+              </a-popconfirm>
+              <a-popconfirm
+                title="确认删除该 Skill 包？删除后不可恢复。"
+                ok-text="删除"
+                cancel-text="取消"
+                @confirm="handleRemove(record.skill_pack_id)"
+              >
+                <a style="color: #b5341c">删除</a>
               </a-popconfirm>
             </a-space>
           </template>
@@ -35,7 +53,13 @@
       </a-table>
     </a-card>
 
-    <a-modal v-model:open="modalOpen" :title="editing ? '编辑 Skill 包' : '创建 Skill 包'" @ok="handleSave" :confirm-loading="saving" width="700px">
+    <a-modal
+      v-model:open="modalOpen"
+      title="创建 Skill 包"
+      @ok="handleSave"
+      :confirm-loading="saving"
+      width="700px"
+    >
       <a-form :model="form" :label-col="{ span: 5 }" :wrapper-col="{ span: 17 }">
         <a-form-item label="名称" required>
           <a-input v-model:value="form.name" placeholder="Skill 包名称" />
@@ -59,7 +83,61 @@
       </a-form>
     </a-modal>
 
-    <a-modal v-model:open="importOpen" title="导入 Skill 包" :footer="null" width="500px">
+    <a-modal
+      v-model:open="detailOpen"
+      title="Skill 包详情"
+      :footer="null"
+      width="900px"
+      destroy-on-close
+    >
+      <div v-if="detailLoading" class="detail-loading">
+        <a-spin tip="加载中..." />
+      </div>
+      <template v-else-if="detail">
+        <a-descriptions :column="1" bordered size="small" class="detail-desc">
+          <a-descriptions-item label="名称">{{ detail.name }}</a-descriptions-item>
+          <a-descriptions-item label="版本">{{ detail.version }}</a-descriptions-item>
+          <a-descriptions-item label="范围">{{ scopeLabel(detail.scope) }}</a-descriptions-item>
+          <a-descriptions-item label="描述">{{ detail.description || '（无）' }}</a-descriptions-item>
+        </a-descriptions>
+
+        <div class="detail-section">
+          <div class="section-label">引用 Skill</div>
+          <div class="section-value">{{ referencedSkillsText(detail) }}</div>
+        </div>
+
+        <div class="detail-section">
+          <div class="section-label">资产内容</div>
+          <div v-if="isSingleFilePack(detail)" class="asset-single">
+            <div class="preview-markdown" v-html="singleFileHtml"></div>
+          </div>
+          <div v-else class="asset-multi">
+            <div class="asset-tree">
+              <a-tree
+                v-if="fileTree.length"
+                :tree-data="fileTree"
+                :selected-keys="selectedFileKeys"
+                default-expand-all
+                @select="onFileSelect"
+              />
+            </div>
+            <div class="asset-preview">
+              <table v-if="selectedFileMeta.length" class="meta-table">
+                <tbody>
+                  <tr v-for="row in selectedFileMeta" :key="row.key">
+                    <td class="meta-key">{{ row.key }}</td>
+                    <td>{{ row.value }}</td>
+                  </tr>
+                </tbody>
+              </table>
+              <div class="preview-markdown" v-html="selectedFileHtml"></div>
+            </div>
+          </div>
+        </div>
+      </template>
+    </a-modal>
+
+    <a-modal v-model:open="importOpen" title="导入 Skill 包" :footer="null" width="520px">
       <div
         class="drop-zone"
         :class="{ 'drop-zone-active': dragOver }"
@@ -67,21 +145,33 @@
         @dragover.prevent="onDragOver"
         @dragleave.prevent="onDragLeave"
         @drop.prevent="onDrop"
-        @click="triggerFileInput"
       >
         <p class="ant-upload-drag-icon">
           <InboxOutlined style="font-size: 48px; color: #c2410c" />
         </p>
-        <p class="ant-upload-text">点击或拖拽 Skill 目录 / .zip 文件到此区域</p>
+        <p class="ant-upload-text">拖拽 Skill 目录或 .zip 文件到此区域</p>
         <p class="ant-upload-hint">
-          支持拖拽整个 Skill 目录，或 .zip 压缩包，需包含 SKILL.md、skill.yaml 或 skill.json 清单文件
+          需包含 SKILL.md、skill.yaml 或 skill.json 清单文件
         </p>
+        <a-space style="margin-top: 16px">
+          <a-button @click="triggerZipInput">选择 .zip 文件</a-button>
+          <a-button @click="triggerDirInput">选择文件夹</a-button>
+        </a-space>
         <input
           ref="fileInputRef"
           type="file"
           accept=".zip"
           style="display: none"
-          @change="onFileSelected"
+          @change="onZipSelected"
+        />
+        <input
+          ref="dirInputRef"
+          type="file"
+          webkitdirectory
+          directory
+          multiple
+          style="display: none"
+          @change="onDirectorySelected"
         />
       </div>
       <div v-if="selectedName" class="drop-selected">
@@ -100,18 +190,24 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { PlusOutlined, ImportOutlined, InboxOutlined } from '@ant-design/icons-vue'
 import { skillApi } from '../../api'
 import { message } from 'ant-design-vue'
+import { marked } from 'marked'
 import JSZip from 'jszip'
 
 const loading = ref(false)
 const skills = ref([])
 const modalOpen = ref(false)
-const editing = ref(null)
 const saving = ref(false)
 const toolsText = ref('[]')
+
+const detailOpen = ref(false)
+const detailLoading = ref(false)
+const detail = ref(null)
+const selectedFileKeys = ref([])
+const selectedFileContent = ref('')
 
 const importOpen = ref(false)
 const importing = ref(false)
@@ -119,6 +215,7 @@ const dragOver = ref(false)
 const selectedName = ref('')
 const selectedFileCount = ref(0)
 const fileInputRef = ref(null)
+const dirInputRef = ref(null)
 let importBlob = null
 let importFileName = ''
 
@@ -126,9 +223,8 @@ const columns = [
   { title: '名称', dataIndex: 'name' },
   { title: '版本', dataIndex: 'version' },
   { title: '范围', key: 'scope', width: 100 },
-  { title: '工具数', key: 'tools', width: 80 },
   { title: '状态', key: 'status', width: 100 },
-  { title: '操作', key: 'action', width: 150 },
+  { title: '操作', key: 'action', width: 220 },
 ]
 
 const form = reactive({
@@ -138,6 +234,164 @@ const form = reactive({
   description: '',
   tools: [],
 })
+
+const fileTree = computed(() => {
+  const files = detail.value?.package_files?.files || []
+  return buildFileTree(files)
+})
+
+const singleFileHtml = computed(() => {
+  if (!detail.value) return ''
+  const content = getSingleFileContent(detail.value)
+  return renderMarkdown(content)
+})
+
+const selectedFileHtml = computed(() => {
+  const { body } = parseSkillMd(selectedFileContent.value)
+  const text = body || selectedFileContent.value
+  if (isMarkdownFile(selectedFileKeys.value[0])) {
+    return renderMarkdown(text)
+  }
+  return `<pre class="preview-text">${escapeHtml(text)}</pre>`
+})
+
+const selectedFileMeta = computed(() => {
+  const path = selectedFileKeys.value[0]
+  if (!path || !isSkillMdPath(path)) return []
+  const { frontmatter } = parseSkillMd(selectedFileContent.value)
+  const rows = []
+  const name = frontmatter.name || detail.value?.manifest?.name
+  const desc = frontmatter.description || detail.value?.manifest?.description
+  if (name) rows.push({ key: 'name', value: name })
+  if (desc) rows.push({ key: 'description', value: desc })
+  return rows
+})
+
+function statusLabel(status) {
+  if (status === 'ACTIVE') return '已上架'
+  if (status === 'ARCHIVED') return '已下架'
+  return status
+}
+
+function scopeLabel(scope) {
+  const map = { GLOBAL: '全局', DEPT: '部门', PRIVATE: '私有', platform: '平台' }
+  return map[scope] || scope
+}
+
+function referencedSkillsText(record) {
+  const refs = record?.manifest?.references || record?.manifest?.skills
+  if (!refs || (Array.isArray(refs) && refs.length === 0)) return '无'
+  if (Array.isArray(refs)) return refs.map(r => (typeof r === 'string' ? r : r.name || r)).join('、')
+  return String(refs)
+}
+
+function isSingleFilePack(record) {
+  const files = record?.package_files?.files || []
+  if (files.length === 0) return true
+  if (files.length === 1) return true
+  const skillMdPath = record.package_files?.skill_md_path
+  const others = files.filter(f => f.path !== skillMdPath)
+  return others.length === 0
+}
+
+function getSingleFileContent(record) {
+  const pf = record.package_files
+  if (pf?.skill_md_path) {
+    const file = (pf.files || []).find(f => f.path === pf.skill_md_path)
+    if (file) return parseSkillMd(file.content).body
+  }
+  if (pf?.files?.length === 1) {
+    return parseSkillMd(pf.files[0].content).body
+  }
+  return record.skill_content || ''
+}
+
+function buildFileTree(files) {
+  const root = []
+  for (const f of files) {
+    const parts = f.path.split('/')
+    let current = root
+    let pathSoFar = ''
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i]
+      pathSoFar = pathSoFar ? `${pathSoFar}/${part}` : part
+      const isLeaf = i === parts.length - 1
+      if (isLeaf) {
+        current.push({ title: part, key: f.path, isLeaf: true })
+      } else {
+        let node = current.find(n => n.key === pathSoFar && n.children)
+        if (!node) {
+          node = { title: part, key: pathSoFar, children: [] }
+          current.push(node)
+        }
+        current = node.children
+      }
+    }
+  }
+  return root
+}
+
+function parseSkillMd(raw) {
+  raw = (raw || '').trim()
+  const frontmatter = {}
+  let body = raw
+  if (raw.startsWith('---')) {
+    const match = raw.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n([\s\S]*)$/)
+    if (match) {
+      body = match[2].trim()
+      for (const line of match[1].split('\n')) {
+        const m = line.match(/^([\w-]+):\s*(.+)$/)
+        if (m) frontmatter[m[1]] = m[2].replace(/^["']|["']$/g, '').trim()
+      }
+    }
+  }
+  return { frontmatter, body }
+}
+
+function isSkillMdPath(path) {
+  return path && path.split('/').pop().toLowerCase() === 'skill.md'
+}
+
+function isMarkdownFile(path) {
+  if (!path) return false
+  const bn = path.split('/').pop().toLowerCase()
+  return bn.endsWith('.md') || bn.endsWith('.markdown')
+}
+
+function renderMarkdown(text) {
+  if (!text) return '<p class="muted">（无内容）</p>'
+  return marked.parse(text)
+}
+
+function escapeHtml(text) {
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+}
+
+function selectDefaultFile(record) {
+  const files = record?.package_files?.files || []
+  const defaultPath = record?.package_files?.skill_md_path
+    || files.find(f => isMarkdownFile(f.path))?.path
+    || files[0]?.path
+  if (defaultPath) {
+    selectedFileKeys.value = [defaultPath]
+    const file = files.find(f => f.path === defaultPath)
+    selectedFileContent.value = file?.content || ''
+  } else {
+    selectedFileKeys.value = []
+    selectedFileContent.value = ''
+  }
+}
+
+function onFileSelect(keys) {
+  if (!keys.length) return
+  selectedFileKeys.value = keys
+  const path = keys[0]
+  const file = (detail.value?.package_files?.files || []).find(f => f.path === path)
+  selectedFileContent.value = file?.content || ''
+}
 
 async function fetchSkills() {
   loading.value = true
@@ -152,23 +406,24 @@ async function fetchSkills() {
 }
 
 function openCreate() {
-  editing.value = null
   Object.assign(form, { name: '', version: '1.0.0', scope: 'GLOBAL', description: '', tools: [] })
   toolsText.value = '[]'
   modalOpen.value = true
 }
 
-function openEdit(record) {
-  editing.value = record
-  Object.assign(form, {
-    name: record.name,
-    version: record.version,
-    scope: record.scope,
-    description: record.description,
-    tools: record.tools,
-  })
-  toolsText.value = JSON.stringify(record.tools || [], null, 2)
-  modalOpen.value = true
+async function openDetail(record) {
+  detailOpen.value = true
+  detailLoading.value = true
+  detail.value = null
+  try {
+    detail.value = await skillApi.get(record.skill_pack_id)
+    selectDefaultFile(detail.value)
+  } catch (e) {
+    message.error(e.message)
+    detailOpen.value = false
+  } finally {
+    detailLoading.value = false
+  }
 }
 
 async function handleSave() {
@@ -182,14 +437,8 @@ async function handleSave() {
       saving.value = false
       return
     }
-    const data = { ...form, tools }
-    if (editing.value) {
-      await skillApi.update(editing.value.skill_pack_id, data)
-      message.success('更新成功')
-    } else {
-      await skillApi.create(data)
-      message.success('创建成功')
-    }
+    await skillApi.create({ ...form, tools })
+    message.success('创建成功')
     modalOpen.value = false
     fetchSkills()
   } catch (e) {
@@ -199,10 +448,30 @@ async function handleSave() {
   }
 }
 
-async function handleDelete(id) {
+async function handleUnpublish(id) {
+  try {
+    await skillApi.unpublish(id)
+    message.success('已下架')
+    fetchSkills()
+  } catch (e) {
+    message.error(e.message)
+  }
+}
+
+async function handlePublish(id) {
+  try {
+    await skillApi.publish(id)
+    message.success('已上架')
+    fetchSkills()
+  } catch (e) {
+    message.error(e.message)
+  }
+}
+
+async function handleRemove(id) {
   try {
     await skillApi.delete(id)
-    message.success('已归档')
+    message.success('已删除')
     fetchSkills()
   } catch (e) {
     message.error(e.message)
@@ -225,11 +494,15 @@ function resetImport() {
   selectedFileCount.value = 0
 }
 
-function triggerFileInput() {
+function triggerZipInput() {
   fileInputRef.value?.click()
 }
 
-function onFileSelected(e) {
+function triggerDirInput() {
+  dirInputRef.value?.click()
+}
+
+function onZipSelected(e) {
   const file = e.target.files[0]
   if (!file) return
   if (!file.name.toLowerCase().endsWith('.zip')) {
@@ -240,6 +513,36 @@ function onFileSelected(e) {
   importFileName = file.name
   selectedName.value = file.name
   selectedFileCount.value = 0
+  e.target.value = ''
+}
+
+async function onDirectorySelected(e) {
+  const fileList = e.target.files
+  if (!fileList || fileList.length === 0) return
+
+  const files = Array.from(fileList).filter(f => {
+    const parts = (f.webkitRelativePath || f.name).split('/')
+    return !parts.some(p => p.startsWith('.'))
+  })
+
+  if (files.length === 0) {
+    message.error('目录为空')
+    e.target.value = ''
+    return
+  }
+
+  const firstPath = files[0].webkitRelativePath || files[0].name
+  const dirName = firstPath.includes('/') ? firstPath.split('/')[0] : 'skill'
+  selectedName.value = dirName
+  selectedFileCount.value = files.length
+
+  const zip = new JSZip()
+  for (const file of files) {
+    const relPath = file.webkitRelativePath || file.name
+    zip.file(relPath, file)
+  }
+  importBlob = await zip.generateAsync({ type: 'blob' })
+  importFileName = dirName + '.zip'
   e.target.value = ''
 }
 
@@ -261,18 +564,15 @@ async function onDrop(e) {
   if (!items || items.length === 0) return
 
   const firstItem = items[0]
-  // 检查是否是目录拖拽
   const entry = firstItem.webkitGetAsEntry?.()
   if (entry && entry.isDirectory) {
     await handleDirectoryDrop(entry)
     return
   }
 
-  // 检查是否是文件拖拽
   const file = firstItem.getAsFile?.()
   if (file) {
     handleFileDrop(file)
-    return
   }
 }
 
@@ -317,7 +617,6 @@ async function readDirectoryEntries(dirEntry, basePath, results) {
       const file = await entryToFile(entry)
       results.push({ path: fullPath, blob: file })
     } else if (entry.isDirectory) {
-      // 跳过隐藏目录
       if (entry.name.startsWith('.')) continue
       await readDirectoryEntries(entry, fullPath, results)
     }
@@ -372,6 +671,81 @@ onMounted(fetchSkills)
 <style scoped>
 .page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
 .page-title { font-family: 'Noto Serif SC', serif; font-size: 22px; font-weight: 700; color: #1a1714; margin: 0; }
+
+.detail-loading { text-align: center; padding: 48px; }
+.detail-desc { margin-bottom: 20px; }
+.detail-section { margin-top: 16px; }
+.section-label { font-weight: 600; color: #1a1714; margin-bottom: 8px; }
+.section-value { color: #444; }
+
+.asset-single {
+  border: 1px solid #f0f0f0;
+  border-radius: 8px;
+  padding: 16px;
+  background: #fafafa;
+  max-height: 480px;
+  overflow-y: auto;
+}
+
+.asset-multi {
+  display: flex;
+  border: 1px solid #f0f0f0;
+  border-radius: 8px;
+  min-height: 360px;
+  max-height: 480px;
+  overflow: hidden;
+}
+
+.asset-tree {
+  width: 220px;
+  border-right: 1px solid #f0f0f0;
+  padding: 12px;
+  overflow-y: auto;
+  background: #fafafa;
+  flex-shrink: 0;
+}
+
+.asset-preview {
+  flex: 1;
+  padding: 16px;
+  overflow-y: auto;
+}
+
+.meta-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 16px;
+  font-size: 13px;
+}
+.meta-table td {
+  border: 1px solid #f0f0f0;
+  padding: 8px 12px;
+}
+.meta-key {
+  width: 120px;
+  background: #fafafa;
+  color: #666;
+  font-weight: 500;
+}
+
+.preview-markdown :deep(p) { margin: 0 0 8px; }
+.preview-markdown :deep(h1) { font-size: 20px; margin: 16px 0 8px; }
+.preview-markdown :deep(h2) { font-size: 17px; margin: 14px 0 6px; }
+.preview-markdown :deep(h3) { font-size: 15px; margin: 12px 0 6px; }
+.preview-markdown :deep(ul), .preview-markdown :deep(ol) { padding-left: 20px; margin: 0 0 8px; }
+.preview-markdown :deep(code) {
+  background: #f5f5f5;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 13px;
+}
+.preview-markdown :deep(pre) {
+  background: #f5f5f5;
+  padding: 12px;
+  border-radius: 6px;
+  overflow-x: auto;
+}
+.preview-markdown :deep(.muted) { color: #999; }
 
 .drop-zone {
   border: 2px dashed #d9d9d9;

@@ -1,4 +1,5 @@
 import httpx
+import time
 from typing import List, Dict, Any, Optional
 from models import ModelProvider, ModelService, ProviderStatus
 
@@ -51,7 +52,10 @@ class ModelProviderService:
         temperature: float = 0.7,
         tools: Optional[List[Dict[str, Any]]] = None,
         timeout_seconds: Optional[int] = None,
+        source: Optional[str] = None,
     ) -> Dict[str, Any]:
+        from services.llm_call_recorder import get_active_context, record_call
+
         headers = {"Authorization": f"Bearer {provider.api_key}", "Content-Type": "application/json"}
         if provider.extra_headers:
             headers.update(provider.extra_headers)
@@ -73,6 +77,9 @@ class ModelProviderService:
             pool=10.0,
         )
 
+        record_enabled = get_active_context() is not None
+        started = time.monotonic()
+
         async with httpx.AsyncClient(timeout=timeout) as client:
             try:
                 url = provider.base_url.rstrip("/") + "/chat/completions"
@@ -91,11 +98,47 @@ class ModelProviderService:
                         result["reasoning_content"] = msg["reasoning_content"]
                     elif msg.get("thinking"):
                         result["reasoning_content"] = msg["thinking"]
+                if record_enabled:
+                    record_call(
+                        model_name=model_name,
+                        messages=messages,
+                        tools=tools,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                        completion=result,
+                        duration_ms=int((time.monotonic() - started) * 1000),
+                        source=source,
+                    )
                 return result
             except httpx.ReadTimeout:
-                raise ValueError(f"模型服务响应超时（{read_timeout}s），请尝试简化 Skill 内容或增加超时时间")
+                err = ValueError(
+                    f"模型服务响应超时（{read_timeout}s），请尝试简化 Skill 内容或增加超时时间"
+                )
+                if record_enabled:
+                    record_call(
+                        model_name=model_name,
+                        messages=messages,
+                        tools=tools,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                        duration_ms=int((time.monotonic() - started) * 1000),
+                        source=source,
+                        raw_error=str(err),
+                    )
+                raise err
             except Exception as e:
                 print(f"[ModelProviderService] chat error for {provider.provider_code}: {e}")
+                if record_enabled:
+                    record_call(
+                        model_name=model_name,
+                        messages=messages,
+                        tools=tools,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                        duration_ms=int((time.monotonic() - started) * 1000),
+                        source=source,
+                        raw_error=str(e),
+                    )
                 raise
 
     @staticmethod

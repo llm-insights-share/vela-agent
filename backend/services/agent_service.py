@@ -479,6 +479,8 @@ class AgentService:
         for msg in reversed(messages):
             if msg.get("role") != "assistant":
                 continue
+            if content:
+                msg["content"] = content
             if result.get("thinking"):
                 msg["thinking"] = result["thinking"]
             if result.get("execution_trace"):
@@ -541,6 +543,7 @@ class AgentService:
         execution_mode: Optional[str] = "auto",
         skip_history: bool = False,
         persist_user_message: bool = True,
+        attachment_ids: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         agent = db.query(Agent).filter(Agent.agent_id == agent_id).first()
         if not agent:
@@ -568,364 +571,399 @@ class AgentService:
 
         clear_abort(session_id)
 
-        from models import AgentType
+        from services.llm_call_recorder import LlmRecordingScope
 
-        # WF: 工作流恢复（HITL 审批后由前端触发 resume 或 chat 空消息）
-        pending_ctx = session.pending_context or {}
-        if (
-            agent.agent_type == AgentType.WORKFLOW
-            and pending_ctx.get("kind") == "workflow"
-            and pending_ctx.get("workflow_resume")
-        ):
-            from services.workflow_engine import WorkflowEngine, WorkflowState
-            wf_state = WorkflowState.from_dict(pending_ctx.get("workflow_state") or {})
-            engine = WorkflowEngine(
-                db=db, agent=agent, session=session,
-                provider=provider, model_svc=model_svc,
-            )
-            result = await asyncio.wait_for(
-                engine.resume(wf_state, hitl_approved=True),
-                timeout=float(timeout_seconds) if timeout_seconds else 300.0,
-            )
-            return await AgentService._finalize_workflow_chat(
-                db, session, message, result, persist_user_message=persist_user_message
-            )
+        async with LlmRecordingScope(db, session, agent):
+            from models import AgentType
 
-        # MA: 如果是 COMPOSITE 类型，走 CoordinatorEngine
-        if agent.agent_type == AgentType.COMPOSITE:
-            from services.coordinator_service import CoordinatorEngine
-            coordinator = CoordinatorEngine(
-                db=db,
-                parent_agent=agent,
-                session=session,
-                provider=provider,
-                model_svc=model_svc,
-            )
-            result = await asyncio.wait_for(
-                coordinator.run(message),
-                timeout=float(timeout_seconds) if timeout_seconds else 300.0,
-            )
-            # 写入 session 消息历史（HITL 挂起时不写 final_result，留待审批通过后再写）
-            messages = session.messages or []
-            if persist_user_message:
-                messages.append({"role": "user", "content": message})
-            pending_approval_id = result.get("pending_approval_id")
-            if not pending_approval_id:
-                messages.append({"role": "assistant", "content": result.get("result", "")})
-            session.messages = messages
-            session.token_used = (session.token_used or 0) + result.get("total_tokens", 0)
-            session.last_active_at = now_utc()
-            db.commit()
+            # WF: 工作流恢复（HITL 审批后由前端触发 resume 或 chat 空消息）
+            pending_ctx = session.pending_context or {}
+            if (
+                agent.agent_type == AgentType.WORKFLOW
+                and pending_ctx.get("kind") == "workflow"
+                and pending_ctx.get("workflow_resume")
+            ):
+                from services.workflow_engine import WorkflowEngine, WorkflowState
+                wf_state = WorkflowState.from_dict(pending_ctx.get("workflow_state") or {})
+                engine = WorkflowEngine(
+                    db=db, agent=agent, session=session,
+                    provider=provider, model_svc=model_svc,
+                )
+                result = await asyncio.wait_for(
+                    engine.resume(wf_state, hitl_approved=True),
+                    timeout=float(timeout_seconds) if timeout_seconds else 300.0,
+                )
+                return await AgentService._finalize_workflow_chat(
+                    db, session, message, result, persist_user_message=persist_user_message
+                )
 
-            # MA-IMP-09: 交付前 HITL Gate 触发时返回挂起响应
-            if pending_approval_id:
+            # MA: 如果是 COMPOSITE 类型，走 CoordinatorEngine
+            if agent.agent_type == AgentType.COMPOSITE:
+                from services.coordinator_service import CoordinatorEngine
+                coordinator = CoordinatorEngine(
+                    db=db,
+                    parent_agent=agent,
+                    session=session,
+                    provider=provider,
+                    model_svc=model_svc,
+                )
+                result = await asyncio.wait_for(
+                    coordinator.run(message),
+                    timeout=float(timeout_seconds) if timeout_seconds else 300.0,
+                )
+                # 写入 session 消息历史（HITL 挂起时不写 final_result，留待审批通过后再写）
+                messages = session.messages or []
+                if persist_user_message:
+                    messages.append({"role": "user", "content": message})
+                pending_approval_id = result.get("pending_approval_id")
+                if not pending_approval_id:
+                    messages.append({"role": "assistant", "content": result.get("result", "")})
+                session.messages = messages
+                session.token_used = (session.token_used or 0) + result.get("total_tokens", 0)
+                session.last_active_at = now_utc()
+                db.commit()
+
+                # MA-IMP-09: 交付前 HITL Gate 触发时返回挂起响应
+                if pending_approval_id:
+                    return {
+                        "content": f"⏸️ 多 Agent 任务已完成，但 Coordinator 触发了交付前 HITL Gate。\n审批工单 ID: `{pending_approval_id}`\n\n请在审批中心通过后查看最终交付物。",
+                        "thinking": "\n".join(result.get("thinking_log", [])),
+                        "tokens_used": result.get("total_tokens", 0),
+                        "total_tokens": (session.token_used or 0),
+                        "execution_mode": "hitl_pending",
+                        "files": [],
+                        "audit_trail": result.get("audit_trail", []),
+                        "dispatch_count": result.get("dispatch_count", 0),
+                        "pending_approval_id": pending_approval_id,
+                        "pending_delivery": True,
+                        "session_status": "HITL_WAIT",
+                    }
+
                 return {
-                    "content": f"⏸️ 多 Agent 任务已完成，但 Coordinator 触发了交付前 HITL Gate。\n审批工单 ID: `{pending_approval_id}`\n\n请在审批中心通过后查看最终交付物。",
+                    "content": result.get("result", ""),
                     "thinking": "\n".join(result.get("thinking_log", [])),
                     "tokens_used": result.get("total_tokens", 0),
                     "total_tokens": (session.token_used or 0),
-                    "execution_mode": "hitl_pending",
+                    "execution_mode": "multi_agent",
                     "files": [],
                     "audit_trail": result.get("audit_trail", []),
                     "dispatch_count": result.get("dispatch_count", 0),
-                    "pending_approval_id": pending_approval_id,
-                    "pending_delivery": True,
+                }
+
+            # WF: 工作流型 Agent
+            if agent.agent_type == AgentType.WORKFLOW:
+                from services.workflow_engine import WorkflowEngine
+                engine = WorkflowEngine(
+                    db=db, agent=agent, session=session,
+                    provider=provider, model_svc=model_svc,
+                )
+                result = await asyncio.wait_for(
+                    engine.run(message),
+                    timeout=float(timeout_seconds) if timeout_seconds else 300.0,
+                )
+                return await AgentService._finalize_workflow_chat(
+                    db, session, message, result, persist_user_message=persist_user_message
+                )
+
+            original_message = message.strip() if message else ""
+            if not original_message and attachment_ids:
+                original_message = "请分析附件"
+            message = original_message
+            attachment_metadata: List[Dict[str, str]] = []
+            rewrite_meta = None
+            if getattr(agent, "query_rewrite_enabled", False):
+                try:
+                    from services.query_rewrite import QueryRewriteEngine
+
+                    kb_ids = [
+                        b.kb_id
+                        for b in db.query(AgentKnowledgeBinding).filter(
+                            AgentKnowledgeBinding.agent_id == agent_id
+                        ).all()
+                    ]
+                    engine = QueryRewriteEngine(db=db, provider=provider, model_svc=model_svc)
+                    rewrite_result = await engine.rewrite(
+                        message,
+                        messages=session.messages or [],
+                        agent_id=agent.agent_id,
+                        user_id=session.caller_id or "",
+                        memory_enabled=bool(getattr(agent, "memory_enabled", False)),
+                        kb_ids=kb_ids,
+                    )
+                    rewrite_meta = rewrite_result.to_dict()
+                    rewrite_meta["_summary"] = rewrite_result.summary_line()
+                    if rewrite_result.need_clarification and rewrite_result.clarification:
+                        # 记忆锚定无法确定时直接澄清，避免硬造检索式
+                        messages = session.messages or []
+                        if persist_user_message:
+                            messages.append({"role": "user", "content": original_message})
+                        messages.append({"role": "assistant", "content": rewrite_result.clarification})
+                        session.messages = messages
+                        session.last_active_at = now_utc()
+                        db.commit()
+                        return {
+                            "content": rewrite_result.clarification,
+                            "thinking": rewrite_result.summary_line(),
+                            "tokens_used": rewrite_result.tokens_used,
+                            "total_tokens": (session.token_used or 0) + rewrite_result.tokens_used,
+                            "execution_mode": "query_rewrite_clarify",
+                            "rewrite": rewrite_meta,
+                            "files": [],
+                        }
+                    message = rewrite_result.query_for_downstream
+                except Exception as e:
+                    print(f"[AgentService] Query改写失败，使用原文: {e}")
+                    rewrite_meta = {
+                        "original": original_message,
+                        "rewritten": original_message,
+                        "tier": 0,
+                        "method": "pass_through",
+                        "fallback_reason": f"engine_error:{e}",
+                    }
+
+            if attachment_ids:
+                from services.attachment_service import attachment_service
+
+                text_suffix, image_blocks, attachment_metadata = attachment_service.build_context(
+                    session=session,
+                    message=message,
+                    attachment_ids=attachment_ids,
+                    history=session.messages or [],
+                    model_capabilities=model_svc.capabilities or [],
+                )
+                message = attachment_service.build_user_content(message, text_suffix, image_blocks)
+
+            knowledge_context = ""
+            kb_bindings = db.query(AgentKnowledgeBinding).filter(
+                AgentKnowledgeBinding.agent_id == agent_id
+            ).all()
+            if kb_bindings:
+                kb_lines = []
+                for binding in kb_bindings:
+                    kb = db.query(KnowledgeBase).filter(
+                        KnowledgeBase.kb_id == binding.kb_id
+                    ).first()
+                    if not kb:
+                        continue
+                    desc = (kb.description or "").strip()
+                    if desc:
+                        kb_lines.append(f"- {kb.name}: {desc}")
+                    else:
+                        kb_lines.append(f"- {kb.name}")
+                if kb_lines:
+                    knowledge_context = "\n\n可用知识库：\n" + "\n".join(kb_lines)
+
+            skill_context = ""
+            active_skill_name = None
+            if skill_pack_id:
+                skill = db.query(SkillPack).filter(
+                    SkillPack.skill_pack_id == skill_pack_id,
+                    SkillPack.status == SkillPackStatus.ACTIVE,
+                ).first()
+                if skill:
+                    skill_context = f"\n\n你需要使用以下 Skill 来处理用户请求：\n## Skill: {skill.name}\n{skill.skill_content or skill.description}"
+                    active_skill_name = skill.name
+            else:
+                skill_bindings = db.query(AgentSkillBinding).filter(
+                    AgentSkillBinding.agent_id == agent_id
+                ).all()
+                if skill_bindings:
+                    skill_parts = []
+                    for binding in skill_bindings:
+                        skill = db.query(SkillPack).filter(
+                            SkillPack.skill_pack_id == binding.skill_pack_id,
+                            SkillPack.status == SkillPackStatus.ACTIVE,
+                        ).first()
+                        if not skill:
+                            continue
+
+                        relevance = _compute_skill_relevance(message, skill)
+                        if relevance > 0.15:
+                            skill_parts.append(f"## Skill: {skill.name}\n{skill.skill_content or skill.description}")
+
+                    if skill_parts:
+                        skill_context = "\n\n你可以使用以下 Skill 来处理用户请求：\n" + "\n\n".join(skill_parts)
+
+            tool_bindings = db.query(AgentToolBinding).filter(
+                AgentToolBinding.agent_id == agent_id
+            ).all()
+            # If agent already uses ScreenPilot, ensure newly added cu_* (e.g. cu_vision) are registered+bound.
+            try:
+                from services.screenpilot.config import is_screenpilot_enabled
+                from services.screenpilot.mcp_tools import ensure_cu_tools_registered_and_bound
+
+                if is_screenpilot_enabled() and tool_bindings:
+                    bound_names = []
+                    for tb in tool_bindings:
+                        t0 = db.query(Tool).filter(Tool.tool_id == tb.tool_id).first()
+                        if t0:
+                            bound_names.append(t0.name)
+                    if any(n.startswith("cu_") for n in bound_names):
+                        ensure_cu_tools_registered_and_bound(db)
+                        tool_bindings = db.query(AgentToolBinding).filter(
+                            AgentToolBinding.agent_id == agent_id
+                        ).all()
+            except Exception as _e:
+                # #region agent log
+                try:
+                    import json as _json, time as _time
+                    with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-66b153.log", "a") as _f:
+                        _f.write(_json.dumps({
+                            "sessionId": "66b153", "runId": "startup", "hypothesisId": "H1",
+                            "location": "agent_service.py:ensure_cu_tools",
+                            "message": "ensure_cu_tools skipped",
+                            "data": {"error": str(_e)[:200]},
+                            "timestamp": int(_time.time() * 1000),
+                        }, ensure_ascii=False) + "\n")
+                except Exception:
+                    pass
+                # #endregion
+
+            available_tools = []
+            for tb in tool_bindings:
+                tool = db.query(Tool).filter(
+                    Tool.tool_id == tb.tool_id,
+                    Tool.status == ToolStatus.ACTIVE,
+                ).first()
+                if tool:
+                    available_tools.append(tool)
+
+
+            available_tools.extend(BUILTIN_TOOLS)
+
+            has_tools = len(available_tools) > 0
+            has_kb = len(kb_bindings) > 0
+            has_skills = bool(skill_context)
+
+            mode = execution_mode or "auto"
+            if mode == "auto":
+                mode = _analyze_execution_mode(message, has_tools, has_kb, has_skills)
+                # OTP codes typed into chat must keep tools so agent can fill & submit.
+                if (
+                    has_tools
+                    and mode == "direct"
+                    and _looks_like_otp_message(original_message)
+                    and _session_has_screenpilot_context(session)
+                ):
+                    mode = "react"
+                    # Expand for LLM only; history still stores original_message via AgentLoop.
+                    message = (
+                        f"用户提供了登录验证码：{(original_message or '').strip()}。"
+                        "请立即调用 cu_observe 查看当前页面，将验证码填入验证码输入框，"
+                        "然后点击登录按钮完成登录。必须调用工具，不要只回复文字。"
+                    )
+
+            loop = AgentLoop(
+                db=db,
+                agent=agent,
+                session=session,
+                provider=provider,
+                model_svc=model_svc,
+                available_tools=available_tools,
+                timeout_seconds=timeout_seconds,
+                user_message=message,
+                original_user_message=original_message or "请分析附件",
+                active_skill_name=active_skill_name,
+                knowledge_context=knowledge_context,
+                skill_context=skill_context,
+                skip_history=skip_history,
+                attachment_metadata=attachment_metadata,
+            )
+            if rewrite_meta:
+                loop.thinking_log.append(
+                    rewrite_meta.get("_summary")
+                    or f"[QueryRewrite] T{rewrite_meta.get('tier')}/{rewrite_meta.get('method')} "
+                       f"score={rewrite_meta.get('score', 0):.2f}"
+                )
+                if rewrite_meta.get("rewritten") and rewrite_meta.get("rewritten") != original_message:
+                    loop.thinking_log.append(
+                        f"  原文: {original_message[:120]}\n  改写: {str(rewrite_meta.get('rewritten'))[:200]}"
+                    )
+
+            try:
+                result = await loop.run(mode)
+                if rewrite_meta:
+                    result["rewrite"] = rewrite_meta
+                    rewrite_tokens = int(rewrite_meta.get("tokens_used") or 0)
+                    if rewrite_tokens:
+                        result["tokens_used"] = (result.get("tokens_used") or 0) + rewrite_tokens
+                return result
+            except HITLPendingError as he:
+                # SGL-CFG-06 / ScreenPilot GOV: 工具需人工审批，返回挂起响应
+                preview_payload = {}
+                try:
+                    from models import HITLApproval
+                    approval = loop.db.query(HITLApproval).filter(
+                        HITLApproval.approval_id == he.approval_id
+                    ).first()
+                    if approval and approval.tool_args:
+                        preview_payload = approval.tool_args.get("preview_payload") or {}
+                        if not preview_payload and approval.tool_name == "cu_login_otp":
+                            preview_payload = {
+                                "flow_kind": "otp_wait",
+                                "prompt": approval.tool_args.get("prompt") or "请输入短信验证码",
+                            }
+                except Exception:
+                    pass
+                if he.tool_name == "cu_login_otp" or preview_payload.get("flow_kind") == "otp_wait":
+                    prompt = preview_payload.get("prompt") or "请输入短信验证码"
+                    hitl_content = (
+                        f"⏸️ 登录需要验证码：{prompt}\n"
+                        f"审批工单 ID: `{he.approval_id}`\n\n"
+                        "请在对话下方输入验证码并提交。"
+                    )
+                else:
+                    hitl_content = (
+                        f"⏸️ 工具 [{he.tool_name}] 需要人工审批后才能继续执行。\n"
+                        f"审批工单 ID: `{he.approval_id}`\n\n"
+                        "请在审批中心处理后继续对话。"
+                    )
+                hitl_result = {
+                    "content": hitl_content,
+                    "thinking": "\n".join(loop.thinking_log) if loop else "",
+                    "tokens_used": 0,
+                    "total_tokens": session.token_used or 0,
+                    "execution_mode": "hitl_pending",
+                    "files": [],
+                    "pending_approval_id": he.approval_id,
+                    "pending_tool_name": he.tool_name,
+                    "preview_payload": preview_payload,
+                    "pending_otp": he.tool_name == "cu_login_otp"
+                    or preview_payload.get("flow_kind") == "otp_wait",
                     "session_status": "HITL_WAIT",
                 }
-
-            return {
-                "content": result.get("result", ""),
-                "thinking": "\n".join(result.get("thinking_log", [])),
-                "tokens_used": result.get("total_tokens", 0),
-                "total_tokens": (session.token_used or 0),
-                "execution_mode": "multi_agent",
-                "files": [],
-                "audit_trail": result.get("audit_trail", []),
-                "dispatch_count": result.get("dispatch_count", 0),
-            }
-
-        # WF: 工作流型 Agent
-        if agent.agent_type == AgentType.WORKFLOW:
-            from services.workflow_engine import WorkflowEngine
-            engine = WorkflowEngine(
-                db=db, agent=agent, session=session,
-                provider=provider, model_svc=model_svc,
-            )
-            result = await asyncio.wait_for(
-                engine.run(message),
-                timeout=float(timeout_seconds) if timeout_seconds else 300.0,
-            )
-            return await AgentService._finalize_workflow_chat(
-                db, session, message, result, persist_user_message=persist_user_message
-            )
-
-        original_message = message
-        rewrite_meta = None
-        if getattr(agent, "query_rewrite_enabled", False):
-            try:
-                from services.query_rewrite import QueryRewriteEngine
-
-                kb_ids = [
-                    b.kb_id
-                    for b in db.query(AgentKnowledgeBinding).filter(
-                        AgentKnowledgeBinding.agent_id == agent_id
-                    ).all()
-                ]
-                engine = QueryRewriteEngine(db=db, provider=provider, model_svc=model_svc)
-                rewrite_result = await engine.rewrite(
-                    message,
-                    messages=session.messages or [],
-                    agent_id=agent.agent_id,
-                    user_id=session.caller_id or "",
-                    memory_enabled=bool(getattr(agent, "memory_enabled", False)),
-                    kb_ids=kb_ids,
-                )
-                rewrite_meta = rewrite_result.to_dict()
-                rewrite_meta["_summary"] = rewrite_result.summary_line()
-                if rewrite_result.need_clarification and rewrite_result.clarification:
-                    # 记忆锚定无法确定时直接澄清，避免硬造检索式
-                    messages = session.messages or []
-                    if persist_user_message:
-                        messages.append({"role": "user", "content": original_message})
-                    messages.append({"role": "assistant", "content": rewrite_result.clarification})
-                    session.messages = messages
-                    session.last_active_at = now_utc()
-                    db.commit()
-                    return {
-                        "content": rewrite_result.clarification,
-                        "thinking": rewrite_result.summary_line(),
-                        "tokens_used": rewrite_result.tokens_used,
-                        "total_tokens": (session.token_used or 0) + rewrite_result.tokens_used,
-                        "execution_mode": "query_rewrite_clarify",
-                        "rewrite": rewrite_meta,
-                        "files": [],
-                    }
-                message = rewrite_result.query_for_downstream
+                if rewrite_meta:
+                    hitl_result["rewrite"] = rewrite_meta
+                return hitl_result
             except Exception as e:
-                print(f"[AgentService] Query改写失败，使用原文: {e}")
-                rewrite_meta = {
-                    "original": original_message,
-                    "rewritten": original_message,
-                    "tier": 0,
-                    "method": "pass_through",
-                    "fallback_reason": f"engine_error:{e}",
+                traceback.print_exc()
+                if loop and getattr(loop, "memory_enabled", False):
+                    loop._memory_record_exception(str(e))
+                thinking_log = loop.thinking_log if loop else []
+                return {
+                    "success": False,
+                    "error": str(e),
+                    "content": str(e),
+                    "thinking_log": thinking_log,
+                    "files": [],
                 }
-
-        knowledge_context = ""
-        kb_bindings = db.query(AgentKnowledgeBinding).filter(
-            AgentKnowledgeBinding.agent_id == agent_id
-        ).all()
-        if kb_bindings:
-            try:
-                from services.knowledge_service import knowledge_service as ks
-                kb_parts = []
-                for binding in kb_bindings:
-                    results = ks.search(binding.kb_id, message, top_k=3)
-                    for r in results:
-                        kb_parts.append(r["content"])
-                if kb_parts:
-                    knowledge_context = "\n\n参考知识库内容：\n" + "\n---\n".join(kb_parts)
-            except Exception as e:
-                print(f"[AgentService] 知识库搜索失败，跳过: {e}")
-
-        skill_context = ""
-        active_skill_name = None
-        if skill_pack_id:
-            skill = db.query(SkillPack).filter(
-                SkillPack.skill_pack_id == skill_pack_id,
-                SkillPack.status == SkillPackStatus.ACTIVE,
-            ).first()
-            if skill:
-                skill_context = f"\n\n你需要使用以下 Skill 来处理用户请求：\n## Skill: {skill.name}\n{skill.skill_content or skill.description}"
-                active_skill_name = skill.name
-        else:
-            skill_bindings = db.query(AgentSkillBinding).filter(
-                AgentSkillBinding.agent_id == agent_id
-            ).all()
-            if skill_bindings:
-                skill_parts = []
-                for binding in skill_bindings:
-                    skill = db.query(SkillPack).filter(
-                        SkillPack.skill_pack_id == binding.skill_pack_id,
-                        SkillPack.status == SkillPackStatus.ACTIVE,
-                    ).first()
-                    if not skill:
-                        continue
-
-                    relevance = _compute_skill_relevance(message, skill)
-                    if relevance > 0.15:
-                        skill_parts.append(f"## Skill: {skill.name}\n{skill.skill_content or skill.description}")
-
-                if skill_parts:
-                    skill_context = "\n\n你可以使用以下 Skill 来处理用户请求：\n" + "\n\n".join(skill_parts)
-
-        tool_bindings = db.query(AgentToolBinding).filter(
-            AgentToolBinding.agent_id == agent_id
-        ).all()
-        # If agent already uses ScreenPilot, ensure newly added cu_* (e.g. cu_vision) are registered+bound.
-        try:
-            from services.screenpilot.config import is_screenpilot_enabled
-            from services.screenpilot.mcp_tools import ensure_cu_tools_registered_and_bound
-
-            if is_screenpilot_enabled() and tool_bindings:
-                bound_names = []
-                for tb in tool_bindings:
-                    t0 = db.query(Tool).filter(Tool.tool_id == tb.tool_id).first()
-                    if t0:
-                        bound_names.append(t0.name)
-                if any(n.startswith("cu_") for n in bound_names):
-                    ensure_cu_tools_registered_and_bound(db)
-                    tool_bindings = db.query(AgentToolBinding).filter(
-                        AgentToolBinding.agent_id == agent_id
-                    ).all()
-        except Exception as _e:
-            # #region agent log
-            try:
-                import json as _json, time as _time
-                with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-66b153.log", "a") as _f:
-                    _f.write(_json.dumps({
-                        "sessionId": "66b153", "runId": "startup", "hypothesisId": "H1",
-                        "location": "agent_service.py:ensure_cu_tools",
-                        "message": "ensure_cu_tools skipped",
-                        "data": {"error": str(_e)[:200]},
-                        "timestamp": int(_time.time() * 1000),
-                    }, ensure_ascii=False) + "\n")
-            except Exception:
-                pass
-            # #endregion
-
-        available_tools = []
-        for tb in tool_bindings:
-            tool = db.query(Tool).filter(
-                Tool.tool_id == tb.tool_id,
-                Tool.status == ToolStatus.ACTIVE,
-            ).first()
-            if tool:
-                available_tools.append(tool)
-
-
-        available_tools.extend(BUILTIN_TOOLS)
-
-        has_tools = len(available_tools) > 0
-        has_kb = len(kb_bindings) > 0
-        has_skills = bool(skill_context)
-
-        mode = execution_mode or "auto"
-        if mode == "auto":
-            mode = _analyze_execution_mode(message, has_tools, has_kb, has_skills)
-            # OTP codes typed into chat must keep tools so agent can fill & submit.
-            if (
-                has_tools
-                and mode == "direct"
-                and _looks_like_otp_message(original_message)
-                and _session_has_screenpilot_context(session)
-            ):
-                mode = "react"
-                # Expand for LLM only; history still stores original_message via AgentLoop.
-                message = (
-                    f"用户提供了登录验证码：{(original_message or '').strip()}。"
-                    "请立即调用 cu_observe 查看当前页面，将验证码填入验证码输入框，"
-                    "然后点击登录按钮完成登录。必须调用工具，不要只回复文字。"
-                )
-
-        loop = AgentLoop(
-            db=db,
-            agent=agent,
-            session=session,
-            provider=provider,
-            model_svc=model_svc,
-            available_tools=available_tools,
-            timeout_seconds=timeout_seconds,
-            user_message=message,
-            original_user_message=original_message,
-            active_skill_name=active_skill_name,
-            knowledge_context=knowledge_context,
-            skill_context=skill_context,
-            skip_history=skip_history,
-        )
-        if rewrite_meta:
-            loop.thinking_log.append(
-                rewrite_meta.get("_summary")
-                or f"[QueryRewrite] T{rewrite_meta.get('tier')}/{rewrite_meta.get('method')} "
-                   f"score={rewrite_meta.get('score', 0):.2f}"
-            )
-            if rewrite_meta.get("rewritten") and rewrite_meta.get("rewritten") != original_message:
-                loop.thinking_log.append(
-                    f"  原文: {original_message[:120]}\n  改写: {str(rewrite_meta.get('rewritten'))[:200]}"
-                )
-
-        try:
-            result = await loop.run(mode)
-            if rewrite_meta:
-                result["rewrite"] = rewrite_meta
-                rewrite_tokens = int(rewrite_meta.get("tokens_used") or 0)
-                if rewrite_tokens:
-                    result["tokens_used"] = (result.get("tokens_used") or 0) + rewrite_tokens
-            return result
-        except HITLPendingError as he:
-            # SGL-CFG-06 / ScreenPilot GOV: 工具需人工审批，返回挂起响应
-            preview_payload = {}
-            try:
-                from models import HITLApproval
-                approval = loop.db.query(HITLApproval).filter(
-                    HITLApproval.approval_id == he.approval_id
-                ).first()
-                if approval and approval.tool_args:
-                    preview_payload = approval.tool_args.get("preview_payload") or {}
-                    if not preview_payload and approval.tool_name == "cu_login_otp":
-                        preview_payload = {
-                            "flow_kind": "otp_wait",
-                            "prompt": approval.tool_args.get("prompt") or "请输入短信验证码",
-                        }
-            except Exception:
-                pass
-            if he.tool_name == "cu_login_otp" or preview_payload.get("flow_kind") == "otp_wait":
-                prompt = preview_payload.get("prompt") or "请输入短信验证码"
-                hitl_content = (
-                    f"⏸️ 登录需要验证码：{prompt}\n"
-                    f"审批工单 ID: `{he.approval_id}`\n\n"
-                    "请在对话下方输入验证码并提交。"
-                )
-            else:
-                hitl_content = (
-                    f"⏸️ 工具 [{he.tool_name}] 需要人工审批后才能继续执行。\n"
-                    f"审批工单 ID: `{he.approval_id}`\n\n"
-                    "请在审批中心处理后继续对话。"
-                )
-            hitl_result = {
-                "content": hitl_content,
-                "thinking": "\n".join(loop.thinking_log) if loop else "",
-                "tokens_used": 0,
-                "total_tokens": session.token_used or 0,
-                "execution_mode": "hitl_pending",
-                "files": [],
-                "pending_approval_id": he.approval_id,
-                "pending_tool_name": he.tool_name,
-                "preview_payload": preview_payload,
-                "pending_otp": he.tool_name == "cu_login_otp"
-                or preview_payload.get("flow_kind") == "otp_wait",
-                "session_status": "HITL_WAIT",
-            }
-            if rewrite_meta:
-                hitl_result["rewrite"] = rewrite_meta
-            return hitl_result
-        except Exception as e:
-            traceback.print_exc()
-            if loop and getattr(loop, "memory_enabled", False):
-                loop._memory_record_exception(str(e))
-            thinking_log = loop.thinking_log if loop else []
-            return {
-                "success": False,
-                "error": str(e),
-                "content": str(e),
-                "thinking_log": thinking_log,
-                "files": [],
-            }
 
 
 class AgentLoop:
     MAX_CONTEXT_MESSAGES = 50
     SKILL_MAX_CHARS = 8000
+
+    @staticmethod
+    def _content_to_str(content: Any) -> str:
+        if isinstance(content, list):
+            parts = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    parts.append(block.get("text", ""))
+                elif isinstance(block, dict) and block.get("type") == "image_url":
+                    parts.append("[image]")
+            return " ".join(parts)
+        return str(content or "")
 
     def __init__(
         self,
@@ -936,12 +974,13 @@ class AgentLoop:
         model_svc,
         available_tools: list,
         timeout_seconds: Optional[int],
-        user_message: str,
+        user_message: Any,
         active_skill_name: Optional[str],
         knowledge_context: str,
         skill_context: str,
         skip_history: bool = False,
         original_user_message: Optional[str] = None,
+        attachment_metadata: Optional[List[Dict[str, str]]] = None,
     ):
         self.db = db
         self.agent = agent
@@ -953,8 +992,9 @@ class AgentLoop:
         self.user_message = user_message
         # 会话历史保存原文；LLM / 检索使用可能已改写的 user_message
         self.original_user_message = (
-            original_user_message if original_user_message is not None else user_message
+            original_user_message if original_user_message is not None else self._content_to_str(user_message)
         )
+        self.attachment_metadata = attachment_metadata or []
         self.active_skill_name = active_skill_name
         self.knowledge_context = knowledge_context
         self.skill_context = skill_context
@@ -989,33 +1029,76 @@ class AgentLoop:
                 self.tool_require_approval[b.tool_id] = True
 
         # 记忆闭环：仅当 Agent 挂载记忆模块时启用
+        # 注意：不在 __init__ 同步调用 Letta——会阻塞事件循环，导致 Letta→llm-gateway 死锁超时
         self.memory_enabled = bool(getattr(agent, "memory_enabled", False))
         self._memory_context = ""
-        if self.memory_enabled:
-            try:
-                from services.memory.retriever import SelfRetriever
-                retriever = SelfRetriever(db)
-                parts = []
-                # 每轮重建 system prompt，持续注入偏好与近期摘要
-                parts.append(retriever.on_session_start(
-                    agent_id=agent.agent_id,
-                    user_id=session.caller_id or "",
-                ))
-                if available_tools:
-                    parts.append(retriever.before_tool_invoke(
-                        agent_id=agent.agent_id,
-                        tool_names=[t.name for t in available_tools],
-                    ))
-                self._memory_context = "".join(p for p in parts if p)
-            except Exception as e:
-                print(f"[AgentLoop] 记忆检索失败，跳过: {e}")
+        self._memory_load_pending = self.memory_enabled
 
         self.output_dir = os.path.join(
             os.path.dirname(os.path.dirname(__file__)), "data", "outputs", session.session_id
         )
         os.makedirs(self.output_dir, exist_ok=True)
 
+    def _sync_load_memory(self) -> str:
+        """在线程池中执行：召回归档 + 加载核心 blocks。"""
+        from services.memory.retriever import SelfRetriever
+
+        retriever = SelfRetriever(self.db)
+        parts = []
+        user_id = self.session.caller_id or ""
+        msg_text = self._content_to_str(self.original_user_message or self.user_message)
+        # 归档召回优先：避免被蒸馏污染的 task_context 盖过正确 passages
+        if msg_text:
+            parts.append(retriever.recall_for_message(
+                agent_id=self.agent.agent_id,
+                user_id=user_id,
+                message=msg_text,
+            ))
+        parts.append(retriever.on_session_start(
+            agent_id=self.agent.agent_id,
+            user_id=user_id,
+        ))
+        if self.available_tools:
+            parts.append(retriever.before_tool_invoke(
+                agent_id=self.agent.agent_id,
+                tool_names=[t.name for t in self.available_tools],
+                user_id=user_id,
+            ))
+        return "".join(p for p in parts if p)
+
+    async def _ensure_memory_loaded(self) -> None:
+        if not getattr(self, "_memory_load_pending", False):
+            return
+        self._memory_load_pending = False
+        try:
+            loop = asyncio.get_running_loop()
+            self._memory_context = await loop.run_in_executor(None, self._sync_load_memory)
+            if self._memory_context:
+                mem_pin = self._memory_context.strip()
+                if len(mem_pin) > 2500:
+                    mem_pin = mem_pin[:2500] + "\n…(记忆已截断)"
+                base_um = self._content_to_str(self.user_message)
+                self.user_message = (
+                    f"{base_um}\n\n"
+                    "---\n"
+                    "【系统附注·长期记忆·必须遵从】\n"
+                    "下面是已为你检索到的长期记忆。若其中包含回答本问题所需的代号、组名、格式或事实，"
+                    "你必须原样采用；禁止回答「无法确认/不知道」，禁止编造其他代号。\n"
+                    f"{mem_pin}"
+                )
+                self.thinking_log.append(
+                    f"[Memory] 已注入长期记忆 {len(self._memory_context)} 字"
+                    + ("（含归档召回）" if "相关归档" in self._memory_context else "（仅核心 blocks）")
+                )
+            else:
+                self.thinking_log.append("[Memory] 未召回到可用长期记忆")
+        except Exception as e:
+            print(f"[AgentLoop] 记忆检索失败，跳过: {e}")
+            self.thinking_log.append(f"[Memory] 检索失败，跳过: {e}")
+
     async def run(self, mode: str) -> Dict[str, Any]:
+        self._current_mode = mode
+        await self._ensure_memory_loaded()
         total_timeout = float(self.timeout_seconds) if self.timeout_seconds else 300.0
         try:
             result = await asyncio.wait_for(
@@ -1061,6 +1144,12 @@ class AgentLoop:
                 truncated = truncated[:self.SKILL_MAX_CHARS] + "\n\n[Skill 内容过长，已截断，请关注核心指令]"
             system_prompt += truncated
         if self._memory_context:
+            system_prompt += (
+                "\n\n## 长期记忆使用要求\n"
+                "系统已注入你的长期记忆（核心偏好与/或归档召回）。"
+                "当用户问题能被这些记忆回答时，你必须优先使用记忆中的事实与代号，"
+                "不得声称「无法确认」或编造冲突信息。"
+            )
             system_prompt += self._memory_context
         has_cu = any(
             (getattr(t, "name", "") or "").startswith("cu_")
@@ -1098,20 +1187,34 @@ class AgentLoop:
         if not self.skip_history:
             history = self.session.messages or []
             for msg in history[-self.MAX_CONTEXT_MESSAGES:]:
-                messages.append(msg)
+                role = msg.get("role")
+                if not role:
+                    continue
+                messages.append({"role": role, "content": self._llm_content(msg)})
 
-        last_msg = messages[-1] if messages else None
+        last_stored = (self.session.messages or [])[-1] if self.session.messages else None
         already_has_user = (
-            last_msg
-            and last_msg.get("role") == "user"
-            and last_msg.get("content") == self.original_user_message
+            last_stored
+            and last_stored.get("role") == "user"
+            and last_stored.get("content") == self.original_user_message
         )
         if already_has_user:
-            if self.user_message != self.original_user_message:
+            if messages and messages[-1].get("role") == "user":
                 messages[-1] = {"role": "user", "content": self.user_message}
+            else:
+                messages.append({"role": "user", "content": self.user_message})
         else:
             messages.append({"role": "user", "content": self.user_message})
         return messages
+
+    def _build_user_history_entry(self) -> Dict[str, Any]:
+        entry: Dict[str, Any] = {"role": "user", "content": self.original_user_message}
+        if self.attachment_metadata:
+            entry["attachments"] = self.attachment_metadata
+        return entry
+
+    def _llm_content(self, msg: Dict[str, Any]) -> Any:
+        return msg.get("content", "")
 
     def _build_history_with_user(self, extra_messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         history = list(self.session.messages or [])
@@ -1120,7 +1223,7 @@ class AgentLoop:
             and history[-1].get("role") == "user"
             and history[-1].get("content") == self.original_user_message
         ):
-            history.append({"role": "user", "content": self.original_user_message})
+            history.append(self._build_user_history_entry())
         return history + extra_messages
 
     def _truncate_context(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1159,7 +1262,15 @@ class AgentLoop:
         total_chars = 0
         for msg in messages:
             content = msg.get("content", "") or ""
-            total_chars += len(content)
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict):
+                        if block.get("type") == "text":
+                            total_chars += len(block.get("text", ""))
+                        elif block.get("type") == "image_url":
+                            total_chars += 1000
+            else:
+                total_chars += len(content)
             if msg.get("tool_calls"):
                 for tc in msg["tool_calls"]:
                     total_chars += len(tc.get("function", {}).get("arguments", ""))
@@ -1185,6 +1296,13 @@ class AgentLoop:
 
         self.thinking_log.append(f"[LLM 调用] {len(messages)} 条消息, max_tokens={effective_max_tokens}")
 
+        source_map = {
+            "react": "react",
+            "plan_and_execute": "plan",
+            "direct": "direct",
+            "auto": "react",
+        }
+        llm_source = source_map.get(getattr(self, "_current_mode", "react"), "react")
 
         completion = await model_provider_service.chat_completion(
             provider=self.provider,
@@ -1193,6 +1311,7 @@ class AgentLoop:
             max_tokens=effective_max_tokens,
             tools=tools,
             timeout_seconds=self.timeout_seconds,
+            source=llm_source,
         )
 
         usage = completion.get("usage", {})
@@ -1450,6 +1569,7 @@ class AgentLoop:
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=200,
                 timeout_seconds=min(30, self.step_timeout or 60),
+                source="tool_assess",
             )
             content = (
                 completion.get("choices", [{}])[0]
@@ -1744,6 +1864,57 @@ class AgentLoop:
         self.db.refresh(approval)
         return approval
 
+    @staticmethod
+    def _extract_formal_output_from_reasoning(reasoning: str) -> str:
+        if not reasoning:
+            return ""
+        patterns = [
+            r'\n# 📋',
+            r'\n## 一[、．.]',
+            r'\n# [\u4e00-\u9fff]',
+        ]
+        for pat in patterns:
+            match = re.search(pat, reasoning)
+            if match:
+                return reasoning[match.start() + 1:].strip()
+        return ""
+
+    def _resolve_assistant_output(
+        self,
+        assistant_content: str,
+        reasoning_content: str,
+        completion: Dict[str, Any],
+    ) -> tuple:
+        content = (assistant_content or "").strip()
+        reasoning = (reasoning_content or "").strip()
+        extracted = ""
+
+        if not content and reasoning:
+            extracted = self._extract_formal_output_from_reasoning(reasoning)
+            content = extracted or reasoning
+
+        thinking_reasoning = reasoning
+        if extracted and extracted in reasoning:
+            preamble_end = reasoning.find(extracted)
+            if preamble_end > 0:
+                thinking_reasoning = reasoning[:preamble_end].strip()
+            else:
+                thinking_reasoning = ""
+        elif content and content == reasoning:
+            thinking_reasoning = ""
+
+        usage = completion.get("usage") or {}
+        completion_tokens = int(usage.get("completion_tokens") or 0)
+        finish_reason = self._get_finish_reason(completion)
+        truncated = finish_reason == "length" or completion_tokens >= 7900
+        if truncated and content and "Token 上限被截断" not in content:
+            content += (
+                "\n\n---\n"
+                "⚠️ 输出因 Token 上限被截断，如需完整结果请简化输入或提高单次调用 Token 上限。"
+            )
+
+        return content, thinking_reasoning
+
     async def _run_direct(self) -> Dict[str, Any]:
         self.thinking_log.append("[Direct] 开始分析用户请求...")
         messages = self._build_initial_messages()
@@ -1756,8 +1927,15 @@ class AgentLoop:
             raise ValueError("模型返回空响应")
 
         assistant_message = choices[0].get("message", {})
-        assistant_content = assistant_message.get("content", "")
-        reasoning_content = completion.get("reasoning_content", "")
+        raw_content = assistant_message.get("content", "")
+        reasoning_content = (
+            completion.get("reasoning_content", "")
+            or assistant_message.get("reasoning_content", "")
+            or assistant_message.get("thinking", "")
+        )
+        assistant_content, reasoning_for_thinking = self._resolve_assistant_output(
+            raw_content, reasoning_content, completion
+        )
         response_truncated = self._get_finish_reason(completion) == "length"
 
         history = self._build_history_with_user([
@@ -1767,7 +1945,7 @@ class AgentLoop:
 
         self._extract_and_save_files_from_content(assistant_content, response_truncated=response_truncated)
 
-        return self._build_result(assistant_content, reasoning_content, "direct")
+        return self._build_result(assistant_content, reasoning_for_thinking, "direct")
 
     @staticmethod
     def _build_tool_defs(available_tools: list) -> list:
@@ -1914,8 +2092,15 @@ class AgentLoop:
                 messages = self._truncate_context(messages)
                 continue
 
-            assistant_content = msg.get("content", "")
-            reasoning_content = completion.get("reasoning_content", "")
+            raw_content = msg.get("content", "")
+            reasoning_content = (
+                completion.get("reasoning_content", "")
+                or msg.get("reasoning_content", "")
+                or msg.get("thinking", "")
+            )
+            assistant_content, reasoning_for_thinking = self._resolve_assistant_output(
+                raw_content, reasoning_content, completion
+            )
             response_truncated = self._get_finish_reason(completion) == "length"
 
             new_messages.append({"role": "assistant", "content": assistant_content})
@@ -1925,7 +2110,7 @@ class AgentLoop:
 
             self._extract_and_save_files_from_content(assistant_content, response_truncated=response_truncated)
 
-            return self._build_result(assistant_content, reasoning_content, "react")
+            return self._build_result(assistant_content, reasoning_for_thinking, "react")
 
         history = self._build_history_with_user(new_messages)
         if not new_messages:
@@ -2105,13 +2290,25 @@ class AgentLoop:
 
         final_choices = final_completion.get("choices", [])
         if not final_choices:
-            final_content = "\n\n".join(step_results)
+            raw_final_content = "\n\n".join(step_results)
             response_truncated = False
         else:
-            final_content = final_choices[0].get("message", {}).get("content", "")
+            raw_final_content = final_choices[0].get("message", {}).get("content", "")
             response_truncated = self._get_finish_reason(final_completion) == "length"
 
         reasoning_content = final_completion.get("reasoning_content", "")
+        if final_choices:
+            final_msg = final_choices[0].get("message", {})
+            reasoning_content = (
+                reasoning_content
+                or final_msg.get("reasoning_content", "")
+                or final_msg.get("thinking", "")
+            )
+        final_content, reasoning_for_thinking = self._resolve_assistant_output(
+            raw_final_content,
+            reasoning_content,
+            final_completion if final_choices else {},
+        )
 
         self._extract_and_save_files_from_content(final_content, response_truncated=response_truncated)
 
@@ -2120,7 +2317,7 @@ class AgentLoop:
         ])
         self._persist_session(history)
 
-        return self._build_result(final_content, reasoning_content, "plan_and_execute")
+        return self._build_result(final_content, reasoning_for_thinking, "plan_and_execute")
 
     def _persist_session(self, history: List[Dict[str, Any]]):
         self.session.messages = history

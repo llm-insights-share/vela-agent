@@ -493,6 +493,7 @@ class CoordinatorEngine:
             messages=messages,
             max_tokens=4096,
             timeout_seconds=60,
+            source="coordinator",
         )
 
         tokens = response.get("usage", {}).get("total_tokens", 0)

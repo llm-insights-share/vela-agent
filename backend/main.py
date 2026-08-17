@@ -1,9 +1,14 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi import HTTPException
 import os
-from database import init_db
+from database import init_db, SessionLocal
+from deps import get_current_user
+from auth_config import ADMIN_PASSWORD, ADMIN_USERNAME, AVATAR_DIR
+from models import User
+from security import hash_password
 from routes.agents import router as agents_router
 from routes.model_services import router as model_services_router
 from routes.skills import router as skills_router
@@ -21,6 +26,9 @@ from routes.dataquery_knowledge import router as dataquery_knowledge_router
 from routes.memory import router as memory_router
 from routes.screenpilot import router as screenpilot_router
 from routes.query_rewrite import router as query_rewrite_router
+from routes.auth import router as auth_router
+from routes.users import router as users_router
+from routes.llm_gateway import router as llm_gateway_router
 
 app = FastAPI(
     title="Vela Agent Playground API",
@@ -36,23 +44,52 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(agents_router)
-app.include_router(model_services_router)
-app.include_router(skills_router)
-app.include_router(knowledge_bases_router)
-app.include_router(sessions_router)
-app.include_router(tools_router)
-app.include_router(config_router)
-app.include_router(compositions_router)
-app.include_router(hitl_router)
-app.include_router(workflows_router)
-app.include_router(workflow_cron_router)
-app.include_router(dataquery_agents_router)
-app.include_router(dataquery_metadata_router)
-app.include_router(dataquery_knowledge_router)
-app.include_router(memory_router)
-app.include_router(screenpilot_router)
-app.include_router(query_rewrite_router)
+_auth_deps = [Depends(get_current_user)]
+
+app.include_router(auth_router)
+app.include_router(users_router)
+app.include_router(llm_gateway_router)  # Letta 回连：独立共享密钥，不挂 JWT
+app.include_router(agents_router, dependencies=_auth_deps)
+app.include_router(model_services_router, dependencies=_auth_deps)
+app.include_router(skills_router, dependencies=_auth_deps)
+app.include_router(knowledge_bases_router, dependencies=_auth_deps)
+app.include_router(sessions_router, dependencies=_auth_deps)
+app.include_router(tools_router, dependencies=_auth_deps)
+app.include_router(config_router, dependencies=_auth_deps)
+app.include_router(compositions_router, dependencies=_auth_deps)
+app.include_router(hitl_router, dependencies=_auth_deps)
+app.include_router(workflows_router, dependencies=_auth_deps)
+app.include_router(workflow_cron_router, dependencies=_auth_deps)
+app.include_router(dataquery_agents_router, dependencies=_auth_deps)
+app.include_router(dataquery_metadata_router, dependencies=_auth_deps)
+app.include_router(dataquery_knowledge_router, dependencies=_auth_deps)
+app.include_router(memory_router, dependencies=_auth_deps)
+app.include_router(screenpilot_router, dependencies=_auth_deps)
+app.include_router(query_rewrite_router, dependencies=_auth_deps)
+
+AVATAR_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/avatars", StaticFiles(directory=str(AVATAR_DIR)), name="avatars")
+
+
+def seed_admin() -> None:
+    db = SessionLocal()
+    try:
+        existing = db.query(User).filter(User.username == ADMIN_USERNAME).first()
+        if existing:
+            return
+        db.add(
+            User(
+                username=ADMIN_USERNAME,
+                email=f"{ADMIN_USERNAME}@localhost",
+                display_name="Administrator",
+                hashed_password=hash_password(ADMIN_PASSWORD),
+                roles="admin,member",
+                is_active=True,
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
 
 # #region agent log
 try:
@@ -102,11 +139,11 @@ def _recover_stale_running_sessions():
 @app.on_event("startup")
 async def on_startup():
     init_db()
+    seed_admin()
     _recover_stale_running_sessions()
     from services.workflow_cron_scheduler import cron_scheduler
     cron_scheduler.start()
-    from models import ModelProvider, ModelService, ProviderStatus, gen_uuid
-    from database import SessionLocal
+    from models import ModelProvider, ProviderStatus, gen_uuid
     db = SessionLocal()
     try:
         existing = db.query(ModelProvider).count()

@@ -1,14 +1,43 @@
 import axios from 'axios'
 
+const TOKEN_KEY = 'vela_token'
+
+export function getToken() {
+  return localStorage.getItem(TOKEN_KEY)
+}
+
+export function setToken(token) {
+  localStorage.setItem(TOKEN_KEY, token)
+}
+
+export function clearToken() {
+  localStorage.removeItem(TOKEN_KEY)
+}
+
 const api = axios.create({
   baseURL: '/api/v1',
   timeout: 300000,
   headers: { 'Content-Type': 'application/json' },
 })
 
+api.interceptors.request.use((config) => {
+  const token = getToken()
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`
+  }
+  return config
+})
+
 api.interceptors.response.use(
   (res) => res.data,
   (err) => {
+    if (err.response?.status === 401) {
+      clearToken()
+      if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/login')) {
+        const redirect = encodeURIComponent(window.location.pathname + window.location.search)
+        window.location.href = `/login?redirect=${redirect}`
+      }
+    }
     if (err.code === 'ECONNABORTED' && err.message?.includes('timeout')) {
       return Promise.reject(new Error('请求超时，模型响应较慢，请重试或简化 Skill 内容'))
     }
@@ -18,6 +47,36 @@ api.interceptors.response.use(
 )
 
 export default api
+
+export const authApi = {
+  login: (username, password) => {
+    const body = new URLSearchParams()
+    body.set('username', username)
+    body.set('password', password)
+    return api.post('/auth/login', body, {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    })
+  },
+  register: (data) => api.post('/auth/register', data),
+  me: () => api.get('/auth/me'),
+  updateProfile: (data) => api.patch('/auth/me/profile', data),
+  updatePassword: (data) => api.patch('/auth/me/password', data),
+  uploadAvatar: (file) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    return api.post('/auth/me/avatar', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })
+  },
+}
+
+export const userApi = {
+  list: () => api.get('/users'),
+  create: (data) => api.post('/users', data),
+  setActive: (id, is_active) => api.patch(`/users/${id}/active`, { is_active }),
+  setRoles: (id, roles) => api.patch(`/users/${id}/roles`, { roles }),
+  remove: (id) => api.delete(`/users/${id}`),
+}
 
 export const agentApi = {
   list: (params) => api.get('/agents', { params }),
@@ -61,6 +120,8 @@ export const skillApi = {
   get: (id) => api.get(`/skills/${id}`),
   update: (id, data) => api.put(`/skills/${id}`, data),
   delete: (id) => api.delete(`/skills/${id}`),
+  unpublish: (id) => api.post(`/skills/${id}/unpublish`),
+  publish: (id) => api.post(`/skills/${id}/publish`),
   import: (file) => {
     const formData = new FormData()
     formData.append('file', file)
@@ -82,6 +143,12 @@ export const knowledgeApi = {
     headers: { 'Content-Type': 'multipart/form-data' },
   }),
   listFiles: (id) => api.get(`/knowledge-bases/${id}/files`),
+  updateFileStatus: (id, docId, data) => api.patch(`/knowledge-bases/${id}/files/${docId}`, data),
+  deleteFile: (id, docId) => api.delete(`/knowledge-bases/${id}/files/${docId}`),
+  getFileContent: (id, docId, params) => api.get(`/knowledge-bases/${id}/files/${docId}/content`, {
+    params,
+    responseType: 'blob',
+  }),
   search: (id, data) => api.post(`/knowledge-bases/${id}/search`, data),
 }
 
@@ -94,8 +161,15 @@ export const sessionApi = {
     return api.post(`/sessions/${id}/chat`, data, { timeout: reqTimeout })
   },
   chatAsync: (id, data) => api.post(`/sessions/${id}/chat/async`, data, { timeout: 10000 }),
+  uploadAttachment: (id, formData) => api.post(`/sessions/${id}/attachments`, formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 60000,
+  }),
+  listAttachments: (id) => api.get(`/sessions/${id}/attachments`),
+  deleteAttachment: (id, attachmentId) => api.delete(`/sessions/${id}/attachments/${attachmentId}`),
   listRunning: (params) => api.get('/sessions', { params: { ...params, status: 'RUNNING' } }),
   abort: (id) => api.post(`/sessions/${id}/abort`, {}, { timeout: 15000 }),
+  llmCalls: (id) => api.get(`/sessions/${id}/llm-calls`),
   close: (id) => api.post(`/sessions/${id}/close`),
   delete: (id) => api.delete(`/sessions/${id}`),
 }
@@ -119,6 +193,8 @@ export const configApi = {
   updateScreenpilot: (data) => api.put('/config/screenpilot', data),
   listMemoryAgents: () => api.get('/config/memory/agents'),
   updateMemoryAgents: (items) => api.put('/config/memory/agents', { items }),
+  getLetta: () => api.get('/config/memory/letta'),
+  updateLetta: (data) => api.put('/config/memory/letta', data),
   listQueryRewriteAgents: () => api.get('/config/query-rewrite/agents'),
   updateQueryRewriteAgents: (items) => api.put('/config/query-rewrite/agents', { items }),
 }
@@ -128,10 +204,13 @@ export const queryRewriteApi = {
 }
 
 export const memoryApi = {
-  listRecords: (params) => api.get('/memory/records', { params }),
-  getRecord: (id) => api.get(`/memory/records/${id}`),
-  updateRecord: (id, data) => api.put(`/memory/records/${id}`, data),
-  deleteRecord: (id) => api.delete(`/memory/records/${id}`),
+  listScopes: () => api.get('/memory/scopes'),
+  listBlocks: (params) => api.get('/memory/blocks', { params }),
+  updateBlock: (label, data) => api.put(`/memory/blocks/${label}`, data),
+  listPassages: (params) => api.get('/memory/passages', { params }),
+  createPassage: (data) => api.post('/memory/passages', data),
+  deletePassage: (id, params) => api.delete(`/memory/passages/${id}`, { params }),
+  lettaStatus: () => api.get('/memory/letta/status'),
   listEpisodes: (params) => api.get('/memory/episodes', { params }),
   processSession: (sessionId) => api.post(`/memory/process/${sessionId}`),
 }

@@ -1,0 +1,54 @@
+# --- model_tools.py L148-150 ---
+        "tools.skill_manager_tool",
+        "tools.browser_tool",
+        "tools.cronjob_tools",
+
+# --- model_tools.py L212-214 ---
+    "skills_tools": ["skills_list", "skill_view", "skill_manage"],
+    "browser_tools": [
+        "browser_navigate", "browser_snapshot", "browser_click",
+
+# --- model_tools.py L213-215 ---
+    "browser_tools": [
+        "browser_navigate", "browser_snapshot", "browser_click",
+        "browser_type", "browser_scroll", "browser_back",
+
+# --- model_tools.py L214-216 ---
+        "browser_navigate", "browser_snapshot", "browser_click",
+        "browser_type", "browser_scroll", "browser_back",
+        "browser_press", "browser_get_images",
+
+# --- model_tools.py L215-217 ---
+        "browser_type", "browser_scroll", "browser_back",
+        "browser_press", "browser_get_images",
+        "browser_vision", "browser_console"
+
+# --- model_tools.py L216-218 ---
+        "browser_press", "browser_get_images",
+        "browser_vision", "browser_console"
+    ],
+
+# --- model_tools.py L325-327 ---
+
+    # Strip web tool cross-references from browser_navigate description when
+    # web_search / web_extract are not available.  The static schema says
+
+# --- model_tools.py L329-331 ---
+    # those tools when they're missing.
+    if "browser_navigate" in available_tool_names:
+        web_tools_available = {"web_search", "web_extract"} & available_tool_names
+
+# --- model_tools.py L333-335 ---
+            for i, td in enumerate(filtered_tools):
+                if td.get("function", {}).get("name") == "browser_navigate":
+                    desc = td["function"].get("description", "")
+
+# --- model_tools.py L476-478 ---
+        function_args: Arguments for the function.
+        task_id: Unique identifier for terminal/browser session isolation.
+        user_task: The user's original task (for browser_snapshot context).
+
+# --- model_tools.py L477-479 ---
+        task_id: Unique identifier for terminal/browser session isolation.
+        user_task: The user's original task (for browser_snapshot context).
+        enabled_tools: Tool names enabled for this session.  When provided,

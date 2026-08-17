@@ -1,12 +1,14 @@
 import time
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
+from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy.orm import Session
 from typing import Optional, List
 from database import get_db
 from models import KnowledgeBase, KnowledgeBaseStatus, gen_uuid, now_utc
 from schemas import (
     KnowledgeBaseCreate, KnowledgeBaseUpdate, KnowledgeBaseResponse,
-    DocumentAddRequest, KnowledgeSearchRequest, KnowledgeSearchResponse,
+    DocumentAddRequest, KnowledgeFileStatusUpdate,
+    KnowledgeSearchRequest, KnowledgeSearchResponse,
     KnowledgeSearchResult, PaginatedResponse
 )
 from services.knowledge_service import knowledge_service as ks
@@ -31,9 +33,15 @@ def list_knowledge_bases(
     kbs = query.order_by(KnowledgeBase.created_at.desc()).offset(
         (page - 1) * page_size
     ).limit(page_size).all()
+    items = []
+    for k in kbs:
+        item = KnowledgeBaseResponse.model_validate(k)
+        # Always report live file count (legacy rows may store chunk count)
+        item.doc_count = ks.get_doc_count(k.kb_id)
+        items.append(item)
     return PaginatedResponse(
         total=total, page=page, page_size=page_size,
-        items=[KnowledgeBaseResponse.model_validate(k) for k in kbs]
+        items=items,
     )
 
 
@@ -60,7 +68,9 @@ def get_knowledge_base(kb_id: str, db: Session = Depends(get_db)):
     kb = db.query(KnowledgeBase).filter(KnowledgeBase.kb_id == kb_id).first()
     if not kb:
         raise HTTPException(status_code=404, detail="知识库不存在")
-    return KnowledgeBaseResponse.model_validate(kb)
+    item = KnowledgeBaseResponse.model_validate(kb)
+    item.doc_count = ks.get_doc_count(kb_id)
+    return item
 
 
 @router.put("/{kb_id}", response_model=KnowledgeBaseResponse)
@@ -120,6 +130,8 @@ async def upload_file(
         result = ks.add_file(kb_id, file_bytes, name)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
     kb.doc_count = ks.get_doc_count(kb_id)
     kb.status = KnowledgeBaseStatus.ACTIVE
@@ -127,6 +139,7 @@ async def upload_file(
 
     return {
         "message": f"已导入文件 {result['filename']}，共 {result['chunk_count']} 个分块",
+        "doc_id": result.get("doc_id"),
         "filename": result["filename"],
         "text_length": result["text_length"],
         "chunk_count": result["chunk_count"],
@@ -142,6 +155,109 @@ def list_files(kb_id: str, db: Session = Depends(get_db)):
     return {"files": files, "total_files": len(files)}
 
 
+@router.patch("/{kb_id}/files/{doc_id}")
+def update_file_status(
+    kb_id: str,
+    doc_id: str,
+    data: KnowledgeFileStatusUpdate,
+    db: Session = Depends(get_db),
+):
+    kb = db.query(KnowledgeBase).filter(KnowledgeBase.kb_id == kb_id).first()
+    if not kb:
+        raise HTTPException(status_code=404, detail="知识库不存在")
+    try:
+        result = ks.set_document_status(kb_id, doc_id, data.status)
+    except ValueError as e:
+        raise HTTPException(status_code=404 if "不存在" in str(e) else 400, detail=str(e))
+    return {"message": "已更新文档状态", **result}
+
+
+@router.delete("/{kb_id}/files/{doc_id}")
+def delete_file(kb_id: str, doc_id: str, db: Session = Depends(get_db)):
+    kb = db.query(KnowledgeBase).filter(KnowledgeBase.kb_id == kb_id).first()
+    if not kb:
+        raise HTTPException(status_code=404, detail="知识库不存在")
+    try:
+        result = ks.delete_document(kb_id, doc_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404 if "不存在" in str(e) else 400, detail=str(e))
+    kb.doc_count = ks.get_doc_count(kb_id)
+    db.commit()
+    return {"message": "文档已删除", **result}
+
+
+@router.get("/{kb_id}/files/{doc_id}/content")
+def get_file_content(
+    kb_id: str,
+    doc_id: str,
+    as_text: bool = Query(False),
+    db: Session = Depends(get_db),
+):
+    kb = db.query(KnowledgeBase).filter(KnowledgeBase.kb_id == kb_id).first()
+    if not kb:
+        raise HTTPException(status_code=404, detail="知识库不存在")
+    try:
+        info = ks.get_document_content(kb_id, doc_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    file_type = (info.get("file_type") or "").lower()
+    force_text = as_text or file_type in ("docx", "doc", "xlsx", "xls")
+
+    if info.get("mode") == "file" and not force_text:
+        media = {
+            "pdf": "application/pdf",
+            "png": "image/png",
+            "jpg": "image/jpeg",
+            "jpeg": "image/jpeg",
+            "webp": "image/webp",
+            "gif": "image/gif",
+            "txt": "text/plain; charset=utf-8",
+            "md": "text/markdown; charset=utf-8",
+            "markdown": "text/markdown; charset=utf-8",
+        }.get(file_type, "application/octet-stream")
+        return FileResponse(
+            path=info["path"],
+            filename=info.get("filename") or "file",
+            media_type=media,
+        )
+
+    # text mode: for binary office, re-parse or join chunks — never UTF-8-decode the binary
+    content = info.get("content")
+    binary_office = {"xls", "xlsx", "doc", "docx"}
+    if content is None and info.get("mode") == "file":
+        if file_type in binary_office:
+            try:
+                from services.knowledge_service import PARSERS
+                with open(info["path"], "rb") as bf:
+                    raw = bf.read()
+                parser = PARSERS.get(f".{file_type}")
+                if not parser:
+                    raise ValueError(f"no parser for .{file_type}")
+                content = parser(raw) or ""
+            except Exception:
+                matched = ks._match_doc_chunks(kb_id, doc_id)
+                content = "\n\n".join(c.get("content", "") for c in matched)
+        else:
+            try:
+                with open(info["path"], "r", encoding="utf-8", errors="strict") as f:
+                    content = f.read()
+            except Exception:
+                matched = ks._match_doc_chunks(kb_id, doc_id)
+                content = "\n\n".join(c.get("content", "") for c in matched)
+    if content is None:
+        matched = ks._match_doc_chunks(kb_id, doc_id)
+        content = "\n\n".join(c.get("content", "") for c in matched)
+
+    return JSONResponse({
+        "doc_id": info["doc_id"],
+        "filename": info["filename"],
+        "file_type": info.get("file_type") or "txt",
+        "mode": "text",
+        "content": content or "",
+    })
+
+
 @router.post("/{kb_id}/search", response_model=KnowledgeSearchResponse)
 def search_knowledge_base(kb_id: str, data: KnowledgeSearchRequest, db: Session = Depends(get_db)):
     kb = db.query(KnowledgeBase).filter(KnowledgeBase.kb_id == kb_id).first()
@@ -149,7 +265,7 @@ def search_knowledge_base(kb_id: str, data: KnowledgeSearchRequest, db: Session 
         raise HTTPException(status_code=404, detail="知识库不存在")
 
     start = time.time()
-    results = ks.search(kb_id, data.query, data.top_k)
+    results = ks.search(kb_id, data.query, data.top_k, mode=data.mode)
     elapsed = (time.time() - start) * 1000
 
     return KnowledgeSearchResponse(

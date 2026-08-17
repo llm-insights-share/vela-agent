@@ -37,7 +37,7 @@ def init_db():
         DataQueryAgent, DataQueryDatasourceBinding, DataQueryExecutionLog,
         DataTableDictionary, DataDictionaryItem, DataCodeMapping, DataQueryExample, DataTermMapping,
         DataQueryFeedback, DataQueryQualityStats,
-        MemoryEpisode, MemoryRecord,
+        MemoryEpisode, MemoryRecord, LettaMemoryAgent,
         ScreenSystem, ScreenCredential, ScreenSession, UiAuditLog, UiSkill, UiSkillStep,
     )
     Base.metadata.create_all(bind=engine)
@@ -84,6 +84,8 @@ def _migrate_db():
     sess_cols = {row[1] for row in cursor.fetchall()}
     if "pending_context" not in sess_cols:
         cursor.execute("ALTER TABLE sessions ADD COLUMN pending_context TEXT DEFAULT '{}'")
+    if "llm_calls" not in sess_cols:
+        cursor.execute("ALTER TABLE sessions ADD COLUMN llm_calls TEXT DEFAULT '[]'")
 
     # ScreenPilot P1: ui_audit_logs 哈希链字段
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='ui_audit_logs'")
@@ -233,6 +235,17 @@ def _migrate_db():
         if "cdp_url" not in sys_cols:
             cursor.execute(
                 "ALTER TABLE screen_systems ADD COLUMN cdp_url VARCHAR(512) DEFAULT ''"
+            )
+
+    cursor.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='skill_packs'"
+    )
+    if cursor.fetchone():
+        cursor.execute("PRAGMA table_info(skill_packs)")
+        skill_pack_cols = {row[1] for row in cursor.fetchall()}
+        if "package_files" not in skill_pack_cols:
+            cursor.execute(
+                "ALTER TABLE skill_packs ADD COLUMN package_files TEXT DEFAULT '{}'"
             )
 
     conn.commit()

@@ -6,7 +6,7 @@ import io
 import json
 import yaml
 from database import get_db
-from models import SkillPack, SkillPackStatus, gen_uuid, now_utc
+from models import SkillPack, SkillPackStatus, AgentSkillBinding, gen_uuid, now_utc
 from schemas import SkillPackCreate, SkillPackUpdate, SkillPackResponse, PaginatedResponse
 
 router = APIRouter(prefix="/api/v1/skills", tags=["skills"])
@@ -76,14 +76,38 @@ def update_skill(skill_pack_id: str, data: SkillPackUpdate, db: Session = Depend
     return SkillPackResponse.model_validate(skill)
 
 
-@router.delete("/{skill_pack_id}")
-def delete_skill(skill_pack_id: str, db: Session = Depends(get_db)):
+@router.post("/{skill_pack_id}/unpublish")
+def unpublish_skill(skill_pack_id: str, db: Session = Depends(get_db)):
     skill = db.query(SkillPack).filter(SkillPack.skill_pack_id == skill_pack_id).first()
     if not skill:
         raise HTTPException(status_code=404, detail="Skill 包不存在")
     skill.status = SkillPackStatus.ARCHIVED
     db.commit()
-    return {"message": "Skill 包已归档"}
+    return {"message": "Skill 包已下架"}
+
+
+@router.delete("/{skill_pack_id}")
+def delete_skill(skill_pack_id: str, db: Session = Depends(get_db)):
+    skill = db.query(SkillPack).filter(SkillPack.skill_pack_id == skill_pack_id).first()
+    if not skill:
+        raise HTTPException(status_code=404, detail="Skill 包不存在")
+    db.query(AgentSkillBinding).filter(
+        AgentSkillBinding.skill_pack_id == skill_pack_id
+    ).delete()
+    db.delete(skill)
+    db.commit()
+    return {"message": "Skill 包已删除"}
+
+
+@router.post("/{skill_pack_id}/publish")
+def publish_skill(skill_pack_id: str, db: Session = Depends(get_db)):
+    skill = db.query(SkillPack).filter(SkillPack.skill_pack_id == skill_pack_id).first()
+    if not skill:
+        raise HTTPException(status_code=404, detail="Skill 包不存在")
+    skill.status = SkillPackStatus.ACTIVE
+    db.commit()
+    db.refresh(skill)
+    return SkillPackResponse.model_validate(skill)
 
 
 @router.post("/import", response_model=SkillPackResponse, status_code=201)
@@ -140,6 +164,8 @@ async def import_skill(file: UploadFile = File(...), db: Session = Depends(get_d
             if not instructions:
                 instructions = manifest_data.get('description', '')
 
+            package_files_data = _collect_package_files(zf)
+
             name = manifest_data.get('name', '')
             if not name:
                 raise HTTPException(status_code=400, detail="Skill 清单中缺少 name 字段")
@@ -155,6 +181,7 @@ async def import_skill(file: UploadFile = File(...), db: Session = Depends(get_d
                 existing.tools = tools
                 existing.manifest = manifest_data
                 existing.skill_content = instructions
+                existing.package_files = package_files_data
                 existing.status = SkillPackStatus.ACTIVE
                 db.commit()
                 db.refresh(existing)
@@ -169,6 +196,7 @@ async def import_skill(file: UploadFile = File(...), db: Session = Depends(get_d
                 description=manifest_data.get('description', ''),
                 manifest=manifest_data,
                 skill_content=instructions,
+                package_files=package_files_data,
             )
             db.add(skill)
             db.commit()
@@ -181,6 +209,51 @@ async def import_skill(file: UploadFile = File(...), db: Session = Depends(get_d
         raise HTTPException(status_code=400, detail=f"YAML 解析错误: {str(e)}")
     except json.JSONDecodeError as e:
         raise HTTPException(status_code=400, detail=f"JSON 解析错误: {str(e)}")
+
+
+_TEXT_EXTENSIONS = {
+    '.md', '.markdown', '.txt', '.yaml', '.yml', '.json',
+    '.py', '.js', '.ts', '.jsx', '.tsx', '.css', '.html', '.xml', '.csv',
+}
+
+
+def _is_text_file(path: str) -> bool:
+    basename = path.split('/')[-1]
+    if basename.startswith('.'):
+        return False
+    ext = ('.' + basename.rsplit('.', 1)[-1].lower()) if '.' in basename else ''
+    return ext in _TEXT_EXTENSIONS
+
+
+def _collect_package_files(zf: zipfile.ZipFile) -> dict:
+    files = []
+    for name in zf.namelist():
+        if name.endswith('/') or not _is_text_file(name):
+            continue
+        try:
+            content = zf.read(name).decode('utf-8', errors='replace')
+        except Exception:
+            continue
+        files.append({"path": name, "content": content})
+    skill_md_path = _detect_skill_md_path(files)
+    return {"files": files, "skill_md_path": skill_md_path}
+
+
+def _detect_skill_md_path(files: list) -> str | None:
+    for f in files:
+        basename = f["path"].split('/')[-1].lower()
+        if basename == 'skill.md':
+            return f["path"]
+    return None
+
+
+def _is_single_file_pack(files: list, skill_md_path: str | None) -> bool:
+    if len(files) <= 1:
+        return True
+    if skill_md_path and len(files) == 1:
+        return True
+    other_files = [f for f in files if f["path"] != skill_md_path]
+    return len(other_files) == 0
 
 
 def _parse_skill_md(raw: str):

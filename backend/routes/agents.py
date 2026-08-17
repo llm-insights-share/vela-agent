@@ -208,6 +208,8 @@ def bind_agent_skills(agent_id: str, skill_pack_ids: list[str], db: Session = De
 
 @router.get("/{agent_id}/knowledge-bases", response_model=list)
 def get_agent_knowledge_bases(agent_id: str, db: Session = Depends(get_db)):
+    from services.knowledge_service import knowledge_service as ks
+
     bindings = db.query(AgentKnowledgeBinding).filter(
         AgentKnowledgeBinding.agent_id == agent_id
     ).all()
@@ -218,7 +220,7 @@ def get_agent_knowledge_bases(agent_id: str, db: Session = Depends(get_db)):
             "kb_id": b.kb_id,
             "name": kb.name if kb else b.kb_id,
             "description": kb.description if kb else "",
-            "doc_count": kb.doc_count if kb else 0,
+            "doc_count": ks.get_doc_count(b.kb_id) if kb else 0,
         })
     return result
 

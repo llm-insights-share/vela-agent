@@ -170,39 +170,58 @@ async def rewrite_memory_anchor(
     memory_hits: List[str] = []
     if ctx.memory_enabled and db is not None and ctx.agent_id:
         try:
-            from services.memory.gateway import MemoryGateway, MemoryQuery
+            from services.memory.retriever import SelfRetriever
 
-            gw = MemoryGateway(db)
-            # Keyword probe with a few tokens from query
-            keyword = None
-            for token in ("方案", "文档", "报告", "计划", "讨论"):
-                if token in query:
-                    keyword = token
-                    break
-            rows = gw.read(
-                MemoryQuery(
+            # 复用 SelfRetriever（含关键词回退）；必须在线程池执行，避免阻塞事件循环
+            # （Letta 语义检索会回连本进程 llm-gateway）
+            import asyncio
+
+            retriever = SelfRetriever(db)
+
+            def _probe():
+                return retriever.recall_for_message(
                     agent_id=ctx.agent_id,
                     user_id=ctx.user_id or "",
-                    keyword=keyword,
+                    message=query,
                     top_k=5,
                 )
-            )
-            if not rows and ctx.user_id:
-                rows = gw.read(
-                    MemoryQuery(agent_id=ctx.agent_id, user_id="", top_k=5)
-                )
-            memory_hits = [(r.content or "")[:120] for r in rows if r.content]
+
+            try:
+                loop = asyncio.get_running_loop()
+                formatted = await loop.run_in_executor(None, _probe)
+            except RuntimeError:
+                formatted = _probe()
+            if formatted:
+                # 从格式化文本中抽行作为锚点
+                memory_hits = [
+                    line.lstrip("- ").strip()
+                    for line in formatted.splitlines()
+                    if line.startswith("- ")
+                ][:5]
+            if not memory_hits:
+                from services.memory import letta_store
+
+                blocks = letta_store.read_blocks(db, ctx.agent_id, ctx.user_id or "")
+                memory_hits = [
+                    (b.get("value") or "")[:120]
+                    for b in blocks
+                    if (b.get("value") or "").strip()
+                ][:5]
         except Exception:
             memory_hits = []
 
+    # 有明确实体/代号类问题时，探测失败不要硬澄清，交给下游 AgentLoop 再召回
     if ctx.memory_enabled and not memory_hits and not (ctx.context_summary or "").strip():
-        return (
-            query,
-            0.0,
-            0,
-            True,
-            "您提到了历史内容，但我暂时找不到对应记忆。请补充主题、时间或文档名称。",
-        )
+        vague = any(h in (query or "") for h in ("上次", "之前", "那份", "那个方案", "上回", "刚才说的", "前面提到"))
+        if vague:
+            return (
+                query,
+                0.0,
+                0,
+                True,
+                "您提到了历史内容，但我暂时找不到对应记忆。请补充主题、时间或文档名称。",
+            )
+        return query, 0.0, 0, False, None
 
     anchors = (
         f"时间提示={ctx.time_hint or '未知'};"

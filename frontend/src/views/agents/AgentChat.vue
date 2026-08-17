@@ -46,13 +46,16 @@
           <LoadingOutlined style="margin-right: 4px;" />运行中
         </a-tag>
         <a-tag v-else-if="isHitlWait" color="gold">待审批</a-tag>
-        <a-select
-          v-if="agent.agent_type === 'SINGLE'"
-          v-model:value="executionMode"
-          size="small"
-          style="width: 160px; margin-left: auto;"
-          :options="executionModeOptions"
-        />
+        <div class="chat-header-actions">
+          <a-select
+            v-if="agent.agent_type === 'SINGLE'"
+            v-model:value="executionMode"
+            size="small"
+            style="width: 160px"
+            :options="executionModeOptions"
+          />
+          <a-button size="small" @click="openDebugDrawer">调试</a-button>
+        </div>
       </div>
 
     <div class="chat-messages" ref="msgContainer">
@@ -74,18 +77,72 @@
           </template>
         </div>
 
-        <div v-if="msg.thinking" class="chat-thinking">
+        <div v-if="msg._thinkingSteps && msg._thinkingSteps.length" class="chat-thinking">
           <div class="chat-thinking-header" @click="msg.thinkingExpanded = !msg.thinkingExpanded">
             <CaretRightOutlined v-if="!msg.thinkingExpanded" style="font-size: 10px;" />
             <CaretDownOutlined v-else style="font-size: 10px;" />
             <span style="margin-left: 4px;">思考与执行过程</span>
+            <span class="chat-thinking-summary">{{ thinkingSummary(msg._thinkingSteps) }}</span>
           </div>
-          <div v-if="msg.thinkingExpanded" class="chat-thinking-body">
-            {{ msg.thinking }}
+          <div v-if="msg.thinkingExpanded" class="chat-thinking-body chat-thinking-timeline">
+            <div
+              v-for="(step, si) in msg._thinkingSteps"
+              :key="si"
+              :class="['think-step', `think-step-${step.type}`]"
+            >
+              <div class="think-step-rail" />
+              <div class="think-step-body">
+                <div class="think-step-head">
+                  <a-tag :color="thinkingStepColor(step.type)" size="small">{{ thinkingStepLabel(step) }}</a-tag>
+                  <a-button
+                    v-if="step.type === 'tool' && !step.searchCard && step.text && step.text.length > 80"
+                    type="link"
+                    size="small"
+                    class="think-step-toggle"
+                    @click.stop="step.expanded = !step.expanded"
+                  >{{ step.expanded ? '收起' : '展开' }}</a-button>
+                </div>
+                <div v-if="step.searchCard" class="search-result-card">
+                  <div v-if="step.searchCard.answer" class="search-answer">
+                    <div class="search-card-label">摘要答案</div>
+                    <div class="search-answer-body">{{ step.searchCard.answer }}</div>
+                  </div>
+                  <div v-if="step.searchCard.results?.length" class="search-list">
+                    <div class="search-card-label">搜索结果</div>
+                    <div
+                      v-for="(item, ri) in step.searchCard.results"
+                      :key="ri"
+                      class="search-item"
+                    >
+                      <div class="search-item-title">{{ ri + 1 }}. {{ item.title }}</div>
+                      <a v-if="item.url" :href="item.url" target="_blank" rel="noopener" class="search-item-link">{{ item.url }}</a>
+                      <div v-if="item.snippet" class="search-item-snippet">{{ item.snippet }}</div>
+                    </div>
+                  </div>
+                </div>
+                <pre
+                  v-else-if="step.type === 'tool'"
+                  class="think-step-text"
+                >{{ step.expanded || step.text.length <= 80 ? step.text : (step.text.slice(0, 80) + '…') }}</pre>
+                <div v-else class="think-step-text">{{ step.text }}</div>
+              </div>
+            </div>
           </div>
         </div>
 
-        <div class="chat-msg-content" v-if="msg.content" v-html="renderMarkdown(msg.content)"></div>
+        <div class="chat-msg-content" v-if="msg.content || (msg.role === 'user' && msg.activeSkill)">
+          <template v-if="msg.role === 'user' && msg.activeSkill">
+            <span class="user-skill-prefix">/{{ msg.activeSkill }}&nbsp;&nbsp;</span><span class="user-msg-text">{{ msg.content }}</span>
+          </template>
+          <template v-else-if="msg.content">
+            <span v-html="renderMarkdown(msg.content)"></span>
+          </template>
+        </div>
+        <div v-if="msg.attachments && msg.attachments.length" class="chat-attachments">
+          <a-tag v-for="att in msg.attachments" :key="att.id" color="blue">
+            <PaperClipOutlined /> {{ att.filename }}
+          </a-tag>
+        </div>
         <div v-if="msg.files && msg.files.length > 0" class="chat-files">
           <a-alert
             v-if="msg.filesTruncated || hasTruncatedFiles(msg.files)"
@@ -241,8 +298,37 @@
           <ThunderboltOutlined /> {{ activeSkill }}
         </a-tag>
       </div>
+      <div class="attachment-bar" v-if="pendingAttachments.length">
+        <a-tag
+          v-for="att in pendingAttachments"
+          :key="att.attachment_id || att.tempId"
+          :closable="!att.uploading"
+          color="blue"
+          @close="removeAttachment(att)"
+        >
+          <LoadingOutlined v-if="att.uploading" style="margin-right: 4px;" />
+          <PaperClipOutlined v-else style="margin-right: 4px;" />
+          {{ att.filename }}
+        </a-tag>
+      </div>
       <div class="chat-input-row">
         <div class="chat-input-wrapper" ref="inputWrapper">
+          <a-button
+            class="attach-btn"
+            type="text"
+            :disabled="isSending || uploadingAttachment"
+            @click="triggerUpload"
+          >
+            <PaperClipOutlined />
+          </a-button>
+          <input
+            ref="fileInput"
+            type="file"
+            hidden
+            multiple
+            :accept="ACCEPT_TYPES"
+            @change="onFilesSelected"
+          />
           <a-textarea
             ref="inputRef"
             v-model:value="inputText"
@@ -267,7 +353,7 @@
             v-else
             type="primary"
             :loading="isSending"
-            :disabled="!inputText.trim() || isSending"
+            :disabled="(!inputText.trim() && !readyAttachments.length) || isSending || hasUploadingAttachments"
             @click="sendMessage"
             class="send-btn"
           >
@@ -401,6 +487,156 @@
         </div>
       </div>
     </Teleport>
+
+    <a-drawer
+      v-model:open="debugOpen"
+      title="调试 · 模型交互"
+      width="680"
+      :destroy-on-close="false"
+      @close="stopDebugPoll"
+    >
+      <div v-if="!sessionId" class="debug-empty">
+        <a-empty description="请先创建或选择会话" />
+      </div>
+      <div v-else-if="loadingLlmCalls && llmCalls.length === 0" class="debug-loading">
+        <a-spin tip="加载中..." />
+      </div>
+      <div v-else-if="llmCalls.length === 0" class="debug-empty">
+        <a-empty description="暂无模型调用记录，发送消息后将在此显示" />
+      </div>
+      <div v-else class="debug-call-list">
+        <a-card
+          v-for="call in llmCalls"
+          :key="call.call_id"
+          size="small"
+          class="debug-call-card"
+        >
+          <template #title>
+            <div class="debug-call-title">
+              <span>#{{ call.seq }}</span>
+              <a-tag color="blue">{{ sourceLabel(call.source) }}</a-tag>
+              <span class="debug-call-model">{{ call.model_name }}</span>
+            </div>
+          </template>
+          <template #extra>
+            <a-space size="small">
+              <a-tag>{{ call.duration_ms }}ms</a-tag>
+              <a-tag v-if="tokenTotal(call)" color="purple">{{ tokenTotal(call) }} tokens</a-tag>
+            </a-space>
+          </template>
+
+          <div class="debug-section">
+            <div class="debug-section-label">输入</div>
+            <div v-if="systemMessages(call.input?.messages).length" class="debug-messages">
+              <div
+                v-for="(msg, mi) in systemMessages(call.input?.messages)"
+                :key="'sys-' + mi"
+                :class="['debug-msg-block', 'debug-msg-system']"
+              >
+                <div class="debug-msg-role">{{ roleLabel(msg.role) }}</div>
+                <pre v-if="msg.content" class="debug-msg-content">{{ formatContent(msg.content) }}</pre>
+              </div>
+            </div>
+            <div v-if="call.input?.tools?.length" class="debug-tools-block">
+              <div class="debug-sub-label">Tools 定义（{{ call.input.tools.length }}）</div>
+              <div class="debug-tool-cards">
+                <div
+                  v-for="(tool, ti) in call.input.tools"
+                  :key="ti"
+                  class="debug-tool-card"
+                >
+                  <div
+                    class="debug-tool-card-head"
+                    @click="toggleToolCard(`${call.call_id}-${ti}`)"
+                  >
+                    <CaretRightOutlined v-if="!isToolCardExpanded(`${call.call_id}-${ti}`)" style="font-size: 10px;" />
+                    <CaretDownOutlined v-else style="font-size: 10px;" />
+                    <span class="debug-tool-card-name">{{ toolFn(tool).name || 'unnamed' }}</span>
+                    <a-tag size="small">{{ tool.type || 'function' }}</a-tag>
+                  </div>
+                  <template v-if="isToolCardExpanded(`${call.call_id}-${ti}`)">
+                    <div v-if="toolFn(tool).description" class="debug-tool-card-desc">
+                      {{ toolFn(tool).description }}
+                    </div>
+                    <div v-if="toolParamEntries(tool).length" class="debug-tool-params">
+                      <div class="debug-sub-label">parameters</div>
+                      <div
+                        v-for="param in toolParamEntries(tool)"
+                        :key="param.name"
+                        class="debug-tool-param-row"
+                      >
+                        <code class="debug-tool-param-name">{{ param.name }}</code>
+                        <a-tag size="small">{{ param.type }}</a-tag>
+                        <a-tag v-if="param.required" color="orange" size="small">required</a-tag>
+                        <span v-if="param.description" class="debug-tool-param-desc">{{ param.description }}</span>
+                      </div>
+                    </div>
+                    <a-collapse v-else-if="toolFn(tool).parameters" ghost size="small">
+                      <a-collapse-panel key="params" header="parameters (JSON)">
+                        <pre class="json-block">{{ JSON.stringify(toolFn(tool).parameters, null, 2) }}</pre>
+                      </a-collapse-panel>
+                    </a-collapse>
+                  </template>
+                </div>
+              </div>
+            </div>
+            <div v-if="nonSystemMessages(call.input?.messages).length" class="debug-messages">
+              <div
+                v-for="(msg, mi) in nonSystemMessages(call.input?.messages)"
+                :key="'msg-' + mi"
+                :class="['debug-msg-block', `debug-msg-${msg.role || 'unknown'}`]"
+              >
+                <div class="debug-msg-role">{{ roleLabel(msg.role) }}</div>
+                <pre v-if="msg.content" class="debug-msg-content">{{ formatContent(msg.content) }}</pre>
+                <div v-if="msg.tool_calls?.length" class="debug-tool-calls">
+                  <div class="debug-sub-label">tool_calls</div>
+                  <pre class="json-block">{{ JSON.stringify(msg.tool_calls, null, 2) }}</pre>
+                </div>
+                <div v-if="msg.role === 'tool'" class="debug-tool-meta">
+                  <span v-if="msg.tool_call_id">tool_call_id: {{ msg.tool_call_id }}</span>
+                  <span v-if="msg.name"> · name: {{ msg.name }}</span>
+                </div>
+              </div>
+            </div>
+            <div class="debug-params">
+              <a-tag>max_tokens: {{ call.input?.max_tokens ?? '—' }}</a-tag>
+              <a-tag>temperature: {{ call.input?.temperature ?? '—' }}</a-tag>
+            </div>
+          </div>
+
+          <div class="debug-section">
+            <div class="debug-section-label">输出</div>
+            <a-alert
+              v-if="call.output?.raw_error"
+              type="error"
+              show-icon
+              :message="call.output.raw_error"
+              style="margin-bottom: 8px;"
+            />
+            <div v-if="call.output?.reasoning_content" class="debug-reasoning">
+              <div class="debug-sub-label">推理内容</div>
+              <pre class="debug-msg-content">{{ formatContent(call.output.reasoning_content) }}</pre>
+            </div>
+            <pre v-if="call.output?.content" class="debug-msg-content">{{ formatContent(call.output.content) }}</pre>
+            <div v-if="call.output?.tool_calls?.length" class="debug-tool-calls">
+              <div class="debug-sub-label">tool_calls</div>
+              <pre class="json-block">{{ JSON.stringify(call.output.tool_calls, null, 2) }}</pre>
+            </div>
+            <div v-if="call.output?.usage && Object.keys(call.output.usage).length" class="debug-usage">
+              <a-tag v-for="(val, key) in call.output.usage" :key="key">{{ key }}: {{ val }}</a-tag>
+            </div>
+            <div
+              v-if="!call.output?.raw_error && !call.output?.content && !call.output?.tool_calls?.length && !call.output?.reasoning_content"
+              class="debug-empty-inline"
+            >
+              （无输出内容）
+            </div>
+          </div>
+
+          <div class="debug-call-time">{{ formatCallTime(call.created_at) }}</div>
+        </a-card>
+      </div>
+    </a-drawer>
     </div>
   </div>
 </template>
@@ -411,9 +647,10 @@ import { useRoute } from 'vue-router'
 import {
   ArrowLeftOutlined, CaretRightOutlined, CaretDownOutlined,
   ThunderboltOutlined, SendOutlined, PlusOutlined, DownloadOutlined,
-  FileOutlined, CloseOutlined, LoadingOutlined, StopOutlined,
+  FileOutlined, CloseOutlined, LoadingOutlined, StopOutlined, PaperClipOutlined,
 } from '@ant-design/icons-vue'
 import { agentApi, sessionApi, hitlApi, skillApi } from '../../api'
+import { useAuthStore } from '../../stores/auth'
 import { message } from 'ant-design-vue'
 import { marked } from 'marked'
 import {
@@ -428,6 +665,7 @@ marked.setOptions({
 })
 
 const route = useRoute()
+const auth = useAuthStore()
 const agentId = route.params.id
 const agent = reactive({})
 const sessionId = ref('')
@@ -439,6 +677,18 @@ const msgContainer = ref(null)
 const inputRef = ref(null)
 const inputWrapper = ref(null)
 const skillMenuRef = ref(null)
+const fileInput = ref(null)
+
+const ACCEPT_TYPES = '.pdf,.docx,.doc,.txt,.md,.markdown,.xlsx,.xls,.png,.jpg,.jpeg,.webp,.gif'
+const pendingAttachments = ref([])
+const uploadingAttachment = ref(false)
+
+const readyAttachments = computed(() =>
+  pendingAttachments.value.filter(a => a.attachment_id && !a.uploading)
+)
+const hasUploadingAttachments = computed(() =>
+  pendingAttachments.value.some(a => a.uploading)
+)
 
 const skills = ref([])
 const activeSkill = ref(null)
@@ -456,10 +706,152 @@ const currentSessionStatus = ref('ACTIVE')
 const aborting = ref(false)
 let sessionPollTimer = null
 
+const debugOpen = ref(false)
+const llmCalls = ref([])
+const loadingLlmCalls = ref(false)
+let debugPollTimer = null
+
+const sourceLabelMap = {
+  react: 'ReAct',
+  plan: 'Plan & Execute',
+  direct: '直接对话',
+  coordinator: 'Coordinator',
+  workflow: '工作流',
+  workflow_llm: '工作流 LLM',
+  tool_assess: '工具质检',
+  query_rewrite: 'Query 改写',
+}
+
+function sourceLabel(source) {
+  return sourceLabelMap[source] || source || '未知'
+}
+
+function roleLabel(role) {
+  const map = { system: 'System', user: 'User', assistant: 'Assistant', tool: 'Tool' }
+  return map[role] || role || 'Unknown'
+}
+
+function systemMessages(messages) {
+  return (messages || []).filter(m => m.role === 'system')
+}
+
+function nonSystemMessages(messages) {
+  return (messages || []).filter(m => m.role !== 'system')
+}
+
+function toolFn(tool) {
+  return tool?.function || tool || {}
+}
+
+function toolParamEntries(tool) {
+  const params = toolFn(tool).parameters || {}
+  const properties = params.properties
+  if (!properties || typeof properties !== 'object') return []
+  const required = new Set(params.required || [])
+  return Object.entries(properties).map(([name, def]) => ({
+    name,
+    type: (def && def.type) || 'any',
+    description: (def && def.description) || '',
+    required: required.has(name),
+  }))
+}
+
+const expandedToolCards = ref(new Set())
+
+function isToolCardExpanded(key) {
+  return expandedToolCards.value.has(key)
+}
+
+function toggleToolCard(key) {
+  const next = new Set(expandedToolCards.value)
+  if (next.has(key)) next.delete(key)
+  else next.add(key)
+  expandedToolCards.value = next
+}
+
+function formatContent(content) {
+  if (content == null) return ''
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content.map(part => {
+      if (typeof part === 'string') return part
+      if (part?.type === 'text') return part.text || ''
+      return JSON.stringify(part, null, 2)
+    }).join('\n')
+  }
+  return JSON.stringify(content, null, 2)
+}
+
+function tokenTotal(call) {
+  return call.output?.usage?.total_tokens || 0
+}
+
+function formatCallTime(iso) {
+  if (!iso) return ''
+  try {
+    return new Date(iso).toLocaleString()
+  } catch {
+    return iso
+  }
+}
+
+async function fetchLlmCalls() {
+  if (!sessionId.value) {
+    llmCalls.value = []
+    return
+  }
+  loadingLlmCalls.value = true
+  try {
+    const res = await sessionApi.llmCalls(sessionId.value)
+    llmCalls.value = res.items || []
+  } catch (e) {
+    console.error('加载 LLM 调用记录失败:', e)
+  } finally {
+    loadingLlmCalls.value = false
+  }
+}
+
+function startDebugPollIfNeeded() {
+  stopDebugPoll()
+  if (debugOpen.value && isRunning.value) {
+    debugPollTimer = setInterval(fetchLlmCalls, 2500)
+  }
+}
+
+function stopDebugPoll() {
+  if (debugPollTimer) {
+    clearInterval(debugPollTimer)
+    debugPollTimer = null
+  }
+}
+
+async function openDebugDrawer() {
+  debugOpen.value = true
+  await fetchLlmCalls()
+  startDebugPollIfNeeded()
+}
+
 const isRunning = computed(() => currentSessionStatus.value === 'RUNNING')
 const isHitlWait = computed(() => currentSessionStatus.value === 'HITL_WAIT')
 const canAbort = computed(() => isRunning.value || isHitlWait.value)
 const isSending = computed(() => sending.value || isRunning.value)
+
+watch(debugOpen, (open) => {
+  if (open) {
+    startDebugPollIfNeeded()
+  } else {
+    stopDebugPoll()
+  }
+})
+
+watch(isRunning, () => {
+  if (debugOpen.value) {
+    startDebugPollIfNeeded()
+    if (!isRunning.value) {
+      fetchLlmCalls()
+    }
+  }
+})
 
 async function abortCurrentSession() {
   if (!sessionId.value || !canAbort.value || aborting.value) return
@@ -506,11 +898,260 @@ function sessionStatusColor(status) {
   return map[status] || 'default'
 }
 
-function mapSessionMessages(msgs) {
-  return (msgs || []).map(msg => ({
+function parseThinkingSteps(thinking) {
+  if (!thinking || typeof thinking !== 'string') return []
+  const lines = thinking.split('\n')
+  const steps = []
+
+  const looksLikeNewStep = (trimmed) => (
+    /^工具\s*\[/.test(trimmed)
+    || /^\[QueryRewrite\]/i.test(trimmed)
+    || /^\[Memory\]/i.test(trimmed)
+    || /^\[ReAct/i.test(trimmed)
+    || /^\[Direct\]/i.test(trimmed)
+    || /^\[Plan-and-Execute\]/i.test(trimmed)
+    || /^\[规划\]/.test(trimmed)
+    || /^思考:/.test(trimmed)
+    || /^计划内容:/.test(trimmed)
+    || /^\[TIMEOUT\]/.test(trimmed)
+    || /^\[中止\]/.test(trimmed)
+    || /^\[LLM/.test(trimmed)
+    || /^\[文件\]/.test(trimmed)
+    || /^\[UI技能\]/.test(trimmed)
+    || /^调用\s+\d+\s*个工具/.test(trimmed)
+    || /^执行步骤/.test(trimmed)
+  )
+
+  const classify = (line) => {
+    const trimmed = line.trim()
+    if (!trimmed) return null
+
+    const toolMatch = trimmed.match(/^工具\s*\[([^\]]+)\]\s*(?:结果:|:)\s*(.*)$/)
+    if (toolMatch) {
+      return {
+        type: 'tool',
+        toolName: toolMatch[1],
+        text: toolMatch[2] || '',
+        expanded: false,
+      }
+    }
+
+    if (/^\[QueryRewrite\]/i.test(trimmed) || /^原文:/.test(trimmed) || /^改写:/.test(trimmed)) {
+      return { type: 'rewrite', text: trimmed, expanded: false }
+    }
+    if (/^\[Memory\]/i.test(trimmed)) {
+      return { type: 'memory', text: trimmed, expanded: false }
+    }
+    if (/^\[ReAct/i.test(trimmed) || /^\[Direct\]/i.test(trimmed) || /^\[Plan-and-Execute\]/i.test(trimmed)) {
+      return { type: 'phase', text: trimmed, expanded: false }
+    }
+    if (/^思考:/.test(trimmed) || /^\[规划\]/.test(trimmed) || /^计划内容:/.test(trimmed)) {
+      return { type: 'thought', text: trimmed, expanded: false }
+    }
+    if (/^\[TIMEOUT\]/.test(trimmed) || /^\[中止\]/.test(trimmed)) {
+      return { type: 'error', text: trimmed, expanded: false }
+    }
+    if (/^调用\s+\d+\s*个工具/.test(trimmed) || /^执行步骤/.test(trimmed)) {
+      return { type: 'action', text: trimmed, expanded: false }
+    }
+    return { type: 'info', text: trimmed, expanded: false }
+  }
+
+  for (const raw of lines) {
+    const trimmed = raw.trim()
+    if (!trimmed) continue
+
+    const indented = /^\s/.test(raw)
+    if (
+      steps.length
+      && !looksLikeNewStep(trimmed)
+      && (indented || steps[steps.length - 1].type === 'tool' || steps[steps.length - 1].type === 'rewrite')
+    ) {
+      steps[steps.length - 1].text = `${steps[steps.length - 1].text}\n${trimmed}`.trim()
+      continue
+    }
+
+    const step = classify(raw)
+    if (step) steps.push(step)
+  }
+  return steps
+}
+
+function thinkingSummary(thinkingOrSteps) {
+  const steps = Array.isArray(thinkingOrSteps)
+    ? thinkingOrSteps
+    : parseThinkingSteps(thinkingOrSteps || '')
+  if (!steps.length) return ''
+  const toolCount = steps.filter(s => s.type === 'tool').length
+  const parts = [`${steps.length} 步`]
+  if (toolCount) parts.push(`调用 ${toolCount} 个工具`)
+  return parts.join(' · ')
+}
+
+function thinkingStepColor(type) {
+  const map = {
+    rewrite: 'cyan',
+    memory: 'purple',
+    phase: 'blue',
+    thought: 'default',
+    tool: 'geekblue',
+    action: 'orange',
+    error: 'red',
+    info: 'default',
+  }
+  return map[type] || 'default'
+}
+
+function thinkingStepLabel(step) {
+  if (step.type === 'tool') return `工具 · ${step.toolName || 'unknown'}`
+  const map = {
+    rewrite: 'QueryRewrite',
+    memory: 'Memory',
+    phase: '阶段',
+    thought: '思考',
+    action: '动作',
+    error: '异常',
+    info: '日志',
+  }
+  return map[step.type] || '步骤'
+}
+
+/** 识别「摘要答案 / 搜索结果」结构，返回卡片数据；否则 null */
+function parseSearchContent(content) {
+  if (!content || typeof content !== 'string') return null
+  const text = content.trim()
+  if (!/(摘要答案|搜索结果)/.test(text)) return null
+  // 避免把普通 Markdown 回复误判：需有明确区块标题
+  const hasAnswerHeader = /(?:^|\n)##?\s*摘要答案\s*:?\s*(?:\n|$)/m.test(text)
+    || /(?:^|\n)摘要答案\s*:?\s*(?:\n|$)/m.test(text)
+  const hasResultsHeader = /(?:^|\n)##?\s*搜索结果\s*:?\s*(?:\n|$)/m.test(text)
+    || /(?:^|\n)搜索结果\s*:?\s*(?:\n|$)/m.test(text)
+  if (!hasAnswerHeader && !hasResultsHeader) return null
+
+  let answer = ''
+  const results = []
+
+  const answerMatch = text.match(/(?:##?\s*)?摘要答案\s*:?\s*\n+([\s\S]*?)(?=(?:\n(?:##?\s*)?搜索结果\s*:?\s*(?:\n|$))|$)/)
+  if (answerMatch) {
+    answer = answerMatch[1].trim()
+  }
+
+  const resultsBlockMatch = text.match(/(?:##?\s*)?搜索结果\s*:?\s*\n+([\s\S]*)$/)
+  const resultsBlock = resultsBlockMatch ? resultsBlockMatch[1].trim() : ''
+
+  if (resultsBlock) {
+    // Markdown: ### 1. title  / - 链接: / - 摘要:
+    const mdItems = resultsBlock.split(/(?=###\s*\d+\.)/).filter(Boolean)
+    if (mdItems.length && /###\s*\d+\./.test(resultsBlock)) {
+      for (const block of mdItems) {
+        const titleM = block.match(/###\s*\d+\.\s*(.+)/)
+        const linkM = block.match(/链接\s*[:：]\s*(?:\[[^\]]*\]\()?(\S+?)\)?(?:\s|$)/m)
+          || block.match(/https?:\/\/\S+/)
+        const snipM = block.match(/(?:摘要|内容)\s*[:：]\s*([\s\S]*?)(?=\n\s*[-*]|\n###|$)/)
+        results.push({
+          title: (titleM?.[1] || '').trim(),
+          url: (typeof linkM?.[1] === 'string' ? linkM[1] : linkM?.[0] || '').replace(/[)\].,]+$/, ''),
+          snippet: (snipM?.[1] || '').trim(),
+        })
+      }
+    } else {
+      // Plain: 1. title\n   链接: url\n   内容: ...
+      const plainItems = resultsBlock.split(/(?=^\d+\.\s)/m).filter(s => /^\d+\.\s/.test(s.trim()))
+      for (const block of plainItems) {
+        const titleM = block.match(/^\d+\.\s*(.+)$/m)
+        const linkM = block.match(/链接\s*[:：]\s*(\S+)/)
+        const snipM = block.match(/内容\s*[:：]\s*([\s\S]*?)(?=\n\s*\d+\.\s|$)/)
+          || block.match(/摘要\s*[:：]\s*([\s\S]*?)(?=\n\s*\d+\.\s|$)/)
+        results.push({
+          title: (titleM?.[1] || '').trim(),
+          url: (linkM?.[1] || '').trim(),
+          snippet: (snipM?.[1] || '').trim(),
+        })
+      }
+    }
+  }
+
+  if (!answer && !results.length) return null
+  return { answer, results }
+}
+
+/** ReAct 中间轨迹：tool 消息、仅用于发起工具调用的 assistant 消息 */
+function isIntermediateMessage(msg) {
+  if (msg.role === 'tool') return true
+  if (msg.role !== 'assistant') return false
+  const toolCalls = msg.tool_calls || msg.toolCalls
+  return (toolCalls && toolCalls.length > 0) || !(msg.content || '').trim()
+}
+
+/** 把中间消息按顺序转成思考步骤，tool_call_id 反查工具名 */
+function intermediateToSteps(buffer) {
+  const toolNameById = {}
+  const steps = []
+  for (const msg of buffer) {
+    if (msg.role === 'assistant') {
+      for (const tc of (msg.tool_calls || msg.toolCalls || [])) {
+        if (tc?.id) toolNameById[tc.id] = tc.function?.name || tc.name || 'unknown'
+      }
+      const text = (msg.content || '').trim()
+      if (text) steps.push({ type: 'thought', text, expanded: false })
+    } else if (msg.role === 'tool') {
+      steps.push({
+        type: 'tool',
+        toolName: toolNameById[msg.tool_call_id] || msg.name || 'unknown',
+        text: (msg.content || '').trim(),
+        expanded: false,
+      })
+    }
+  }
+  return steps
+}
+
+/** 后端 thinking 里的工具结果被截断到 200 字，用 tool 消息全文补齐 */
+function mergeToolResults(thinkingSteps, intermediateSteps) {
+  const fullByName = new Map()
+  for (const step of intermediateSteps) {
+    if (step.type !== 'tool') continue
+    if (!fullByName.has(step.toolName)) fullByName.set(step.toolName, [])
+    fullByName.get(step.toolName).push(step.text)
+  }
+
+  const usedByName = new Map()
+  const merged = thinkingSteps.map(step => {
+    if (step.type !== 'tool') return step
+    const queue = fullByName.get(step.toolName)
+    const used = usedByName.get(step.toolName) || 0
+    if (!queue || used >= queue.length) return step
+    usedByName.set(step.toolName, used + 1)
+    const full = queue[used]
+    return full.length > step.text.length ? { ...step, text: full } : step
+  })
+
+  for (const [name, queue] of fullByName) {
+    for (let i = usedByName.get(name) || 0; i < queue.length; i++) {
+      merged.push({ type: 'tool', toolName: name, text: queue[i], expanded: false })
+    }
+  }
+  return merged
+}
+
+function attachSearchCards(steps) {
+  return steps.map(step => (
+    step.type === 'tool' ? { ...step, searchCard: parseSearchContent(step.text) } : step
+  ))
+}
+
+function normalizeMessage(msg, intermediateSteps) {
+  const thinking = msg.thinking || ''
+  const baseSteps = parseThinkingSteps(thinking)
+  const steps = baseSteps.length
+    ? mergeToolResults(baseSteps, intermediateSteps)
+    : intermediateSteps
+
+  return {
     ...msg,
-    thinking: msg.thinking || '',
-    thinkingExpanded: !!msg.thinking,
+    thinking,
+    thinkingExpanded: false,
+    _thinkingSteps: attachSearchCards(steps),
     traceExpanded: true,
     executionTrace: msg.executionTrace || msg.execution_trace || [],
     executionMode: msg.executionMode || msg.execution_mode || '',
@@ -527,7 +1168,38 @@ function mapSessionMessages(msgs) {
     otpCode: msg.otpCode || '',
     approvalStatus: msg.approvalStatus || null,
     approvalFinalResult: msg.approvalFinalResult || '',
-  }))
+  }
+}
+
+function mapSessionMessages(msgs) {
+  const out = []
+  let buffer = []
+
+  const flushBuffer = () => {
+    if (!buffer.length) return
+    const steps = intermediateToSteps(buffer)
+    buffer = []
+    if (steps.length) {
+      out.push(normalizeMessage({ role: 'assistant', content: '' }, steps))
+    }
+  }
+
+  for (const msg of (msgs || [])) {
+    if (isIntermediateMessage(msg)) {
+      buffer.push(msg)
+      continue
+    }
+    if (msg.role === 'assistant') {
+      out.push(normalizeMessage(msg, intermediateToSteps(buffer)))
+      buffer = []
+    } else {
+      flushBuffer()
+      out.push(normalizeMessage(msg, []))
+    }
+  }
+  flushBuffer()
+
+  return out
 }
 
 async function loadSessionById(id) {
@@ -626,7 +1298,7 @@ onMounted(async () => {
       const session = await sessionApi.create({
         agent_id: agentId,
         caller_type: 'web_playground',
-        caller_id: 'anonymous',
+        caller_id: auth.user?.user_id || '',
       })
       sessionId.value = session.session_id
       currentSessionStatus.value = session.status || 'ACTIVE'
@@ -661,6 +1333,7 @@ async function switchSession(s) {
   activeSkill.value = null
   activeSkillId.value = null
   skipHistory.value = false
+  pendingAttachments.value = []
   try {
     await loadSessionById(s.session_id)
     startSessionPollIfNeeded()
@@ -686,7 +1359,7 @@ async function createNewSession() {
     const session = await sessionApi.create({
       agent_id: agentId,
       caller_type: 'web_playground',
-      caller_id: 'anonymous',
+      caller_id: auth.user?.user_id || '',
     })
     sessionId.value = session.session_id
     messages.value = []
@@ -696,6 +1369,7 @@ async function createNewSession() {
     activeSkill.value = null
     activeSkillId.value = null
     skipHistory.value = false
+    pendingAttachments.value = []
     await fetchSessions()
     message.success('新会话已创建')
   } catch (e) {
@@ -875,6 +1549,7 @@ function onResizeEnd() {
 
 onUnmounted(() => {
   stopSessionPoll()
+  stopDebugPoll()
   setActiveViewing(null, null)
   document.removeEventListener('mousemove', onResize)
   document.removeEventListener('mouseup', onResizeEnd)
@@ -882,16 +1557,32 @@ onUnmounted(() => {
 
 async function sendMessage() {
   const text = inputText.value.trim()
-  if (!text || isSending.value) return
+  const attachmentIds = readyAttachments.value.map(a => a.attachment_id)
+  if ((!text && !attachmentIds.length) || isSending.value) return
+  if (hasUploadingAttachments.value) {
+    message.warning('附件上传中，请稍候')
+    return
+  }
 
   const skillPackId = activeSkillId.value
   const skillName = activeSkill.value
+  const displayText = text || '请分析附件'
+  const attachmentMeta = readyAttachments.value.map(a => ({
+    id: a.attachment_id,
+    filename: a.filename,
+  }))
 
   inputText.value = ''
+  pendingAttachments.value = []
   showSkillMenu.value = false
   activeSkill.value = null
   activeSkillId.value = null
-  messages.value.push({ role: 'user', content: text })
+  messages.value.push({
+    role: 'user',
+    content: displayText,
+    activeSkill: skillName || undefined,
+    attachments: attachmentMeta.length ? attachmentMeta : undefined,
+  })
   sending.value = true
   thinkingExpanded.value = false
 
@@ -899,7 +1590,13 @@ async function sendMessage() {
   scrollToBottom()
 
   try {
-    const payload = { message: text, timeout_seconds: timeoutSeconds.value, execution_mode: executionMode.value, skip_history: skipHistory.value }
+    const payload = {
+      message: text,
+      attachment_ids: attachmentIds,
+      timeout_seconds: timeoutSeconds.value,
+      execution_mode: executionMode.value,
+      skip_history: skipHistory.value,
+    }
     if (skillPackId) {
       payload.skill_pack_id = skillPackId
     }
@@ -913,6 +1610,67 @@ async function sendMessage() {
     message.error(e.message)
   } finally {
     sending.value = false
+  }
+}
+
+function triggerUpload() {
+  if (!sessionId.value) {
+    message.warning('请先创建或选择会话')
+    return
+  }
+  fileInput.value?.click()
+}
+
+async function onFilesSelected(event) {
+  const files = Array.from(event.target.files || [])
+  event.target.value = ''
+  if (!files.length || !sessionId.value) return
+
+  uploadingAttachment.value = true
+  try {
+    for (const file of files) {
+      if (readyAttachments.value.length >= 5) {
+        message.warning('单条消息最多 5 个附件')
+        break
+      }
+
+      const tempId = `pending_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+      pendingAttachments.value.push({
+        tempId,
+        filename: file.name,
+        uploading: true,
+      })
+
+      try {
+        const formData = new FormData()
+        formData.append('file', file, file.name)
+        const res = await sessionApi.uploadAttachment(sessionId.value, formData)
+        const idx = pendingAttachments.value.findIndex(a => a.tempId === tempId)
+        if (idx >= 0) {
+          pendingAttachments.value[idx] = {
+            attachment_id: res.attachment_id,
+            filename: res.filename,
+            is_image: res.is_image,
+            uploading: false,
+          }
+        }
+      } catch (e) {
+        pendingAttachments.value = pendingAttachments.value.filter(a => a.tempId !== tempId)
+        message.error(`上传失败 ${file.name}: ${e.message}`)
+      }
+    }
+  } finally {
+    uploadingAttachment.value = false
+  }
+}
+
+function removeAttachment(att) {
+  pendingAttachments.value = pendingAttachments.value.filter(a => {
+    if (att.tempId) return a.tempId !== att.tempId
+    return a.attachment_id !== att.attachment_id
+  })
+  if (att.attachment_id && sessionId.value) {
+    sessionApi.deleteAttachment(sessionId.value, att.attachment_id).catch(() => {})
   }
 }
 
@@ -1093,6 +1851,12 @@ function renderMarkdown(text) {
   color: #1a1714;
   flex: 1;
 }
+.chat-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
 .chat-messages {
   flex: 1;
   overflow-y: auto;
@@ -1129,6 +1893,14 @@ function renderMarkdown(text) {
 .chat-msg-user .chat-msg-content {
   background: #1a1714;
   color: #fff;
+}
+.user-skill-prefix {
+  color: #ef4444;
+  font-weight: 600;
+}
+.user-msg-text {
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 .chat-msg-content :deep(p) {
   margin: 0 0 8px 0;
@@ -1308,9 +2080,132 @@ function renderMarkdown(text) {
   overflow-y: auto;
   line-height: 1.6;
 }
+.chat-thinking-summary {
+  margin-left: 8px;
+  font-size: 11px;
+  color: #b0a89f;
+}
+.chat-thinking-timeline {
+  white-space: normal;
+  max-height: 360px;
+  padding: 10px 10px 10px 4px;
+}
+.think-step {
+  display: flex;
+  gap: 10px;
+  position: relative;
+  padding: 6px 0 10px;
+}
+.think-step:last-child {
+  padding-bottom: 2px;
+}
+.think-step-rail {
+  width: 3px;
+  border-radius: 2px;
+  background: #ddd8ce;
+  flex-shrink: 0;
+  align-self: stretch;
+  min-height: 28px;
+}
+.think-step-rewrite .think-step-rail { background: #67e8f9; }
+.think-step-memory .think-step-rail { background: #c4b5fd; }
+.think-step-phase .think-step-rail { background: #93c5fd; }
+.think-step-thought .think-step-rail { background: #d4d4d8; }
+.think-step-tool .think-step-rail { background: #818cf8; }
+.think-step-action .think-step-rail { background: #fdba74; }
+.think-step-error .think-step-rail { background: #fca5a5; }
+.think-step-body {
+  flex: 1;
+  min-width: 0;
+}
+.think-step-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.think-step-toggle {
+  padding: 0;
+  height: auto;
+  font-size: 11px;
+}
+.think-step-text {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.55;
+  color: #5c5650;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: #fff;
+  border: 1px solid #efeae2;
+  border-radius: 4px;
+  padding: 6px 8px;
+}
+.think-step-tool .think-step-text {
+  background: #f8f7ff;
+  border-color: #e0e7ff;
+}
 .chat-thinking.sending .chat-thinking-body {
   background: #fef9f0;
   border-color: #f5e6cc;
+}
+
+.search-result-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.search-card-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #9e9590;
+  letter-spacing: 0.02em;
+  margin-bottom: 6px;
+}
+.search-answer {
+  padding: 10px 12px;
+  background: #f7faf7;
+  border: 1px solid #dce8dc;
+  border-radius: 6px;
+}
+.search-answer-body {
+  font-size: 13px;
+  line-height: 1.65;
+  color: #1a1714;
+  white-space: pre-wrap;
+}
+.search-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.search-item {
+  padding: 10px 12px;
+  background: #faf8f5;
+  border: 1px solid #e8e4dc;
+  border-radius: 6px;
+}
+.search-item-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #1a1714;
+  margin-bottom: 4px;
+  line-height: 1.4;
+}
+.search-item-link {
+  display: block;
+  font-size: 11px;
+  color: #3b82f6;
+  word-break: break-all;
+  margin-bottom: 4px;
+}
+.search-item-snippet {
+  font-size: 12px;
+  color: #5c5650;
+  line-height: 1.55;
+  white-space: pre-wrap;
 }
 
 .chat-trace {
@@ -1374,6 +2269,27 @@ function renderMarkdown(text) {
 }
 .skill-bar {
   margin-bottom: 8px;
+}
+.attachment-bar {
+  margin-bottom: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.chat-attachments {
+  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.attach-btn {
+  flex-shrink: 0;
+  color: #9e9590;
+  padding: 4px 8px;
+  height: auto;
+}
+.attach-btn:hover {
+  color: #c2410c;
 }
 .chat-input-wrapper {
   display: flex;
@@ -1602,5 +2518,173 @@ function renderMarkdown(text) {
 }
 .preview-resize-handle:hover {
   background: linear-gradient(135deg, transparent 50%, #b5afa8 50%);
+}
+
+.debug-empty,
+.debug-loading {
+  display: flex;
+  justify-content: center;
+  padding: 48px 0;
+}
+.debug-call-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.debug-call-card :deep(.ant-card-head) {
+  min-height: 40px;
+}
+.debug-call-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.debug-call-model {
+  color: #6b6560;
+  font-size: 12px;
+}
+.debug-section {
+  margin-bottom: 12px;
+}
+.debug-section-label {
+  font-weight: 600;
+  font-size: 12px;
+  color: #1a1714;
+  margin-bottom: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.debug-sub-label {
+  font-size: 11px;
+  color: #9e9590;
+  margin-bottom: 4px;
+}
+.debug-messages {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.debug-tools-block {
+  margin-bottom: 12px;
+}
+.debug-tool-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.debug-tool-card {
+  border-radius: 6px;
+  padding: 8px 10px;
+  border: 1px solid #d6e4ff;
+  background: #f7faff;
+}
+.debug-tool-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+.debug-tool-card-head:hover .debug-tool-card-name {
+  color: #1d4ed8;
+}
+.debug-tool-card-name {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  font-weight: 600;
+  color: #1a1714;
+}
+.debug-tool-card-desc {
+  font-size: 12px;
+  color: #6b6560;
+  margin-bottom: 6px;
+  line-height: 1.45;
+}
+.debug-tool-params {
+  margin-top: 4px;
+}
+.debug-tool-param-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  padding: 4px 0;
+  border-top: 1px solid #e8eef8;
+  font-size: 12px;
+}
+.debug-tool-param-name {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: #1d4ed8;
+}
+.debug-tool-param-desc {
+  color: #9e9590;
+  font-size: 11px;
+}
+.debug-msg-block {
+  border-radius: 6px;
+  padding: 8px 10px;
+  border: 1px solid #e8e2d9;
+}
+.debug-msg-system { background: #f5f3ef; }
+.debug-msg-user { background: #fef7ed; border-color: #f5d0a9; }
+.debug-msg-assistant { background: #f0f7ff; border-color: #bfdbfe; }
+.debug-msg-tool { background: #f0fdf4; border-color: #bbf7d0; }
+.debug-msg-role {
+  font-size: 10px;
+  font-weight: 600;
+  color: #9e9590;
+  margin-bottom: 4px;
+  text-transform: uppercase;
+}
+.debug-msg-content {
+  margin: 0;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 280px;
+  overflow: auto;
+}
+.debug-tool-calls {
+  margin-top: 6px;
+}
+.debug-tool-meta {
+  font-size: 11px;
+  color: #9e9590;
+  margin-top: 4px;
+}
+.debug-params,
+.debug-usage {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.debug-reasoning {
+  margin-bottom: 8px;
+}
+.debug-call-time {
+  font-size: 11px;
+  color: #b5afa8;
+  margin-top: 4px;
+}
+.debug-empty-inline {
+  font-size: 12px;
+  color: #b5afa8;
+}
+.json-block {
+  margin: 0;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 240px;
+  overflow: auto;
+  background: #faf8f5;
+  padding: 8px;
+  border-radius: 4px;
 }
 </style>

@@ -1,0 +1,139 @@
+# --- toolsets.py L42-46 ---
+    # Skills
+    "skills_list", "skill_view", "skill_manage",
+    # Browser automation
+    "browser_navigate", "browser_snapshot", "browser_click",
+    "browser_type", "browser_scroll", "browser_back",
+
+# --- toolsets.py L43-47 ---
+    "skills_list", "skill_view", "skill_manage",
+    # Browser automation
+    "browser_navigate", "browser_snapshot", "browser_click",
+    "browser_type", "browser_scroll", "browser_back",
+    "browser_press", "browser_get_images",
+
+# --- toolsets.py L44-48 ---
+    # Browser automation
+    "browser_navigate", "browser_snapshot", "browser_click",
+    "browser_type", "browser_scroll", "browser_back",
+    "browser_press", "browser_get_images",
+    "browser_vision", "browser_console",
+
+# --- toolsets.py L45-49 ---
+    "browser_navigate", "browser_snapshot", "browser_click",
+    "browser_type", "browser_scroll", "browser_back",
+    "browser_press", "browser_get_images",
+    "browser_vision", "browser_console",
+    # Text-to-speech
+
+# --- toolsets.py L46-50 ---
+    "browser_type", "browser_scroll", "browser_back",
+    "browser_press", "browser_get_images",
+    "browser_vision", "browser_console",
+    # Text-to-speech
+    "text_to_speech",
+
+# --- toolsets.py L118-122 ---
+    },
+    
+    "browser": {
+        "description": "Browser automation for web interaction (navigate, click, type, scroll, iframes, hold-click) with web search for finding URLs",
+        "tools": [
+
+# --- toolsets.py L119-123 ---
+    
+    "browser": {
+        "description": "Browser automation for web interaction (navigate, click, type, scroll, iframes, hold-click) with web search for finding URLs",
+        "tools": [
+            "browser_navigate", "browser_snapshot", "browser_click",
+
+# --- toolsets.py L121-125 ---
+        "description": "Browser automation for web interaction (navigate, click, type, scroll, iframes, hold-click) with web search for finding URLs",
+        "tools": [
+            "browser_navigate", "browser_snapshot", "browser_click",
+            "browser_type", "browser_scroll", "browser_back",
+            "browser_press", "browser_get_images",
+
+# --- toolsets.py L122-126 ---
+        "tools": [
+            "browser_navigate", "browser_snapshot", "browser_click",
+            "browser_type", "browser_scroll", "browser_back",
+            "browser_press", "browser_get_images",
+            "browser_vision", "browser_console", "web_search", "download_file"
+
+# --- toolsets.py L123-127 ---
+            "browser_navigate", "browser_snapshot", "browser_click",
+            "browser_type", "browser_scroll", "browser_back",
+            "browser_press", "browser_get_images",
+            "browser_vision", "browser_console", "web_search", "download_file"
+        ],
+
+# --- toolsets.py L124-128 ---
+            "browser_type", "browser_scroll", "browser_back",
+            "browser_press", "browser_get_images",
+            "browser_vision", "browser_console", "web_search", "download_file"
+        ],
+        "includes": []
+
+# --- toolsets.py L240-244 ---
+            "vision_analyze",
+            "skills_list", "skill_view", "skill_manage",
+            "browser_navigate", "browser_snapshot", "browser_click",
+            "browser_type", "browser_scroll", "browser_back",
+            "browser_press", "browser_get_images",
+
+# --- toolsets.py L241-245 ---
+            "skills_list", "skill_view", "skill_manage",
+            "browser_navigate", "browser_snapshot", "browser_click",
+            "browser_type", "browser_scroll", "browser_back",
+            "browser_press", "browser_get_images",
+            "browser_vision", "browser_console",
+
+# --- toolsets.py L242-246 ---
+            "browser_navigate", "browser_snapshot", "browser_click",
+            "browser_type", "browser_scroll", "browser_back",
+            "browser_press", "browser_get_images",
+            "browser_vision", "browser_console",
+            "todo", "memory",
+
+# --- toolsets.py L243-247 ---
+            "browser_type", "browser_scroll", "browser_back",
+            "browser_press", "browser_get_images",
+            "browser_vision", "browser_console",
+            "todo", "memory",
+            "session_search",
+
+# --- toolsets.py L266-270 ---
+            # Skills
+            "skills_list", "skill_view", "skill_manage",
+            # Browser automation
+            "browser_navigate", "browser_snapshot", "browser_click",
+            "browser_type", "browser_scroll", "browser_back",
+
+# --- toolsets.py L267-271 ---
+            "skills_list", "skill_view", "skill_manage",
+            # Browser automation
+            "browser_navigate", "browser_snapshot", "browser_click",
+            "browser_type", "browser_scroll", "browser_back",
+            "browser_press", "browser_get_images",
+
+# --- toolsets.py L268-272 ---
+            # Browser automation
+            "browser_navigate", "browser_snapshot", "browser_click",
+            "browser_type", "browser_scroll", "browser_back",
+            "browser_press", "browser_get_images",
+            "browser_vision", "browser_console",
+
+# --- toolsets.py L269-273 ---
+            "browser_navigate", "browser_snapshot", "browser_click",
+            "browser_type", "browser_scroll", "browser_back",
+            "browser_press", "browser_get_images",
+            "browser_vision", "browser_console",
+            # Planning & memory
+
+# --- toolsets.py L270-274 ---
+            "browser_type", "browser_scroll", "browser_back",
+            "browser_press", "browser_get_images",
+            "browser_vision", "browser_console",
+            # Planning & memory
+            "todo", "memory",

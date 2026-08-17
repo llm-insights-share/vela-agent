@@ -1,97 +1,19 @@
 import os
 import re
-import io
 import json
 import numpy as np
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 import faiss
 
+from services.document_parser import (
+    PARSERS,
+    IMAGE_EXTS,
+    chunk_by_paragraph,
+    SUPPORTED_EXTENSIONS,
+)
+
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
-
-
-def _parse_pdf(file_bytes: bytes) -> str:
-    from PyPDF2 import PdfReader
-    reader = PdfReader(io.BytesIO(file_bytes))
-    parts = []
-    for page in reader.pages:
-        text = page.extract_text()
-        if text:
-            parts.append(text.strip())
-    return "\n\n".join(parts)
-
-
-def _parse_docx(file_bytes: bytes) -> str:
-    from docx import Document
-    doc = Document(io.BytesIO(file_bytes))
-    parts = []
-    for para in doc.paragraphs:
-        text = para.text.strip()
-        if text:
-            parts.append(text)
-    return "\n\n".join(parts)
-
-
-def _parse_txt(file_bytes: bytes) -> str:
-    return file_bytes.decode("utf-8", errors="replace")
-
-
-def _parse_markdown(file_bytes: bytes) -> str:
-    text = file_bytes.decode("utf-8", errors="replace")
-    text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
-    text = re.sub(r"```[\s\S]*?```", "", text)
-    text = re.sub(r"`([^`]+)`", r"\1", text)
-    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
-    text = re.sub(r"[*_~>|]", "", text)
-    return text
-
-
-PARSERS = {
-    ".pdf": _parse_pdf,
-    ".docx": _parse_docx,
-    ".doc": _parse_docx,
-    ".txt": _parse_txt,
-    ".md": _parse_markdown,
-    ".markdown": _parse_markdown,
-}
-
-
-def chunk_by_paragraph(text: str, target_size: int = 500, min_size: int = 100) -> List[str]:
-    raw_paragraphs = re.split(r"\n\s*\n", text)
-    paragraphs = [p.strip() for p in raw_paragraphs if p.strip()]
-    if not paragraphs:
-        return []
-
-    chunks = []
-    current = ""
-
-    for para in paragraphs:
-        if len(para) >= target_size:
-            if current:
-                chunks.append(current.strip())
-                current = ""
-            start = 0
-            while start < len(para):
-                end = start + target_size
-                chunks.append(para[start:end].strip())
-                start = end
-        elif current and len(current) + len(para) + 2 > target_size:
-            chunks.append(current.strip())
-            current = para
-        else:
-            if current:
-                current += "\n\n" + para
-            else:
-                current = para
-
-    if current:
-        chunks.append(current.strip())
-
-    result = []
-    for chunk in chunks:
-        if len(chunk) >= min_size:
-            result.append(chunk)
-
-    return result
+KB_FILES_DIR = os.path.join(DATA_DIR, "kb_files")
 
 
 import hashlib
@@ -184,10 +106,14 @@ def _create_embedding_model():
 
 
 class KnowledgeService:
+    RRF_K = 60
+
     def __init__(self):
         self._embedding_model = None
         self._indexes: Dict[str, faiss.IndexFlatIP] = {}
         self._chunks: Dict[str, List[Dict[str, Any]]] = {}
+        self._bm25_index: Dict[str, Any] = {}
+        self._bm25_row_to_chunk_idx: Dict[str, List[int]] = {}
         os.makedirs(DATA_DIR, exist_ok=True)
 
     @property
@@ -201,6 +127,108 @@ class KnowledgeService:
 
     def _get_chunks_path(self, kb_id: str) -> str:
         return os.path.join(DATA_DIR, f"chunks_{kb_id}.json")
+
+    def _doc_dir(self, kb_id: str, doc_id: str) -> str:
+        return os.path.join(KB_FILES_DIR, kb_id, doc_id)
+
+    def _store_file(self, kb_id: str, doc_id: str, filename: str, file_bytes: bytes) -> str:
+        doc_dir = self._doc_dir(kb_id, doc_id)
+        os.makedirs(doc_dir, exist_ok=True)
+        safe_name = os.path.basename(filename) or "file"
+        abs_path = os.path.join(doc_dir, safe_name)
+        with open(abs_path, "wb") as f:
+            f.write(file_bytes)
+        return os.path.relpath(abs_path, DATA_DIR).replace("\\", "/")
+
+    def _resolve_stored_path(self, stored_path: str) -> Optional[str]:
+        if not stored_path:
+            return None
+        abs_path = stored_path if os.path.isabs(stored_path) else os.path.join(DATA_DIR, stored_path)
+        if os.path.isfile(abs_path):
+            return abs_path
+        return None
+
+    @staticmethod
+    def _is_active(meta: Dict[str, Any]) -> bool:
+        return (meta or {}).get("status", "ACTIVE") != "INACTIVE"
+
+    @staticmethod
+    def _legacy_doc_id(filename: str) -> str:
+        digest = hashlib.md5(filename.encode("utf-8")).hexdigest()[:12]
+        return f"legacy-{digest}"
+
+    def _match_doc_chunks(self, kb_id: str, doc_id: str) -> List[Dict[str, Any]]:
+        self._ensure_index(kb_id)
+        chunks = self._chunks[kb_id]
+        matched = []
+        for chunk in chunks:
+            meta = chunk.get("metadata") or {}
+            cid = meta.get("doc_id")
+            if cid and cid == doc_id:
+                matched.append(chunk)
+                continue
+            if not cid and doc_id.startswith("legacy-"):
+                filename = meta.get("filename", "手动粘贴")
+                if self._legacy_doc_id(filename) == doc_id:
+                    matched.append(chunk)
+        return matched
+
+    def _rebuild_index(self, kb_id: str):
+        dim = self.embedding_model.get_sentence_embedding_dimension()
+        new_index = faiss.IndexFlatIP(dim)
+        chunks = self._chunks.get(kb_id) or []
+        if chunks:
+            texts = [c["content"] for c in chunks]
+            embeddings = self.embedding_model.encode(texts, normalize_embeddings=True)
+            embeddings = np.array(embeddings).astype("float32")
+            new_index.add(embeddings)
+        self._indexes[kb_id] = new_index
+        self._save(kb_id)
+        self._rebuild_bm25(kb_id)
+
+    @staticmethod
+    def _tokenize(text: str) -> List[str]:
+        import jieba
+        return [t.strip() for t in jieba.lcut(text or "") if t and t.strip()]
+
+    def _rebuild_bm25(self, kb_id: str):
+        """Build BM25 over ACTIVE chunks only; map BM25 row -> chunk index."""
+        import math
+        from rank_bm25 import BM25Okapi
+
+        class BM25OkapiSmooth(BM25Okapi):
+            """Lucene-style IDF so tiny corpora still yield positive scores."""
+
+            def _calc_idf(self, nd):
+                for word, freq in nd.items():
+                    self.idf[word] = math.log(
+                        1.0 + (self.corpus_size - freq + 0.5) / (freq + 0.5)
+                    )
+
+        chunks = self._chunks.get(kb_id) or []
+        corpus = []
+        row_map: List[int] = []
+        for idx, chunk in enumerate(chunks):
+            meta = chunk.get("metadata") or {}
+            if not self._is_active(meta):
+                continue
+            tokens = self._tokenize(chunk.get("content") or "")
+            if not tokens:
+                continue
+            corpus.append(tokens)
+            row_map.append(idx)
+
+        if corpus:
+            self._bm25_index[kb_id] = BM25OkapiSmooth(corpus)
+            self._bm25_row_to_chunk_idx[kb_id] = row_map
+        else:
+            self._bm25_index.pop(kb_id, None)
+            self._bm25_row_to_chunk_idx[kb_id] = []
+
+    def _ensure_bm25(self, kb_id: str):
+        self._ensure_index(kb_id)
+        if kb_id not in self._bm25_row_to_chunk_idx:
+            self._rebuild_bm25(kb_id)
 
     def _ensure_index(self, kb_id: str):
         if kb_id not in self._indexes:
@@ -233,6 +261,7 @@ class KnowledgeService:
                 dim = self.embedding_model.get_sentence_embedding_dimension()
                 self._indexes[kb_id] = faiss.IndexFlatIP(dim)
                 self._chunks[kb_id] = []
+            self._rebuild_bm25(kb_id)
 
     def _save(self, kb_id: str):
         if kb_id in self._indexes:
@@ -249,28 +278,53 @@ class KnowledgeService:
         filename: str,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        import uuid
+
         self._ensure_index(kb_id)
 
         ext = os.path.splitext(filename)[1].lower()
         parser = PARSERS.get(ext)
         if parser is None:
-            supported = ", ".join(PARSERS.keys())
-            raise ValueError(f"不支持的文件格式 .{ext}，支持: {supported}")
+            supported = ", ".join(sorted(PARSERS.keys()))
+            raise ValueError(f"不支持的文件格式 {ext or '(无扩展名)'}，支持: {supported}")
 
         text = parser(file_bytes)
-        if not text or not text.strip():
+        if ext in IMAGE_EXTS:
+            text = f"[图片] {filename}"
+        elif not text or not text.strip():
             raise ValueError("文件内容为空或无法解析")
 
-        chunks = chunk_by_paragraph(text)
+        if ext in IMAGE_EXTS:
+            chunks = [text]
+        else:
+            chunks = chunk_by_paragraph(text)
+            if not chunks:
+                chunks = [text.strip()] if text and text.strip() else [f"[文件] {filename}"]
 
-        meta = metadata or {}
-        meta["filename"] = filename
-        meta["file_type"] = ext
+        doc_id = uuid.uuid4().hex
+        stored_path = self._store_file(kb_id, doc_id, filename, file_bytes)
+
+        meta = dict(metadata or {})
+        meta.update({
+            "doc_id": doc_id,
+            "filename": filename,
+            "file_type": ext.lstrip(".") or ext,
+            "status": "ACTIVE",
+            "source": "upload",
+            "stored_path": stored_path,
+        })
 
         added = self._add_chunks(kb_id, chunks, meta)
-        return {"filename": filename, "text_length": len(text), "chunk_count": added}
+        return {
+            "doc_id": doc_id,
+            "filename": filename,
+            "text_length": len(text),
+            "chunk_count": added,
+        }
 
     def add_documents(self, kb_id: str, documents: List[Dict[str, Any]]) -> int:
+        import uuid
+
         self._ensure_index(kb_id)
 
         all_chunks = []
@@ -278,10 +332,25 @@ class KnowledgeService:
 
         for doc in documents:
             content = doc.get("content", "")
-            meta = doc.get("metadata", {})
+            meta = dict(doc.get("metadata") or {})
+            doc_id = meta.get("doc_id") or uuid.uuid4().hex
+            filename = meta.get("filename") or f"粘贴文本-{doc_id[:8]}.txt"
+            stored_path = self._store_file(
+                kb_id, doc_id, filename, content.encode("utf-8")
+            )
+            meta.update({
+                "doc_id": doc_id,
+                "filename": filename,
+                "file_type": meta.get("file_type") or "txt",
+                "status": meta.get("status") or "ACTIVE",
+                "source": "paste",
+                "stored_path": stored_path,
+            })
             chunks = chunk_by_paragraph(content)
+            if not chunks and content.strip():
+                chunks = [content.strip()]
             all_chunks.extend(chunks)
-            all_meta.extend([meta] * len(chunks))
+            all_meta.extend([dict(meta) for _ in chunks])
 
         if not all_chunks:
             return 0
@@ -300,56 +369,195 @@ class KnowledgeService:
 
         for i, chunk in enumerate(chunks):
             meta = metadata[i] if isinstance(metadata, list) else metadata
+            meta_copy = dict(meta) if isinstance(meta, dict) else {}
             existing.append({
                 "chunk_id": f"chunk-{start_idx + i}",
                 "content": chunk,
-                "metadata": meta if isinstance(meta, dict) else {},
+                "metadata": meta_copy,
             })
 
         embeddings = self.embedding_model.encode(chunks, normalize_embeddings=True)
         embeddings = np.array(embeddings).astype("float32")
         index.add(embeddings)
         self._save(kb_id)
+        self._rebuild_bm25(kb_id)
 
         return len(chunks)
 
-    def search(self, kb_id: str, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
-        self._ensure_index(kb_id)
+    def _search_vector(
+        self, kb_id: str, query: str, top_n: int
+    ) -> List[Tuple[str, float]]:
+        """Return ordered (chunk_id, vector_score) for ACTIVE chunks."""
         index = self._indexes[kb_id]
         chunks = self._chunks[kb_id]
-
-        if index.ntotal == 0:
+        if index.ntotal == 0 or top_n <= 0:
             return []
 
         query_embedding = self.embedding_model.encode([query], normalize_embeddings=True)
         query_embedding = np.array(query_embedding).astype("float32")
+        fetch_k = min(max(top_n * 5, top_n), index.ntotal)
+        scores, indices = index.search(query_embedding, fetch_k)
 
-        scores, indices = index.search(query_embedding, min(top_k, index.ntotal))
-
-        results = []
+        out: List[Tuple[str, float]] = []
         for score, idx in zip(scores[0], indices[0]):
-            if idx >= 0 and idx < len(chunks):
-                chunk = chunks[idx]
-                results.append({
-                    "chunk_id": chunk["chunk_id"],
-                    "content": chunk["content"],
-                    "score": float(score),
-                    "metadata": chunk.get("metadata", {}),
-                })
+            if idx < 0 or idx >= len(chunks):
+                continue
+            chunk = chunks[idx]
+            meta = chunk.get("metadata") or {}
+            if not self._is_active(meta):
+                continue
+            out.append((chunk["chunk_id"], float(score)))
+            if len(out) >= top_n:
+                break
+        return out
 
+    def _search_bm25(
+        self, kb_id: str, query: str, top_n: int
+    ) -> List[Tuple[str, float]]:
+        """Return ordered (chunk_id, bm25_score) for ACTIVE chunks."""
+        self._ensure_bm25(kb_id)
+        bm25 = self._bm25_index.get(kb_id)
+        row_map = self._bm25_row_to_chunk_idx.get(kb_id) or []
+        if not bm25 or not row_map or top_n <= 0:
+            return []
+
+        tokens = self._tokenize(query)
+        if not tokens:
+            return []
+
+        scores = bm25.get_scores(tokens)
+        ranked = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)
+
+        chunks = self._chunks[kb_id]
+        out: List[Tuple[str, float]] = []
+        for row_i, score in ranked:
+            if score <= 0:
+                break
+            if row_i < 0 or row_i >= len(row_map):
+                continue
+            chunk_idx = row_map[row_i]
+            if chunk_idx < 0 or chunk_idx >= len(chunks):
+                continue
+            chunk = chunks[chunk_idx]
+            meta = chunk.get("metadata") or {}
+            if not self._is_active(meta):
+                continue
+            out.append((chunk["chunk_id"], float(score)))
+            if len(out) >= top_n:
+                break
+        return out
+
+    @staticmethod
+    def _rrf_fuse(
+        ranked_lists: List[List[Tuple[str, float]]],
+        k: int = 60,
+    ) -> List[Tuple[str, float, List[str]]]:
+        """RRF fuse; returns (chunk_id, rrf_score, sources)."""
+        source_names = ["vector", "bm25"]
+        scores: Dict[str, float] = {}
+        sources: Dict[str, List[str]] = {}
+        for list_i, ranked in enumerate(ranked_lists):
+            name = source_names[list_i] if list_i < len(source_names) else f"s{list_i}"
+            for rank, (chunk_id, _) in enumerate(ranked):
+                scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (k + rank + 1)
+                src = sources.setdefault(chunk_id, [])
+                if name not in src:
+                    src.append(name)
+        fused = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        return [(cid, sc, sources.get(cid, [])) for cid, sc in fused]
+
+    def search(
+        self,
+        kb_id: str,
+        query: str,
+        top_k: int = 5,
+        mode: str = "hybrid",
+    ) -> List[Dict[str, Any]]:
+        self._ensure_index(kb_id)
+        self._ensure_bm25(kb_id)
+        chunks = self._chunks[kb_id]
+        if not chunks:
+            return []
+
+        mode = (mode or "hybrid").lower().strip()
+        if mode not in ("hybrid", "vector", "bm25"):
+            mode = "hybrid"
+
+        n = len(chunks)
+        fetch_n = min(max(top_k * 5, top_k), n) if n else top_k
+        chunk_by_id = {c["chunk_id"]: c for c in chunks}
+
+        def _pack(chunk_id: str, score: float, sources: List[str]) -> Optional[Dict[str, Any]]:
+            chunk = chunk_by_id.get(chunk_id)
+            if not chunk:
+                return None
+            meta = chunk.get("metadata") or {}
+            if not self._is_active(meta):
+                return None
+            return {
+                "chunk_id": chunk["chunk_id"],
+                "content": chunk["content"],
+                "score": float(score),
+                "metadata": meta,
+                "sources": sources,
+            }
+
+        results: List[Dict[str, Any]] = []
+
+        if mode == "vector":
+            for cid, sc in self._search_vector(kb_id, query, top_k):
+                item = _pack(cid, sc, ["vector"])
+                if item:
+                    results.append(item)
+            return results
+
+        if mode == "bm25":
+            for cid, sc in self._search_bm25(kb_id, query, top_k):
+                item = _pack(cid, sc, ["bm25"])
+                if item:
+                    results.append(item)
+            if results:
+                scores = [r["score"] for r in results]
+                min_s, max_s = min(scores), max(scores)
+                if max_s == min_s:
+                    for r in results:
+                        r["score"] = 1.0
+                else:
+                    span = max_s - min_s
+                    for r in results:
+                        r["score"] = (r["score"] - min_s) / span
+            return results
+
+        # hybrid: vector + bm25 → RRF
+        vec = self._search_vector(kb_id, query, fetch_n)
+        bm = self._search_bm25(kb_id, query, fetch_n)
+        fused = self._rrf_fuse([vec, bm], k=self.RRF_K)
+        for cid, sc, srcs in fused:
+            item = _pack(cid, sc, srcs)
+            if item:
+                results.append(item)
+            if len(results) >= top_k:
+                break
         return results
 
     def delete_kb(self, kb_id: str):
+        import shutil
+
         if kb_id in self._indexes:
             del self._indexes[kb_id]
         if kb_id in self._chunks:
             del self._chunks[kb_id]
+        self._bm25_index.pop(kb_id, None)
+        self._bm25_row_to_chunk_idx.pop(kb_id, None)
         index_path = self._get_index_path(kb_id)
         chunks_path = self._get_chunks_path(kb_id)
         if os.path.exists(index_path):
             os.remove(index_path)
         if os.path.exists(chunks_path):
             os.remove(chunks_path)
+        kb_dir = os.path.join(KB_FILES_DIR, kb_id)
+        if os.path.isdir(kb_dir):
+            shutil.rmtree(kb_dir, ignore_errors=True)
 
     def list_files(self, kb_id: str) -> List[Dict[str, Any]]:
         self._ensure_index(kb_id)
@@ -357,22 +565,110 @@ class KnowledgeService:
 
         files: Dict[str, Dict[str, Any]] = {}
         for chunk in chunks:
-            meta = chunk.get("metadata", {})
+            meta = chunk.get("metadata") or {}
             filename = meta.get("filename", "手动粘贴")
-            if filename not in files:
-                files[filename] = {
+            doc_id = meta.get("doc_id") or self._legacy_doc_id(filename)
+            if doc_id not in files:
+                files[doc_id] = {
+                    "doc_id": doc_id,
                     "filename": filename,
-                    "file_type": meta.get("file_type", ""),
+                    "file_type": (meta.get("file_type") or "").lstrip("."),
+                    "status": meta.get("status") or "ACTIVE",
+                    "source": meta.get("source") or (
+                        "paste" if str(filename).startswith(("手动粘贴", "粘贴文本")) else "upload"
+                    ),
+                    "has_file": bool(self._resolve_stored_path(meta.get("stored_path", ""))),
                     "chunk_count": 0,
                     "total_chars": 0,
                     "preview": chunk["content"][:200],
                 }
-            files[filename]["chunk_count"] += 1
-            files[filename]["total_chars"] += len(chunk["content"])
+            files[doc_id]["chunk_count"] += 1
+            files[doc_id]["total_chars"] += len(chunk["content"])
+            if meta.get("status"):
+                files[doc_id]["status"] = meta.get("status")
 
         return list(files.values())
 
+    def set_document_status(self, kb_id: str, doc_id: str, status: str) -> Dict[str, Any]:
+        if status not in ("ACTIVE", "INACTIVE"):
+            raise ValueError("status 仅支持 ACTIVE 或 INACTIVE")
+        matched = self._match_doc_chunks(kb_id, doc_id)
+        if not matched:
+            raise ValueError("文档不存在")
+        for chunk in matched:
+            meta = dict(chunk.get("metadata") or {})
+            meta["status"] = status
+            if not meta.get("doc_id"):
+                meta["doc_id"] = doc_id
+            chunk["metadata"] = meta
+        self._save(kb_id)
+        self._rebuild_bm25(kb_id)
+        return {"doc_id": doc_id, "status": status, "chunk_count": len(matched)}
+
+    def delete_document(self, kb_id: str, doc_id: str) -> Dict[str, Any]:
+        import shutil
+
+        matched = self._match_doc_chunks(kb_id, doc_id)
+        if not matched:
+            raise ValueError("文档不存在")
+
+        stored_paths = set()
+        for chunk in matched:
+            meta = chunk.get("metadata") or {}
+            if meta.get("stored_path"):
+                stored_paths.add(meta["stored_path"])
+
+        matched_ids = {id(c) for c in matched}
+        self._chunks[kb_id] = [c for c in self._chunks[kb_id] if id(c) not in matched_ids]
+        self._rebuild_index(kb_id)
+
+        for rel in stored_paths:
+            abs_path = self._resolve_stored_path(rel)
+            if abs_path and os.path.isfile(abs_path):
+                try:
+                    os.remove(abs_path)
+                except OSError:
+                    pass
+        doc_dir = self._doc_dir(kb_id, doc_id)
+        if os.path.isdir(doc_dir):
+            shutil.rmtree(doc_dir, ignore_errors=True)
+
+        return {"doc_id": doc_id, "deleted_chunks": len(matched)}
+
+    def get_document_content(self, kb_id: str, doc_id: str) -> Dict[str, Any]:
+        matched = self._match_doc_chunks(kb_id, doc_id)
+        if not matched:
+            raise ValueError("文档不存在")
+
+        meta0 = matched[0].get("metadata") or {}
+        filename = meta0.get("filename", "document")
+        file_type = (meta0.get("file_type") or "").lstrip(".")
+        stored_path = meta0.get("stored_path", "")
+        abs_path = self._resolve_stored_path(stored_path)
+
+        if abs_path:
+            return {
+                "doc_id": doc_id,
+                "filename": filename,
+                "file_type": file_type,
+                "mode": "file",
+                "path": abs_path,
+            }
+
+        text_join = "\n\n".join(c.get("content", "") for c in matched)
+        return {
+            "doc_id": doc_id,
+            "filename": filename,
+            "file_type": file_type or "txt",
+            "mode": "text",
+            "content": text_join,
+        }
+
     def get_doc_count(self, kb_id: str) -> int:
+        """Number of document files (not chunk/vector count)."""
+        return len(self.list_files(kb_id))
+
+    def get_chunk_count(self, kb_id: str) -> int:
         self._ensure_index(kb_id)
         return self._indexes[kb_id].ntotal
 

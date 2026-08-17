@@ -1,40 +1,26 @@
-"""记忆管理 REST API：查询 / 修改 / 情景查阅 / 手动触发处理。"""
+"""记忆管理 REST API：Letta blocks / passages / episodes / status。"""
 from __future__ import annotations
 
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from database import get_db
-from models import Agent, MemoryEpisode, MemoryRecord
+from models import Agent, LettaMemoryAgent, MemoryEpisode
 from schemas import (
+    LettaStatusResponse,
+    MemoryBlockResponse,
+    MemoryBlockUpdate,
     MemoryEpisodeResponse,
-    MemoryRecordResponse,
-    MemoryRecordUpdate,
+    MemoryPassageCreate,
+    MemoryPassageResponse,
+    MemoryScopeResponse,
     PaginatedResponse,
 )
-from services.memory.gateway import MemoryGateway
+from services.memory import letta_store
 
 router = APIRouter(prefix="/api/v1/memory", tags=["memory"])
-
-
-def _record_to_response(r: MemoryRecord) -> dict:
-    return {
-        "record_id": r.record_id,
-        "agent_id": r.agent_id,
-        "user_id": r.user_id or "",
-        "memory_type": r.memory_type,
-        "content": r.content,
-        "metadata": r.meta or {},
-        "source_episode_ids": r.source_episode_ids or [],
-        "status": r.status,
-        "valid_from": r.valid_from,
-        "valid_to": r.valid_to,
-        "created_at": r.created_at,
-        "updated_at": r.updated_at,
-        "created_by": r.created_by or "system",
-    }
 
 
 def _episode_to_response(e: MemoryEpisode) -> dict:
@@ -49,70 +35,124 @@ def _episode_to_response(e: MemoryEpisode) -> dict:
     }
 
 
-@router.get("/records", response_model=PaginatedResponse)
-def list_records(
-    agent_id: Optional[str] = Query(None),
-    memory_type: Optional[str] = Query(None),
-    keyword: Optional[str] = Query(None),
-    status: Optional[str] = Query("active"),
+@router.get("/scopes", response_model=List[MemoryScopeResponse])
+def list_scopes(db: Session = Depends(get_db)):
+    return letta_store.list_scopes(db)
+
+
+@router.get("/blocks", response_model=List[MemoryBlockResponse])
+def list_blocks(
+    agent_id: str = Query(...),
+    user_id: str = Query(""),
+    db: Session = Depends(get_db),
+):
+    blocks = letta_store.read_blocks(db, agent_id, user_id)
+    return [MemoryBlockResponse(**b) for b in blocks]
+
+
+@router.put("/blocks/{label}", response_model=MemoryBlockResponse)
+def update_block(label: str, data: MemoryBlockUpdate, db: Session = Depends(get_db)):
+    updated = letta_store.update_block(
+        db,
+        agent_id=data.agent_id,
+        label=label,
+        value=data.value,
+        user_id=data.user_id or "",
+    )
+    if not updated:
+        raise HTTPException(status_code=502, detail="更新记忆块失败（Letta 不可用或作用域无效）")
+    return MemoryBlockResponse(**updated)
+
+
+@router.get("/passages", response_model=PaginatedResponse)
+def list_or_search_passages(
+    agent_id: str = Query(...),
+    user_id: str = Query(""),
+    query: Optional[str] = Query(None),
+    tags: Optional[str] = Query(None, description="逗号分隔 tags"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
 ):
-    q = db.query(MemoryRecord)
-    if agent_id:
-        q = q.filter(MemoryRecord.agent_id == agent_id)
-    if memory_type:
-        q = q.filter(MemoryRecord.memory_type == memory_type)
-    if status and status != "all":
-        q = q.filter(MemoryRecord.status == status)
-    if keyword:
-        q = q.filter(MemoryRecord.content.like(f"%{keyword}%"))
-    total = q.count()
-    rows = (
-        q.order_by(MemoryRecord.created_at.desc())
-        .offset((page - 1) * page_size)
-        .limit(page_size)
-        .all()
+    tag_list = [t.strip() for t in (tags or "").split(",") if t.strip()] or None
+    if query and query.strip():
+        items = letta_store.search_passages(
+            db,
+            agent_id=agent_id,
+            query=query.strip(),
+            user_id=user_id,
+            tags=tag_list,
+            top_k=page_size,
+        )
+        return PaginatedResponse(
+            total=len(items),
+            page=1,
+            page_size=page_size,
+            items=items,
+        )
+
+    # 全量列表：拉取一页再切片（Letta list 用 cursor，此处简化为 limit 截断）
+    fetch_limit = min(200, page * page_size)
+    all_items = letta_store.list_passages(
+        db, agent_id=agent_id, user_id=user_id, limit=fetch_limit
     )
+    if tag_list:
+        all_items = [
+            p for p in all_items
+            if set(tag_list).intersection(set(p.get("tags") or []))
+        ]
+    total = len(all_items)
+    start = (page - 1) * page_size
+    page_items = all_items[start: start + page_size]
+    # #region agent log
+    try:
+        import json as _j, time as _t
+        blob = " ".join((p.get("content") or "") for p in (all_items or []))
+        with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-5cb12e.log", "a") as _f:
+            _f.write(_j.dumps({"sessionId":"5cb12e","runId":"pre-fix","hypothesisId":"H5","location":"memory.py:list_passages","message":"passages listed","data":{"user_id_prefix":(user_id or "")[:12] or "empty","n":len(all_items or []),"has_birthday":("生日" in blob or "1月15" in blob),"query":bool(query)},"timestamp":int(_t.time()*1000)},ensure_ascii=False)+"\n")
+    except Exception:
+        pass
+    # #endregion
     return PaginatedResponse(
         total=total,
         page=page,
         page_size=page_size,
-        items=[_record_to_response(r) for r in rows],
+        items=page_items,
     )
 
 
-@router.get("/records/{record_id}", response_model=MemoryRecordResponse)
-def get_record(record_id: str, db: Session = Depends(get_db)):
-    r = db.query(MemoryRecord).filter(MemoryRecord.record_id == record_id).first()
-    if not r:
-        raise HTTPException(status_code=404, detail="记忆记录不存在")
-    return _record_to_response(r)
+@router.post("/passages", response_model=MemoryPassageResponse)
+def create_passage(data: MemoryPassageCreate, db: Session = Depends(get_db)):
+    created = letta_store.insert_passage(
+        db,
+        agent_id=data.agent_id,
+        text=data.text,
+        user_id=data.user_id or "",
+        tags=data.tags or None,
+    )
+    if not created:
+        raise HTTPException(status_code=502, detail="写入归档记忆失败（Letta 不可用）")
+    return MemoryPassageResponse(**created)
 
 
-@router.put("/records/{record_id}", response_model=MemoryRecordResponse)
-def update_record(record_id: str, data: MemoryRecordUpdate, db: Session = Depends(get_db)):
-    gateway = MemoryGateway(db)
-    try:
-        new_rec = gateway.propose_edit(
-            record_id=record_id,
-            content=data.content,
-            metadata=data.metadata,
-            actor="human",
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    return _record_to_response(new_rec)
+@router.delete("/passages/{passage_id}")
+def delete_passage(
+    passage_id: str,
+    agent_id: str = Query(...),
+    user_id: str = Query(""),
+    db: Session = Depends(get_db),
+):
+    ok = letta_store.delete_passage(db, agent_id, passage_id, user_id=user_id)
+    if not ok:
+        raise HTTPException(status_code=502, detail="删除归档记忆失败")
+    return {"message": "已删除", "passage_id": passage_id}
 
 
-@router.delete("/records/{record_id}")
-def delete_record(record_id: str, db: Session = Depends(get_db)):
-    gateway = MemoryGateway(db)
-    rec = gateway.supersede(record_id)
-    if not rec:
-        raise HTTPException(status_code=404, detail="记忆记录不存在")
-    return {"message": "记忆已失效", "record_id": record_id}
+@router.get("/letta/status", response_model=LettaStatusResponse)
+def letta_status(db: Session = Depends(get_db)):
+    status = letta_store.health()
+    status["mapping_count"] = db.query(LettaMemoryAgent).count()
+    return LettaStatusResponse(**status)
 
 
 @router.get("/episodes", response_model=PaginatedResponse)

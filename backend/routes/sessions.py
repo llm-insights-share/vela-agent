@@ -1,7 +1,9 @@
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, UploadFile, File, Form
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
+import os
 from database import get_db, SessionLocal
 from models import Session as SessionModel, SessionStatus, gen_uuid, now_utc
 from schemas import (
@@ -10,10 +12,16 @@ from schemas import (
     SessionChatAsyncResponse,
     SessionAbortResponse,
     SessionResponse,
+    LlmCallLogListResponse,
+    LlmCallLogItem,
     PaginatedResponse,
+    SessionAttachmentResponse,
+    SessionAttachmentListResponse,
 )
 from services.agent_service import agent_service, _ensure_files_for_session
 from services.session_abort import request_abort, clear_abort
+from services.attachment_service import attachment_service, MIME_TYPES as ATTACHMENT_MIME_TYPES
+from deps import CurrentUser
 
 router = APIRouter(prefix="/api/v1/sessions", tags=["sessions"])
 
@@ -49,6 +57,7 @@ def _run_session_chat_background(session_id: str, request_data: Dict[str, Any]):
                 timeout_seconds=request_data.get("timeout_seconds"),
                 execution_mode=request_data.get("execution_mode", "auto"),
                 skip_history=request_data.get("skip_history", False),
+                attachment_ids=request_data.get("attachment_ids") or [],
                 persist_user_message=False,
             )
             db.refresh(session)
@@ -112,13 +121,18 @@ def list_sessions(
 
 
 @router.post("", response_model=SessionResponse, status_code=201)
-def create_session(data: SessionCreate, db: Session = Depends(get_db)):
+def create_session(
+    data: SessionCreate,
+    user: CurrentUser,
+    db: Session = Depends(get_db),
+):
+    caller_id = (data.caller_id or "").strip() or user.user_id
     session = SessionModel(
         session_id=gen_uuid(),
         agent_id=data.agent_id,
         version_id=data.version_id,
         caller_type=data.caller_type,
-        caller_id=data.caller_id,
+        caller_id=caller_id,
         token_budget=data.token_budget,
         ttl_seconds=data.ttl_seconds,
         messages=[],
@@ -128,6 +142,129 @@ def create_session(data: SessionCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(session)
     return SessionResponse.model_validate(session)
+
+
+def _build_user_message_payload(data: SessionChatRequest, session, db: Session) -> Dict[str, Any]:
+    msg = {"role": "user", "content": data.message or "请分析附件"}
+    if data.skill_pack_id:
+        from models import SkillPack
+        skill = db.query(SkillPack).filter(
+            SkillPack.skill_pack_id == data.skill_pack_id
+        ).first()
+        if skill:
+            msg["activeSkill"] = skill.name
+    if data.attachment_ids:
+        attachments = attachment_service.get_attachment_metadata_for_message(
+            session, data.attachment_ids
+        )
+        if attachments:
+            msg["attachments"] = attachments
+    return msg
+
+
+@router.post("/{session_id}/attachments", response_model=SessionAttachmentResponse, status_code=201)
+async def upload_session_attachment(
+    session_id: str,
+    file: UploadFile = File(...),
+    filename: Optional[str] = Form(None),
+    db: Session = Depends(get_db),
+):
+    session = db.query(SessionModel).filter(
+        SessionModel.session_id == session_id
+    ).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    if session.status == SessionStatus.CLOSED:
+        raise HTTPException(status_code=400, detail="会话已关闭")
+
+    file_bytes = await file.read()
+    name = filename or file.filename or "unknown"
+
+    try:
+        result = attachment_service.save_attachment(session, file_bytes, name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    flag_modified(session, "pending_context")
+    db.commit()
+    return SessionAttachmentResponse.model_validate(result)
+
+
+@router.get("/{session_id}/attachments", response_model=SessionAttachmentListResponse)
+def list_session_attachments(session_id: str, db: Session = Depends(get_db)):
+    session = db.query(SessionModel).filter(
+        SessionModel.session_id == session_id
+    ).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="会话不存在")
+
+    items = attachment_service.list_attachments(session)
+    attachments = [SessionAttachmentResponse.model_validate(i) for i in items]
+    return SessionAttachmentListResponse(attachments=attachments, total=len(attachments))
+
+
+@router.delete("/{session_id}/attachments/{attachment_id}")
+def delete_session_attachment(
+    session_id: str,
+    attachment_id: str,
+    db: Session = Depends(get_db),
+):
+    session = db.query(SessionModel).filter(
+        SessionModel.session_id == session_id
+    ).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="会话不存在")
+
+    if not attachment_service.delete_attachment(session, attachment_id):
+        raise HTTPException(status_code=404, detail="附件不存在")
+
+    flag_modified(session, "pending_context")
+    db.commit()
+    return {"message": "附件已删除"}
+
+
+@router.get("/{session_id}/attachments/{attachment_id}/download")
+def download_session_attachment(
+    session_id: str,
+    attachment_id: str,
+    db: Session = Depends(get_db),
+):
+    session = db.query(SessionModel).filter(
+        SessionModel.session_id == session_id
+    ).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="会话不存在")
+
+    meta = attachment_service.get_attachment(session, attachment_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail="附件不存在")
+
+    from services.attachment_service import _resolve_stored_path
+    file_path = _resolve_stored_path(meta.get("stored_path", ""))
+    if not file_path or not os.path.isfile(file_path):
+        raise HTTPException(status_code=404, detail="附件文件不存在")
+
+    filename = meta.get("filename", "attachment")
+    ext = os.path.splitext(filename)[1].lower()
+    media_type = ATTACHMENT_MIME_TYPES.get(ext, "application/octet-stream")
+    return FileResponse(file_path, filename=filename, media_type=media_type)
+
+
+@router.get("/{session_id}/llm-calls", response_model=LlmCallLogListResponse)
+def list_session_llm_calls(session_id: str, db: Session = Depends(get_db)):
+    session = db.query(SessionModel).filter(
+        SessionModel.session_id == session_id
+    ).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="会话不存在")
+
+    calls = list(session.llm_calls or [])
+    calls.sort(key=lambda c: c.get("seq", 0), reverse=True)
+    return LlmCallLogListResponse(
+        items=[LlmCallLogItem.model_validate(c) for c in calls]
+    )
 
 
 @router.get("/{session_id}", response_model=SessionResponse)
@@ -168,6 +305,7 @@ async def chat(session_id: str, data: SessionChatRequest, db: Session = Depends(
             timeout_seconds=data.timeout_seconds,
             execution_mode=data.execution_mode,
             skip_history=data.skip_history,
+            attachment_ids=data.attachment_ids,
         )
         return result
     except Exception as e:
@@ -196,14 +334,14 @@ def chat_async(
         raise HTTPException(status_code=409, detail="会话正在运行中，请等待当前任务完成")
 
     messages = list(session.messages or [])
-    messages.append({"role": "user", "content": data.message})
+    messages.append(_build_user_message_payload(data, session, db))
     session.messages = messages
     flag_modified(session, "messages")
 
     pending = dict(session.pending_context or {})
     pending["background_job"] = {
         "started_at": now_utc().isoformat(),
-        "message_preview": data.message[:120],
+        "message_preview": (data.message or "请分析附件")[:120],
         "agent_id": session.agent_id,
     }
     session.pending_context = pending
@@ -213,6 +351,7 @@ def chat_async(
 
     request_data = {
         "message": data.message,
+        "attachment_ids": data.attachment_ids,
         "skill_pack_id": data.skill_pack_id,
         "timeout_seconds": data.timeout_seconds,
         "execution_mode": data.execution_mode,
@@ -351,6 +490,8 @@ def close_session(
     session.status = SessionStatus.CLOSED
     db.commit()
 
+    attachment_service.cleanup_session(session_id)
+
     # 记忆闭环：归档 + 后台自我处理
     try:
         from models import Agent
@@ -377,6 +518,7 @@ def delete_session(session_id: str, db: Session = Depends(get_db)):
     ).first()
     if not session:
         raise HTTPException(status_code=404, detail="会话不存在")
+    attachment_service.cleanup_session(session_id)
     db.delete(session)
     db.commit()
     return {"message": "会话已删除"}

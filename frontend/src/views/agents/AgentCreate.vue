@@ -5,6 +5,21 @@
     </div>
     <a-card style="max-width: 900px">
       <a-form :model="form" :label-col="{ span: 4 }" :wrapper-col="{ span: 18 }" @finish="onSubmit">
+        <a-divider>Agent 类型</a-divider>
+
+        <a-form-item label="Agent 类型" name="agent_type">
+          <a-radio-group v-model:value="form.agent_type">
+            <a-radio value="SINGLE">单体 Agent</a-radio>
+            <a-radio value="COMPOSITE">多 Agent 编排</a-radio>
+            <a-radio value="WORKFLOW">工作流型</a-radio>
+          </a-radio-group>
+          <span class="form-hint" v-if="form.agent_type === 'COMPOSITE'">
+            创建后需在编排配置页面添加子 Agent 和 Coordinator 配置
+          </span>
+          <span class="form-hint" v-if="form.agent_type === 'WORKFLOW'">
+            创建后需在工作流画布页面配置节点与连线
+          </span>
+        </a-form-item>
         <a-form-item label="名称" name="name" :rules="[{ required: true, message: '请输入名称' }]">
           <a-input v-model:value="form.name" placeholder="Agent 名称" />
         </a-form-item>
@@ -114,21 +129,6 @@
         </a-form-item>
         </template>
 
-        <a-divider>Agent 类型</a-divider>
-
-        <a-form-item label="Agent 类型" name="agent_type">
-          <a-radio-group v-model:value="form.agent_type">
-            <a-radio value="SINGLE">单体 Agent</a-radio>
-            <a-radio value="COMPOSITE">多 Agent 编排</a-radio>
-            <a-radio value="WORKFLOW">工作流型</a-radio>
-          </a-radio-group>
-          <span class="form-hint" v-if="form.agent_type === 'COMPOSITE'">
-            创建后需在编排配置页面添加子 Agent 和 Coordinator 配置
-          </span>
-          <span class="form-hint" v-if="form.agent_type === 'WORKFLOW'">
-            创建后需在工作流画布页面配置节点与连线
-          </span>
-        </a-form-item>
         <a-form-item :wrapper-col="{ offset: 4, span: 18 }">
           <a-space>
             <a-button type="primary" html-type="submit" :loading="submitting">{{ isEdit ? '保存' : '创建' }}</a-button>
