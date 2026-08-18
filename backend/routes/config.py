@@ -14,6 +14,10 @@ from schemas import (
     QueryRewriteAgentMountResponse,
     LettaConfigResponse,
     LettaConfigUpdate,
+    CodeExecConfigResponse,
+    CodeExecConfigUpdate,
+    ContextualRetrievalConfigResponse,
+    ContextualRetrievalConfigUpdate,
 )
 
 router = APIRouter(prefix="/api/v1/config", tags=["config"])
@@ -74,6 +78,39 @@ def tavily_status():
     config = _load_config()
     api_key = (config.get("tools", {}).get("tavily", {}).get("api_key", "")) or ""
     return {"configured": bool(api_key), "api_key_set": bool(api_key)}
+
+
+@router.get("/code-exec", response_model=CodeExecConfigResponse)
+def get_code_exec_config():
+    from services.code_exec.config import load_code_exec_config
+
+    cfg = load_code_exec_config()
+    return CodeExecConfigResponse(
+        enabled=cfg.enabled,
+        venv_path=cfg.venv_path,
+        wall_timeout=cfg.wall_timeout,
+        cpu_seconds=cfg.cpu_seconds,
+        memory_mb=cfg.memory_mb,
+        max_output_bytes=cfg.max_output_bytes,
+        max_artifact_mb=cfg.max_artifact_mb,
+        allow_network=cfg.allow_network,
+        allow_install=cfg.allow_install,
+        package_allowlist=cfg.package_allowlist,
+        state_persist=cfg.state_persist,
+    )
+
+
+@router.put("/code-exec")
+def update_code_exec_config(data: CodeExecConfigUpdate):
+    from services.code_exec.config import CodeExecConfig, load_code_exec_config, save_code_exec_config
+
+    cfg = load_code_exec_config()
+    updates = data.model_dump(exclude_unset=True)
+    for key, value in updates.items():
+        if hasattr(cfg, key):
+            setattr(cfg, key, value)
+    save_code_exec_config(cfg)
+    return {"message": "代码执行沙箱配置已保存"}
 
 
 @router.get("/memory/agents", response_model=List[MemoryAgentMountResponse])
@@ -256,3 +293,55 @@ def update_screenpilot_config(data: ScreenpilotToggle, db: Session = Depends(get
         "unregister": result,
         "tools": [],
     }
+
+
+@router.get("/knowledge/contextual-retrieval", response_model=ContextualRetrievalConfigResponse)
+def get_contextual_retrieval_config():
+    from services.knowledge.config import load_contextual_retrieval_config
+
+    cfg = load_contextual_retrieval_config()
+    return ContextualRetrievalConfigResponse(
+        enabled=cfg.enabled,
+        model_service_id=cfg.model_service_id,
+        max_concurrency=cfg.max_concurrency,
+        chunk_timeout_seconds=cfg.chunk_timeout_seconds,
+        prefix_max_tokens=cfg.prefix_max_tokens,
+        temperature=cfg.temperature,
+        min_chunk_length=cfg.min_chunk_length,
+        document_excerpt_max_chars=cfg.document_excerpt_max_chars,
+    )
+
+
+@router.put("/knowledge/contextual-retrieval", response_model=ContextualRetrievalConfigResponse)
+def update_contextual_retrieval_config(data: ContextualRetrievalConfigUpdate):
+    from services.knowledge.config import (
+        ContextualRetrievalConfig,
+        load_contextual_retrieval_config,
+        save_contextual_retrieval_config,
+    )
+
+    cfg = load_contextual_retrieval_config()
+    updates = data.model_dump(exclude_unset=True)
+    merged = ContextualRetrievalConfig(
+        enabled=updates.get("enabled", cfg.enabled),
+        model_service_id=updates.get("model_service_id", cfg.model_service_id),
+        max_concurrency=updates.get("max_concurrency", cfg.max_concurrency),
+        chunk_timeout_seconds=updates.get("chunk_timeout_seconds", cfg.chunk_timeout_seconds),
+        prefix_max_tokens=updates.get("prefix_max_tokens", cfg.prefix_max_tokens),
+        temperature=updates.get("temperature", cfg.temperature),
+        min_chunk_length=updates.get("min_chunk_length", cfg.min_chunk_length),
+        document_excerpt_max_chars=updates.get(
+            "document_excerpt_max_chars", cfg.document_excerpt_max_chars
+        ),
+    )
+    save_contextual_retrieval_config(merged)
+    return ContextualRetrievalConfigResponse(
+        enabled=merged.enabled,
+        model_service_id=merged.model_service_id,
+        max_concurrency=merged.max_concurrency,
+        chunk_timeout_seconds=merged.chunk_timeout_seconds,
+        prefix_max_tokens=merged.prefix_max_tokens,
+        temperature=merged.temperature,
+        min_chunk_length=merged.min_chunk_length,
+        document_excerpt_max_chars=merged.document_excerpt_max_chars,
+    )

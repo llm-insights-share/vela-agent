@@ -149,7 +149,24 @@ export const knowledgeApi = {
     params,
     responseType: 'blob',
   }),
+  listFileChunks: (id, docId) => api.get(`/knowledge-bases/${id}/files/${docId}/chunks`),
   search: (id, data) => api.post(`/knowledge-bases/${id}/search`, data),
+  suggestSearchFilters: (id, data) => api.post(`/knowledge-bases/${id}/search/suggest-filters`, data),
+  previewImport: (id, formData) => api.post(`/knowledge-bases/${id}/import/preview`, formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 120000,
+  }),
+  previewImportText: (id, data) => api.post(`/knowledge-bases/${id}/import/preview`, data, {
+    timeout: 120000,
+  }),
+  confirmImport: (id, data) => api.post(`/knowledge-bases/${id}/import/confirm`, data, {
+    timeout: 300000,
+  }),
+  cancelImport: (id, previewId) => api.delete(`/knowledge-bases/${id}/import/preview/${previewId}`),
+  updateFileTags: (id, docId, data) => api.patch(`/knowledge-bases/${id}/files/${docId}/tags`, data),
+  reindexContextual: (id) => api.post(`/knowledge-bases/${id}/reindex-contextual`, null, {
+    timeout: 600000,
+  }),
 }
 
 export const sessionApi = {
@@ -195,8 +212,12 @@ export const configApi = {
   updateMemoryAgents: (items) => api.put('/config/memory/agents', { items }),
   getLetta: () => api.get('/config/memory/letta'),
   updateLetta: (data) => api.put('/config/memory/letta', data),
+  getCodeExec: () => api.get('/config/code-exec'),
+  updateCodeExec: (data) => api.put('/config/code-exec', data),
   listQueryRewriteAgents: () => api.get('/config/query-rewrite/agents'),
   updateQueryRewriteAgents: (items) => api.put('/config/query-rewrite/agents', { items }),
+  getContextualRetrieval: () => api.get('/config/knowledge/contextual-retrieval'),
+  updateContextualRetrieval: (data) => api.put('/config/knowledge/contextual-retrieval', data),
 }
 
 export const queryRewriteApi = {
@@ -312,4 +333,12 @@ export const screenpilotApi = {
   getApproval: (id) => api.get(`/screenpilot/approvals/${id}`),
   approveApproval: (id, data) => api.post(`/screenpilot/approvals/${id}/approve`, data),
   rejectApproval: (id, data) => api.post(`/screenpilot/approvals/${id}/reject`, data),
+}
+
+export const codeExecApi = {
+  listExecutions: (sessionId, params) =>
+    api.get(`/code-exec/sessions/${sessionId}/executions`, { params }),
+  getExecution: (executionId) => api.get(`/code-exec/executions/${executionId}`),
+  run: (sessionId, data) => api.post(`/code-exec/sessions/${sessionId}/run`, data),
+  resetState: (sessionId) => api.delete(`/code-exec/sessions/${sessionId}/state`),
 }

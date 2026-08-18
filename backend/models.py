@@ -227,6 +227,8 @@ class KnowledgeBase(Base):
     doc_count = Column(Integer, default=0)
     status = Column(SAEnum(KnowledgeBaseStatus), default=KnowledgeBaseStatus.ACTIVE)
     faiss_index_path = Column(String(512), default="")
+    contextual_retrieval_enabled = Column(Boolean, nullable=True, default=None)
+    tag_defs = Column(JSON, default=list)
     created_at = Column(DateTime, default=now_utc)
     updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)
 
@@ -676,4 +678,29 @@ class UiSkillStep(Base):
     value_template = Column(String(1024), default="")
     fingerprints = Column(JSON, default=dict)
     meta = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=now_utc)
+
+
+class CodeExecutionStatus(str, enum.Enum):
+    SUCCESS = "SUCCESS"
+    ERROR = "ERROR"
+    TIMEOUT = "TIMEOUT"
+
+
+class CodeExecution(Base):
+    """Code Interpreter execution record."""
+    __tablename__ = "code_executions"
+
+    execution_id = Column(String, primary_key=True, default=gen_uuid)
+    session_id = Column(String, index=True, nullable=False)
+    agent_id = Column(String, index=True, default="")
+    language = Column(String(16), default="python")
+    code = Column(Text, default="")
+    stdout = Column(Text, default="")
+    stderr = Column(Text, default="")
+    exit_code = Column(Integer, default=0)
+    duration_ms = Column(Integer, default=0)
+    artifacts = Column(JSON, default=list)
+    status = Column(String(16), default="SUCCESS")
+    error_message = Column(Text, default="")
     created_at = Column(DateTime, default=now_utc)

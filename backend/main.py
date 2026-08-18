@@ -29,6 +29,7 @@ from routes.query_rewrite import router as query_rewrite_router
 from routes.auth import router as auth_router
 from routes.users import router as users_router
 from routes.llm_gateway import router as llm_gateway_router
+from routes.code_exec import router as code_exec_router
 
 app = FastAPI(
     title="Vela Agent Playground API",
@@ -66,6 +67,7 @@ app.include_router(dataquery_knowledge_router, dependencies=_auth_deps)
 app.include_router(memory_router, dependencies=_auth_deps)
 app.include_router(screenpilot_router, dependencies=_auth_deps)
 app.include_router(query_rewrite_router, dependencies=_auth_deps)
+app.include_router(code_exec_router, dependencies=_auth_deps)
 
 AVATAR_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/avatars", StaticFiles(directory=str(AVATAR_DIR)), name="avatars")

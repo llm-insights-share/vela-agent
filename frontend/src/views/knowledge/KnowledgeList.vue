@@ -48,6 +48,42 @@
             <a-select-option value="PRIVATE">私有</a-select-option>
           </a-select>
         </a-form-item>
+        <a-form-item label="上下文感知">
+          <a-select v-model:value="form.contextual_mode">
+            <a-select-option value="inherit">跟随全局</a-select-option>
+            <a-select-option value="enabled">启用</a-select-option>
+            <a-select-option value="disabled">禁用</a-select-option>
+          </a-select>
+          <div class="field-hint">入库时为分块生成 LLM 上下文前缀，提升检索召回</div>
+        </a-form-item>
+        <a-form-item label="文档标签">
+          <div class="tag-presets">
+            <a-button
+              v-for="preset in tagPresets"
+              :key="preset.name"
+              size="small"
+              @click="addPresetTag(preset)"
+            >
+              + {{ preset.name }}
+            </a-button>
+          </div>
+          <div v-for="(tag, idx) in form.tag_defs" :key="idx" class="tag-def-row">
+            <a-input
+              v-model:value="tag.name"
+              placeholder="标签名称"
+              style="flex: 1"
+              @change="onTagNameChange(tag)"
+            />
+            <a-select v-model:value="tag.type" style="width: 96px">
+              <a-select-option value="text">文本</a-select-option>
+              <a-select-option value="date">日期</a-select-option>
+            </a-select>
+            <a-input v-model:value="tag.hint" placeholder="抽取提示（可选）" style="flex: 1" />
+            <a-button type="text" danger @click="form.tag_defs.splice(idx, 1)">删除</a-button>
+          </div>
+          <a-button type="dashed" block @click="addTagDef">添加标签</a-button>
+          <div class="field-hint">导入时自动抽取，检索时可按标签筛选。名称在知识库内需唯一。</div>
+        </a-form-item>
       </a-form>
     </a-modal>
   </div>
@@ -80,7 +116,74 @@ const form = reactive({
   description: '',
   kb_type: 'FAISS',
   scope: 'GLOBAL',
+  contextual_mode: 'inherit',
+  tag_defs: [],
 })
+
+const tagPresets = [
+  { name: '作者', type: 'text' },
+  { name: '创建时间', type: 'date' },
+  { name: '失效时间', type: 'date' },
+  { name: '发布部门', type: 'text' },
+]
+
+function inferTagType(name) {
+  return /时间|日期|日/.test(name || '') ? 'date' : 'text'
+}
+
+function emptyTagDef() {
+  return { name: '', type: 'text', hint: '' }
+}
+
+function cloneTagDefs(defs) {
+  return (defs || []).map((d) => ({
+    name: d.name || '',
+    type: d.type === 'date' ? 'date' : inferTagType(d.name),
+    hint: d.hint || '',
+  }))
+}
+
+function addTagDef() {
+  form.tag_defs.push(emptyTagDef())
+}
+
+function addPresetTag(preset) {
+  if (form.tag_defs.some((t) => t.name === preset.name)) return
+  form.tag_defs.push({ name: preset.name, type: preset.type, hint: '' })
+}
+
+function onTagNameChange(tag) {
+  if (inferTagType(tag.name) === 'date') tag.type = 'date'
+}
+
+function contextualModeToApi(mode) {
+  if (mode === 'enabled') return true
+  if (mode === 'disabled') return false
+  return null
+}
+
+function contextualModeFromApi(value) {
+  if (value === true) return 'enabled'
+  if (value === false) return 'disabled'
+  return 'inherit'
+}
+
+function buildPayload() {
+  return {
+    name: form.name,
+    description: form.description,
+    kb_type: form.kb_type,
+    scope: form.scope,
+    contextual_retrieval_enabled: contextualModeToApi(form.contextual_mode),
+    tag_defs: form.tag_defs
+      .filter((t) => (t.name || '').trim())
+      .map((t) => ({
+        name: t.name.trim(),
+        type: t.type === 'date' ? 'date' : inferTagType(t.name),
+        hint: (t.hint || '').trim(),
+      })),
+  }
+}
 
 async function fetchKnowledgeBases() {
   loading.value = true
@@ -96,7 +199,14 @@ async function fetchKnowledgeBases() {
 
 function openCreate() {
   editing.value = null
-  Object.assign(form, { name: '', description: '', kb_type: 'FAISS', scope: 'GLOBAL' })
+  Object.assign(form, {
+    name: '',
+    description: '',
+    kb_type: 'FAISS',
+    scope: 'GLOBAL',
+    contextual_mode: 'inherit',
+    tag_defs: [],
+  })
   modalOpen.value = true
 }
 
@@ -107,6 +217,8 @@ function openEdit(record) {
     description: record.description,
     kb_type: record.kb_type,
     scope: record.scope,
+    contextual_mode: contextualModeFromApi(record.contextual_retrieval_enabled),
+    tag_defs: cloneTagDefs(record.tag_defs),
   })
   modalOpen.value = true
 }
@@ -114,11 +226,12 @@ function openEdit(record) {
 async function handleSave() {
   saving.value = true
   try {
+    const payload = buildPayload()
     if (editing.value) {
-      await knowledgeApi.update(editing.value.kb_id, { ...form })
+      await knowledgeApi.update(editing.value.kb_id, payload)
       message.success('更新成功')
     } else {
-      await knowledgeApi.create({ ...form })
+      await knowledgeApi.create(payload)
       message.success('创建成功')
     }
     modalOpen.value = false
@@ -146,4 +259,7 @@ onMounted(fetchKnowledgeBases)
 <style scoped>
 .page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
 .page-title { font-family: 'Noto Serif SC', serif; font-size: 22px; font-weight: 700; color: #1a1714; margin: 0; }
+.field-hint { font-size: 11px; color: #9e9590; margin-top: 4px; line-height: 1.5; }
+.tag-presets { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.tag-def-row { display: flex; gap: 8px; margin-bottom: 8px; align-items: center; }
 </style>

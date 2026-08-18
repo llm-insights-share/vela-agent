@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, model_validator, field_validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 
@@ -301,11 +301,28 @@ class SkillPackResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class KnowledgeTagDef(BaseModel):
+    name: str = Field(..., min_length=1, max_length=64)
+    type: str = Field(default="text", pattern="^(text|date)$")
+    hint: str = Field(default="")
+
+
+class KnowledgeTagFilter(BaseModel):
+    name: str = Field(..., min_length=1, max_length=64)
+    op: str = Field(default="eq", pattern="^(eq|contains|gte|lte|lt|gt)$")
+    value: str = Field(default="")
+
+
 class KnowledgeBaseCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=128)
     description: str = Field(default="")
     kb_type: str = Field(default="document")
     scope: str = Field(default="platform")
+    contextual_retrieval_enabled: Optional[bool] = Field(
+        default=None,
+        description="null=跟随全局，true/false=覆盖全局开关",
+    )
+    tag_defs: List[KnowledgeTagDef] = Field(default_factory=list)
 
 
 class KnowledgeBaseUpdate(BaseModel):
@@ -314,6 +331,8 @@ class KnowledgeBaseUpdate(BaseModel):
     kb_type: Optional[str] = None
     scope: Optional[str] = None
     status: Optional[str] = None
+    contextual_retrieval_enabled: Optional[bool] = None
+    tag_defs: Optional[List[KnowledgeTagDef]] = None
 
 
 class KnowledgeBaseResponse(BaseModel):
@@ -325,10 +344,17 @@ class KnowledgeBaseResponse(BaseModel):
     version: str = "1.0.0"
     doc_count: int = 0
     status: str = "ACTIVE"
+    contextual_retrieval_enabled: Optional[bool] = None
+    tag_defs: List[KnowledgeTagDef] = Field(default_factory=list)
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
+
+    @field_validator("tag_defs", mode="before")
+    @classmethod
+    def _coerce_tag_defs(cls, value):
+        return value or []
 
 
 class DocumentAddRequest(BaseModel):
@@ -345,6 +371,7 @@ class KnowledgeSearchRequest(BaseModel):
     top_k: int = Field(default=5, ge=1, le=50)
     mode: str = Field(default="hybrid", description="hybrid | vector | bm25")
     rerank: bool = Field(default=False, description="已忽略，保留兼容")
+    tag_filters: List[KnowledgeTagFilter] = Field(default_factory=list)
 
 
 class KnowledgeSearchResult(BaseModel):
@@ -353,11 +380,44 @@ class KnowledgeSearchResult(BaseModel):
     score: float
     metadata: Dict[str, Any] = {}
     sources: List[str] = []
+    tags: Dict[str, str] = {}
 
 
 class KnowledgeSearchResponse(BaseModel):
     results: List[KnowledgeSearchResult] = []
     query_time_ms: float = 0
+    applied_filters: List[KnowledgeTagFilter] = Field(default_factory=list)
+
+
+class KnowledgeSearchSuggestRequest(BaseModel):
+    query: str = Field(..., min_length=1)
+
+
+class KnowledgeImportConfirmRequest(BaseModel):
+    preview_id: str = Field(..., min_length=1)
+    tags: Dict[str, str] = Field(default_factory=dict)
+
+
+class KnowledgeDocumentTagsUpdate(BaseModel):
+    tags: Dict[str, str] = Field(default_factory=dict)
+
+
+class KnowledgeChunkItem(BaseModel):
+    chunk_id: str
+    index: int
+    content: str
+    char_count: int
+    contextual_prefix: Optional[str] = None
+    contextualized: bool = False
+    has_index_text: bool = False
+    status: str = "ACTIVE"
+
+
+class KnowledgeChunkListResponse(BaseModel):
+    doc_id: str
+    filename: str
+    total: int
+    chunks: List[KnowledgeChunkItem] = []
 
 
 class SessionCreate(BaseModel):
@@ -942,6 +1002,28 @@ class LettaConfigUpdate(BaseModel):
     distill_model_service_id: Optional[str] = None
 
 
+class ContextualRetrievalConfigResponse(BaseModel):
+    enabled: bool = False
+    model_service_id: str = ""
+    max_concurrency: int = 12
+    chunk_timeout_seconds: int = 30
+    prefix_max_tokens: int = 128
+    temperature: float = 0.0
+    min_chunk_length: int = 50
+    document_excerpt_max_chars: int = 2000
+
+
+class ContextualRetrievalConfigUpdate(BaseModel):
+    enabled: Optional[bool] = None
+    model_service_id: Optional[str] = None
+    max_concurrency: Optional[int] = None
+    chunk_timeout_seconds: Optional[int] = None
+    prefix_max_tokens: Optional[int] = None
+    temperature: Optional[float] = None
+    min_chunk_length: Optional[int] = None
+    document_excerpt_max_chars: Optional[int] = None
+
+
 class QueryRewriteAgentMountItem(BaseModel):
     agent_id: str
     query_rewrite_enabled: bool
@@ -1019,3 +1101,63 @@ class ProfileUpdateIn(BaseModel):
 class PasswordUpdateIn(BaseModel):
     old_password: str
     new_password: str = Field(..., min_length=6)
+
+
+# ─── Code Execution ──────────────────────────────────────────────────────────
+
+class CodeExecutionResponse(BaseModel):
+    execution_id: str
+    session_id: str
+    agent_id: str = ""
+    language: str = "python"
+    code: str = ""
+    stdout: str = ""
+    stderr: str = ""
+    exit_code: int = 0
+    duration_ms: int = 0
+    artifacts: List[Any] = []
+    status: str = "SUCCESS"
+    error_message: str = ""
+    created_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+class CodeExecutionListResponse(BaseModel):
+    items: List[CodeExecutionResponse] = []
+    total: int = 0
+
+
+class CodeExecutionRunRequest(BaseModel):
+    code: str = Field(..., min_length=1)
+    language: str = "python"
+    timeout: Optional[int] = None
+    reset_state: bool = False
+
+
+class CodeExecConfigResponse(BaseModel):
+    enabled: bool = True
+    venv_path: str = ""
+    wall_timeout: int = 60
+    cpu_seconds: int = 30
+    memory_mb: int = 2048
+    max_output_bytes: int = 65536
+    max_artifact_mb: int = 20
+    allow_network: bool = False
+    allow_install: bool = True
+    package_allowlist: List[str] = []
+    state_persist: bool = True
+
+
+class CodeExecConfigUpdate(BaseModel):
+    enabled: Optional[bool] = None
+    venv_path: Optional[str] = None
+    wall_timeout: Optional[int] = None
+    cpu_seconds: Optional[int] = None
+    memory_mb: Optional[int] = None
+    max_output_bytes: Optional[int] = None
+    max_artifact_mb: Optional[int] = None
+    allow_network: Optional[bool] = None
+    allow_install: Optional[bool] = None
+    package_allowlist: Optional[List[str]] = None
+    state_persist: Optional[bool] = None

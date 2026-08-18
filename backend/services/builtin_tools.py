@@ -88,7 +88,7 @@ BUILTIN_EDIT_TOOL = BuiltinTool(
 
 BUILTIN_BASH_TOOL = BuiltinTool(
     name="bash",
-    description="在沙箱环境中执行 shell 命令。支持常见的 Linux 命令（ls、cat、grep、find、mkdir、python 等）。",
+    description="在工作目录中执行 shell 命令。优先使用 execute_code 做数据处理和计算；bash 仅用于文件系统操作等 execute_code 无法完成的场景。",
     parameters={
         "type": "object",
         "properties": {
@@ -213,7 +213,11 @@ BUILTIN_MEMORY_TOOL = BuiltinTool(
 
 BUILTIN_EXECUTE_CODE_TOOL = BuiltinTool(
     name="execute_code",
-    description="在沙箱环境中执行 Python 或 JavaScript 代码。比 bash 更安全可控，适合数据处理、计算、脚本执行等场景。代码在独立子进程中运行，有超时保护。",
+    description=(
+        "Code Interpreter：在加固沙箱中执行 Python 或 JavaScript。"
+        "同一会话内变量与文件跨调用保留；画图用 plt.show() 或 savefig 到 outputs/ 目录即可自动收集产物。"
+        "适合数据分析、统计计算、图表生成。报错时阅读 traceback 修正代码后重试。"
+    ),
     parameters={
         "type": "object",
         "properties": {
@@ -228,16 +232,53 @@ BUILTIN_EXECUTE_CODE_TOOL = BuiltinTool(
             },
             "timeout": {
                 "type": "integer",
-                "description": "执行超时时间（秒），默认 30 秒",
+                "description": "执行超时时间（秒），默认 60 秒",
+            },
+            "reset_state": {
+                "type": "boolean",
+                "description": "是否清空会话变量状态（默认 false，保留跨调用变量）",
             },
         },
         "required": ["code"],
     },
 )
 
+BUILTIN_INSTALL_PACKAGES_TOOL = BuiltinTool(
+    name="install_packages",
+    description="在沙箱环境中安装 Python 包（仅限白名单内的包，如 pandas、numpy、matplotlib 等）。",
+    parameters={
+        "type": "object",
+        "properties": {
+            "packages": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "要安装的包名列表，如 [\"pandas\", \"scipy\"]",
+            },
+        },
+        "required": ["packages"],
+    },
+)
+
+BUILTIN_LIST_WORKSPACE_TOOL = BuiltinTool(
+    name="list_workspace",
+    description="列出 Code Interpreter 会话工作区中的文件和目录。",
+    parameters={
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "相对工作区的子路径，默认为根目录",
+            },
+        },
+    },
+)
+
 BUILTIN_KB_SEARCH_TOOL = BuiltinTool(
     name="kb_search",
-    description="检索内部知识库，从已上传的文档中查找相关信息。适用于查询项目文档、FAQ、技术规范等内部知识。可指定知识库 ID 或名称，不指定则搜索所有活跃知识库。",
+    description=(
+        "检索内部知识库。标签条件可选：不传 tag_filters 时会根据查询预填（如「现行有效」预填失效时间≥今天）；"
+        "需要全库召回时传 tag_filters: []。先按标签筛文档再向量/BM25 召回。"
+    ),
     parameters={
         "type": "object",
         "properties": {
@@ -257,6 +298,14 @@ BUILTIN_KB_SEARCH_TOOL = BuiltinTool(
                 "type": "integer",
                 "description": "每个知识库返回的最大结果数，默认 5",
             },
+            "tag_filters": {
+                "type": "array",
+                "description": (
+                    "标签筛选条件 [{name, op, value}]。不传则按查询预填；空数组表示不按标签筛选。"
+                    "文本 op: eq/contains；日期 op: eq/gte/lte/lt/gt。"
+                ),
+                "items": {"type": "object"},
+            },
         },
         "required": ["query"],
     },
@@ -272,6 +321,8 @@ BUILTIN_TOOLS: List[BuiltinTool] = [
     BUILTIN_SEARCH_FILES_TOOL,
     BUILTIN_MEMORY_TOOL,
     BUILTIN_EXECUTE_CODE_TOOL,
+    BUILTIN_INSTALL_PACKAGES_TOOL,
+    BUILTIN_LIST_WORKSPACE_TOOL,
     BUILTIN_KB_SEARCH_TOOL,
 ]
 
@@ -306,6 +357,10 @@ async def execute_builtin_tool(tool_name: str, args: Dict[str, Any], output_dir:
         return await _execute_memory(args)
     elif tool_name == "execute_code":
         return await _execute_code(args, output_dir)
+    elif tool_name == "install_packages":
+        return await _execute_install_packages(args)
+    elif tool_name == "list_workspace":
+        return await _execute_list_workspace(args, output_dir)
     elif tool_name == "kb_search":
         return await _execute_kb_search(args)
     else:
@@ -453,11 +508,15 @@ async def _execute_edit(args: Dict[str, Any], output_dir: str) -> Dict[str, Any]
 
 
 async def _execute_bash(args: Dict[str, Any], output_dir: str) -> Dict[str, Any]:
+    import signal
+
     command = args.get("command", "")
     timeout = int(args.get("timeout", 30))
 
     if not command:
         return {"success": False, "error": "缺少 command 参数"}
+
+    env = _build_bash_env(output_dir)
 
     try:
         process = await asyncio.create_subprocess_shell(
@@ -465,6 +524,8 @@ async def _execute_bash(args: Dict[str, Any], output_dir: str) -> Dict[str, Any]
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=output_dir,
+            env=env,
+            start_new_session=True,
         )
 
         try:
@@ -472,7 +533,10 @@ async def _execute_bash(args: Dict[str, Any], output_dir: str) -> Dict[str, Any]
                 process.communicate(), timeout=timeout
             )
         except asyncio.TimeoutError:
-            process.kill()
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except (ProcessLookupError, OSError):
+                process.kill()
             await process.wait()
             return {
                 "success": False,
@@ -963,35 +1027,7 @@ async def _execute_memory(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"success": False, "error": f"记忆操作失败: {str(e)}"}
 
 
-# ─── execute_code: 沙箱代码执行 ────────────────────────────────────────────
-
-# 安全限制：禁止导入的模块
-_BLOCKED_MODULES = {
-    "os", "subprocess", "shutil", "sys", "ctypes",
-    "socket", "http", "urllib", "requests",
-    "pathlib", "signal", "multiprocessing",
-    "importlib", "pickle", "shelve", "marshal",
-}
-
-_PYTHON_SAFE_HEADER = """\
-import math
-import json
-import re
-import datetime
-import collections
-import itertools
-import functools
-import statistics
-import random
-import string
-import hashlib
-import base64
-import textwrap
-import typing
-from decimal import Decimal
-from fractions import Fraction
-"""
-
+# ─── execute_code: Code Interpreter 沙箱 ────────────────────────────────────
 
 async def _execute_code(args: Dict[str, Any], output_dir: str) -> Dict[str, Any]:
     code = args.get("code", "")
@@ -999,167 +1035,67 @@ async def _execute_code(args: Dict[str, Any], output_dir: str) -> Dict[str, Any]
         return {"success": False, "error": "缺少 code 参数"}
 
     language = args.get("language", "python").lower()
-    timeout = int(args.get("timeout", 30))
+    timeout = args.get("timeout")
+    if timeout is not None:
+        timeout = int(timeout)
+    reset_state = bool(args.get("reset_state", False))
 
-    if language == "python":
-        return await _execute_python(code, output_dir, timeout)
-    elif language == "javascript":
-        return await _execute_javascript(code, output_dir, timeout)
-    else:
-        return {"success": False, "error": f"不支持的语言: {language}，可选: python, javascript"}
+    from services.code_exec.runner import run_code
 
-
-async def _execute_python(code: str, output_dir: str, timeout: int) -> Dict[str, Any]:
-    # 安全检查：扫描危险的 import
-    import re as _re
-    dangerous_imports = _re.findall(
-        r"^\s*(?:import|from)\s+(\w+)", code, _re.MULTILINE
+    return await run_code(
+        code,
+        output_dir,
+        language=language,
+        timeout=timeout,
+        reset_state=reset_state,
     )
-    blocked = [m for m in dangerous_imports if m in _BLOCKED_MODULES]
-    if blocked:
-        return {
-            "success": False,
-            "error": f"安全限制：不允许导入以下模块: {', '.join(blocked)}。"
-                     f"execute_code 仅用于数据处理和计算，如需系统操作请使用 bash 工具。",
-        }
 
-    # 在代码前注入安全头和输出捕获
-    wrapped_code = _PYTHON_SAFE_HEADER + "\n" + code
 
-    # 写入临时文件执行
-    import tempfile
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".py", delete=False, encoding="utf-8", dir=output_dir
-    ) as f:
-        f.write(wrapped_code)
-        script_path = f.name
+async def _execute_install_packages(args: Dict[str, Any]) -> Dict[str, Any]:
+    packages = args.get("packages") or []
+    if isinstance(packages, str):
+        packages = [p.strip() for p in packages.split(",") if p.strip()]
+    from services.code_exec.packages import install_packages
+    return await install_packages(packages)
 
+
+async def _execute_list_workspace(args: Dict[str, Any], output_dir: str) -> Dict[str, Any]:
+    from services.code_exec.workspace import SessionWorkspace
+
+    subpath = args.get("path", "")
     try:
-        process = await asyncio.create_subprocess_exec(
-            "python", script_path,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=output_dir,
-        )
-
-        try:
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
-            process.kill()
-            await process.wait()
-            return {"success": False, "error": f"代码执行超时 ({timeout}s)"}
-
-        stdout_str = stdout.decode("utf-8", errors="replace") if stdout else ""
-        stderr_str = stderr.decode("utf-8", errors="replace") if stderr else ""
-
-        if process.returncode != 0:
-            return {
-                "success": False,
-                "error": f"代码执行出错 (exit code {process.returncode}):\n{stderr_str[:2000]}",
-                "stdout": stdout_str[:5000],
-                "stderr": stderr_str[:2000],
-            }
-
-        result_parts = []
-        if stdout_str:
-            result_parts.append(stdout_str)
-        if stderr_str:
-            result_parts.append(f"[stderr]\n{stderr_str}")
-
-        return {
-            "success": True,
-            "result": "\n".join(result_parts) if result_parts else "(无输出)",
-            "stdout": stdout_str[:5000],
-            "exit_code": process.returncode,
-        }
-
+        ws = SessionWorkspace.from_output_dir(output_dir)
+        items = ws.list_files(subpath)
+        if not items:
+            return {"success": True, "result": "(工作区为空)", "files": []}
+        lines = []
+        for item in items:
+            if item["type"] == "dir":
+                lines.append(f"[DIR]  {item['path']}/")
+            else:
+                size = item.get("size", 0)
+                lines.append(f"[FILE] {item['path']} ({size} bytes)")
+        return {"success": True, "result": "\n".join(lines), "files": items}
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
     except Exception as e:
-        return {"success": False, "error": f"代码执行失败: {str(e)}"}
-    finally:
-        try:
-            os.unlink(script_path)
-        except OSError:
-            pass
+        return {"success": False, "error": f"列出工作区失败: {str(e)}"}
 
 
-async def _execute_javascript(code: str, output_dir: str, timeout: int) -> Dict[str, Any]:
-    # 检查 node 是否可用
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "node", "--version",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
-        if proc.returncode != 0:
-            return {"success": False, "error": "Node.js 未安装或不可用"}
-    except (asyncio.TimeoutError, FileNotFoundError):
-        return {"success": False, "error": "Node.js 未安装或不可用，无法执行 JavaScript"}
+def _build_bash_env(output_dir: str) -> Dict[str, str]:
+    """Minimal environment for bash — no secrets from parent process."""
+    from services.code_exec.runner import ALLOWED_ENV_KEYS
 
-    # 安全检查：禁止 require 调用
-    import re as _re
-    dangerous_requires = _re.findall(r"require\s*\(\s*['\"]([^'\"]+)", code)
-    blocked = [r for r in dangerous_requires if not r.startswith(".") and r not in ("fs",)]
-    if blocked:
-        return {
-            "success": False,
-            "error": f"安全限制：不允许 require 以下模块: {', '.join(blocked)}。"
-                     f"execute_code 仅用于数据处理和计算，如需系统操作请使用 bash 工具。",
-        }
-
-    import tempfile
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".js", delete=False, encoding="utf-8", dir=output_dir
-    ) as f:
-        f.write(code)
-        script_path = f.name
-
-    try:
-        process = await asyncio.create_subprocess_exec(
-            "node", script_path,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=output_dir,
-        )
-
-        try:
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
-            process.kill()
-            await process.wait()
-            return {"success": False, "error": f"代码执行超时 ({timeout}s)"}
-
-        stdout_str = stdout.decode("utf-8", errors="replace") if stdout else ""
-        stderr_str = stderr.decode("utf-8", errors="replace") if stderr else ""
-
-        if process.returncode != 0:
-            return {
-                "success": False,
-                "error": f"代码执行出错 (exit code {process.returncode}):\n{stderr_str[:2000]}",
-                "stdout": stdout_str[:5000],
-                "stderr": stderr_str[:2000],
-            }
-
-        result_parts = []
-        if stdout_str:
-            result_parts.append(stdout_str)
-        if stderr_str:
-            result_parts.append(f"[stderr]\n{stderr_str}")
-
-        return {
-            "success": True,
-            "result": "\n".join(result_parts) if result_parts else "(无输出)",
-            "stdout": stdout_str[:5000],
-            "exit_code": process.returncode,
-        }
-
-    except Exception as e:
-        return {"success": False, "error": f"代码执行失败: {str(e)}"}
-    finally:
-        try:
-            os.unlink(script_path)
-        except OSError:
-            pass
+    env: Dict[str, str] = {}
+    for key in ALLOWED_ENV_KEYS:
+        val = os.environ.get(key)
+        if val:
+            env[key] = val
+    env["HOME"] = output_dir
+    env["PWD"] = output_dir
+    if "PATH" not in env:
+        env["PATH"] = "/usr/local/bin:/usr/bin:/bin"
+    return env
 
 
 # ─── kb_search: 知识库检索 ─────────────────────────────────────────────────
@@ -1172,12 +1108,14 @@ async def _execute_kb_search(args: Dict[str, Any]) -> Dict[str, Any]:
     kb_id = args.get("kb_id", "")
     kb_name = args.get("kb_name", "")
     top_k = min(int(args.get("top_k", 5)), 20)
+    tag_filters_arg = args.get("tag_filters", None)
 
     try:
         # 延迟导入，避免循环依赖
         from database import SessionLocal
         from models import KnowledgeBase, KnowledgeBaseStatus
         from services.knowledge_service import knowledge_service as ks
+        from services.knowledge.tag_extractor import suggest_tag_filters
 
         db = SessionLocal()
         try:
@@ -1205,10 +1143,16 @@ async def _execute_kb_search(args: Dict[str, Any]) -> Dict[str, Any]:
 
             all_results = []
             for kb in kbs:
-                results = ks.search(kb.kb_id, query, top_k=top_k)
+                tag_defs = kb.tag_defs or []
+                if tag_filters_arg is None:
+                    filters = await suggest_tag_filters(query, tag_defs, db)
+                else:
+                    filters = tag_filters_arg if isinstance(tag_filters_arg, list) else []
+                results = ks.search(kb.kb_id, query, top_k=top_k, tag_filters=filters)
                 for r in results:
                     r["kb_id"] = kb.kb_id
                     r["kb_name"] = kb.name
+                    r["applied_filters"] = filters
                     all_results.append(r)
 
             # 按分数排序，取前 top_k 条
@@ -1234,7 +1178,19 @@ async def _execute_kb_search(args: Dict[str, Any]) -> Dict[str, Any]:
                     content = content[:500] + "..."
                 source = r.get("metadata", {}).get("filename", "")
                 source_str = f" (来源: {source})" if source else ""
-                output_parts.append(f"\n--- 结果 {i} [score: {score:.4f}] [{kb_name_found}]{source_str} ---\n{content}")
+                tags = r.get("tags") or {}
+                tag_str = ""
+                if tags:
+                    tag_str = " 标签: " + "；".join(f"{k}={v}" for k, v in tags.items())
+                filters = r.get("applied_filters") or []
+                filter_str = ""
+                if filters:
+                    filter_str = " 筛选: " + "；".join(
+                        f"{f.get('name')} {f.get('op')} {f.get('value')}" for f in filters
+                    )
+                output_parts.append(
+                    f"\n--- 结果 {i} [score: {score:.4f}] [{kb_name_found}]{source_str}{tag_str}{filter_str} ---\n{content}"
+                )
 
             return {
                 "success": True,
@@ -1242,6 +1198,7 @@ async def _execute_kb_search(args: Dict[str, Any]) -> Dict[str, Any]:
                 "results": all_results,
                 "total": len(all_results),
                 "searched_kbs": [kb.name for kb in kbs],
+                "applied_filters": all_results[0].get("applied_filters") if all_results else [],
             }
         finally:
             db.close()

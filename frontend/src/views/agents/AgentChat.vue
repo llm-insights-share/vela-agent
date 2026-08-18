@@ -41,7 +41,19 @@
           <ArrowLeftOutlined /> 返回
         </a-button>
         <span class="chat-title">{{ agent.name }} - 对话测试</span>
-        <a-tag color="green">会话: {{ sessionId?.substring(0, 8) }}...</a-tag>
+        <div v-if="sessionId" class="session-id-wrap">
+          <a-tag color="green">会话: {{ sessionId.substring(0, 8) }}...</a-tag>
+          <a-tooltip title="复制完整会话 ID">
+            <a-button
+              type="text"
+              size="small"
+              class="session-id-copy"
+              @click="copySessionId"
+            >
+              <CopyOutlined />
+            </a-button>
+          </a-tooltip>
+        </div>
         <a-tag v-if="isRunning" color="orange">
           <LoadingOutlined style="margin-right: 4px;" />运行中
         </a-tag>
@@ -142,6 +154,14 @@
           <a-tag v-for="att in msg.attachments" :key="att.id" color="blue">
             <PaperClipOutlined /> {{ att.filename }}
           </a-tag>
+        </div>
+        <div v-if="msg.codeExecutions && msg.codeExecutions.length" class="chat-code-execs">
+          <CodeExecutionCard
+            v-for="(cex, ci) in msg.codeExecutions"
+            :key="ci"
+            :exec="cex"
+            :default-expanded="ci === msg.codeExecutions.length - 1"
+          />
         </div>
         <div v-if="msg.files && msg.files.length > 0" class="chat-files">
           <a-alert
@@ -648,20 +668,45 @@ import {
   ArrowLeftOutlined, CaretRightOutlined, CaretDownOutlined,
   ThunderboltOutlined, SendOutlined, PlusOutlined, DownloadOutlined,
   FileOutlined, CloseOutlined, LoadingOutlined, StopOutlined, PaperClipOutlined,
+  CopyOutlined,
 } from '@ant-design/icons-vue'
 import { agentApi, sessionApi, hitlApi, skillApi } from '../../api'
 import { useAuthStore } from '../../stores/auth'
 import { message } from 'ant-design-vue'
 import { marked } from 'marked'
+import hljs from 'highlight.js/lib/core'
+import python from 'highlight.js/lib/languages/python'
+import javascript from 'highlight.js/lib/languages/javascript'
+import bash from 'highlight.js/lib/languages/bash'
+import json from 'highlight.js/lib/languages/json'
+import CodeExecutionCard from '../../components/CodeExecutionCard.vue'
+import 'highlight.js/styles/github-dark.css'
 import {
   watchBackgroundSession,
   setActiveViewing,
   unwatchBackgroundSession,
 } from '../../composables/useBackgroundSessions'
 
+hljs.registerLanguage('python', python)
+hljs.registerLanguage('javascript', javascript)
+hljs.registerLanguage('bash', bash)
+hljs.registerLanguage('json', json)
+
 marked.setOptions({
   breaks: true,
   gfm: true,
+  highlight(code, lang) {
+    if (lang && hljs.getLanguage(lang)) {
+      try {
+        return hljs.highlight(code, { language: lang }).value
+      } catch (_) { /* ignore */ }
+    }
+    try {
+      return hljs.highlightAuto(code).value
+    } catch (_) {
+      return code
+    }
+  },
 })
 
 const route = useRoute()
@@ -917,6 +962,7 @@ function parseThinkingSteps(thinking) {
     || /^\[中止\]/.test(trimmed)
     || /^\[LLM/.test(trimmed)
     || /^\[文件\]/.test(trimmed)
+    || /^\[代码执行\]/.test(trimmed)
     || /^\[UI技能\]/.test(trimmed)
     || /^调用\s+\d+\s*个工具/.test(trimmed)
     || /^执行步骤/.test(trimmed)
@@ -928,9 +974,13 @@ function parseThinkingSteps(thinking) {
 
     const toolMatch = trimmed.match(/^工具\s*\[([^\]]+)\]\s*(?:结果:|:)\s*(.*)$/)
     if (toolMatch) {
+      const toolName = toolMatch[1]
+      const stepType = (toolName === 'execute_code' || toolName === 'install_packages')
+        ? 'code_exec'
+        : 'tool'
       return {
-        type: 'tool',
-        toolName: toolMatch[1],
+        type: stepType,
+        toolName,
         text: toolMatch[2] || '',
         expanded: false,
       }
@@ -995,6 +1045,7 @@ function thinkingStepColor(type) {
     phase: 'blue',
     thought: 'default',
     tool: 'geekblue',
+    code_exec: 'purple',
     action: 'orange',
     error: 'red',
     info: 'default',
@@ -1003,6 +1054,7 @@ function thinkingStepColor(type) {
 }
 
 function thinkingStepLabel(step) {
+  if (step.type === 'code_exec') return `代码 · ${step.toolName || 'execute_code'}`
   if (step.type === 'tool') return `工具 · ${step.toolName || 'unknown'}`
   const map = {
     rewrite: 'QueryRewrite',
@@ -1158,6 +1210,7 @@ function normalizeMessage(msg, intermediateSteps) {
     activeSkill: msg.activeSkill || msg.active_skill || null,
     files: msg.files || [],
     filesTruncated: msg.filesTruncated || msg.files_truncated || false,
+    codeExecutions: msg.codeExecutions || msg.code_executions || [],
     pendingApprovalId: msg.pendingApprovalId || msg.pending_approval_id || null,
     pendingDelivery: msg.pendingDelivery || msg.pending_delivery || false,
     pendingWorkflow: msg.pendingWorkflow || msg.pending_workflow || false,
@@ -1753,6 +1806,15 @@ function scrollToBottom() {
   })
 }
 
+function copySessionId() {
+  if (!sessionId.value) return
+  navigator.clipboard.writeText(sessionId.value).then(() => {
+    message.success('会话 ID 已复制')
+  }).catch(() => {
+    message.error('复制失败')
+  })
+}
+
 function renderMarkdown(text) {
   if (!text) return ''
   return marked.parse(text)
@@ -1850,6 +1912,20 @@ function renderMarkdown(text) {
   font-weight: 600;
   color: #1a1714;
   flex: 1;
+}
+.session-id-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.session-id-copy {
+  color: #52c41a;
+  padding: 0 4px;
+  height: 22px;
+}
+.session-id-copy:hover {
+  color: #389e0d;
+  background: rgba(82, 196, 26, 0.08);
 }
 .chat-header-actions {
   display: flex;
@@ -1981,6 +2057,9 @@ function renderMarkdown(text) {
   background: #f8f6f2;
   border: 1px solid #e8e4dc;
   border-radius: 8px;
+}
+.chat-code-execs {
+  margin-top: 10px;
 }
 .chat-files-title {
   font-size: 12px;

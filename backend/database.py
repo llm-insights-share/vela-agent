@@ -248,5 +248,20 @@ def _migrate_db():
                 "ALTER TABLE skill_packs ADD COLUMN package_files TEXT DEFAULT '{}'"
             )
 
+    cursor.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='knowledge_bases'"
+    )
+    if cursor.fetchone():
+        cursor.execute("PRAGMA table_info(knowledge_bases)")
+        kb_cols = {row[1] for row in cursor.fetchall()}
+        if "contextual_retrieval_enabled" not in kb_cols:
+            cursor.execute(
+                "ALTER TABLE knowledge_bases ADD COLUMN contextual_retrieval_enabled BOOLEAN"
+            )
+        if "tag_defs" not in kb_cols:
+            cursor.execute(
+                "ALTER TABLE knowledge_bases ADD COLUMN tag_defs TEXT DEFAULT '[]'"
+            )
+
     conn.commit()
     conn.close()

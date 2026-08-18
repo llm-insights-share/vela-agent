@@ -493,6 +493,8 @@ class AgentService:
                 msg["files"] = result["files"]
             if result.get("files_truncated"):
                 msg["filesTruncated"] = True
+            if result.get("code_executions"):
+                msg["codeExecutions"] = result["code_executions"]
             if pending_approval_id:
                 msg["pendingApprovalId"] = pending_approval_id
             if result.get("pending_delivery"):
@@ -1002,6 +1004,8 @@ class AgentLoop:
         self.thinking_log: List[str] = []
         self.total_tokens_used = 0
         self.generated_files: List[Dict[str, str]] = []
+        self.code_executions: List[Dict[str, Any]] = []
+        self._code_fail_history: List[str] = []
 
         # SGL-CFG-02: ReAct 最大迭代次数（可配置）
         self.max_iterations = agent.max_iterations or 10
@@ -1179,6 +1183,23 @@ class AgentLoop:
                     )
             except Exception:
                 pass
+        has_code_exec = any(
+            (getattr(t, "name", "") or "") == "execute_code"
+            for t in (self.available_tools or [])
+        )
+        if has_code_exec:
+            ws_hint = os.path.join(
+                os.path.dirname(os.path.dirname(__file__)),
+                "data", "workspaces", self.session.session_id,
+            )
+            system_prompt += (
+                "\n\n【Code Interpreter 使用规范】\n"
+                "1. 涉及数值计算、统计分析、数据处理时，必须写代码执行，禁止心算。\n"
+                "2. 使用 execute_code 工具执行 Python；同一会话内变量与文件跨调用保留。\n"
+                f"3. 工作区路径: {ws_hint}；产物保存到 outputs/ 子目录或使用 plt.show() 自动出图。\n"
+                "4. 代码报错时阅读 traceback，修正后重试；连续失败 3 次应换思路。\n"
+                "5. 缺少依赖时用 install_packages 安装白名单内的包。\n"
+            )
         return system_prompt
 
     def _build_initial_messages(self) -> List[Dict[str, Any]]:
@@ -1496,6 +1517,61 @@ class AgentLoop:
             return True
         return False
 
+    def _would_block_code_retry(self, code: str) -> bool:
+        """True if the same code has already failed 3 times."""
+        sig = hashlib.md5((code or "").strip().encode()).hexdigest()[:12]
+        if len(self._code_fail_history) < 3:
+            return False
+        recent = self._code_fail_history[-3:]
+        return len(set(recent)) == 1 and recent[0] == sig
+
+    def _record_code_failure(self, code: str) -> None:
+        sig = hashlib.md5((code or "").strip().encode()).hexdigest()[:12]
+        self._code_fail_history.append(sig)
+        if self._would_block_code_retry(code):
+            self.thinking_log.append(
+                "[代码执行] 同一段代码连续失败 3 次，请换思路或简化问题"
+            )
+
+    def _record_code_execution(self, result: Dict[str, Any]) -> None:
+        """Track structured code execution for frontend cards."""
+        entry = {
+            "language": result.get("language", "python"),
+            "code": result.get("code", ""),
+            "stdout": result.get("stdout", ""),
+            "stderr": result.get("stderr", ""),
+            "exit_code": result.get("exit_code"),
+            "duration_ms": result.get("duration_ms"),
+            "success": bool(result.get("success")),
+            "error": result.get("error", ""),
+            "artifacts": [],
+        }
+        for art in result.get("artifacts") or []:
+            if art.get("kind") == "skipped":
+                continue
+            file_info = None
+            out_path = art.get("output_path") or art.get("path")
+            if out_path:
+                file_info = self._register_file(out_path)
+            entry["artifacts"].append({
+                "name": art.get("name", ""),
+                "kind": art.get("kind", "other"),
+                "url": file_info["url"] if file_info else "",
+                "size_display": file_info["size_display"] if file_info else "",
+            })
+        self.code_executions.append(entry)
+
+        try:
+            from services.code_exec.recorder import persist_execution
+            persist_execution(
+                self.db,
+                session_id=self.session.session_id,
+                agent_id=self.agent.agent_id,
+                result=result,
+            )
+        except Exception:
+            pass
+
     def _is_sqlite_mcp_tool(self, tool) -> bool:
         if getattr(tool, "name", "") == "query_sqlite":
             return True
@@ -1721,10 +1797,26 @@ class AgentLoop:
 
         result: Dict[str, Any]
         if isinstance(tool, BuiltinTool):
+            if tool.name == "execute_code":
+                code = (args or {}).get("code", "")
+                if self._would_block_code_retry(code):
+                    return {
+                        "success": False,
+                        "error": "同一段代码已连续失败 3 次。请换思路、简化问题，或检查数据与逻辑。",
+                    }
             try:
                 result = await execute_builtin_tool(tool.name, args, self.output_dir)
             except Exception as e:
                 result = {"success": False, "error": f"内置工具执行失败: {str(e)}"}
+            if tool.name == "execute_code":
+                if not result.get("success") and args.get("code"):
+                    self._record_code_failure(args["code"])
+                self._record_code_execution(result)
+            elif result.get("artifacts"):
+                for art in result["artifacts"]:
+                    path = art.get("output_path") or art.get("path")
+                    if path and art.get("kind") != "skipped":
+                        self._register_file(path)
             self._memory_record_tool(tool.name, args, result)
             return result
 
@@ -2339,6 +2431,8 @@ class AgentLoop:
             result["files"] = self.generated_files
             if any(f.get("truncated") for f in self.generated_files):
                 result["files_truncated"] = True
+        if self.code_executions:
+            result["code_executions"] = self.code_executions
 
         # 将 activeSkill / executionMode / files 持久化到 session.messages 的最后一条 assistant 消息中，
         # 确保重新打开历史会话时 Skill 标志、执行模式标签和输出文件卡片都能正常显示
@@ -2353,6 +2447,8 @@ class AgentLoop:
                     msg["files"] = self.generated_files
                     if any(f.get("truncated") for f in self.generated_files):
                         msg["filesTruncated"] = True
+                if self.code_executions:
+                    msg["codeExecutions"] = self.code_executions
                 break
         self.session.messages = messages
         flag_modified(self.session, "messages")

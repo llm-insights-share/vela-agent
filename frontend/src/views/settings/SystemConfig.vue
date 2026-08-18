@@ -56,6 +56,109 @@
     </a-card>
 
     <a-card style="margin-bottom: 24px;">
+      <template #title>代码执行沙箱 (Code Interpreter)</template>
+      <template #extra>
+        <a-button
+          type="text"
+          size="small"
+          :title="cardCollapsed.codeExec ? '展开' : '收起'"
+          @click.stop="cardCollapsed.codeExec = !cardCollapsed.codeExec"
+        >
+          <template #icon>
+            <UpOutlined v-if="!cardCollapsed.codeExec" />
+            <DownOutlined v-else />
+          </template>
+        </a-button>
+      </template>
+      <div v-show="!cardCollapsed.codeExec">
+        <div class="field-hint" style="margin-bottom: 16px;">
+          控制 Agent 内置 <code>execute_code</code> 工具的加固沙箱：独立 venv、资源限制、产物捕获与跨调用变量状态。
+        </div>
+        <a-form :model="codeExecForm" :label-col="{ span: 5 }" :wrapper-col="{ span: 14 }">
+          <a-form-item label="启用">
+            <a-switch v-model:checked="codeExecForm.enabled" />
+          </a-form-item>
+          <a-form-item label="超时 (秒)">
+            <a-input-number v-model:value="codeExecForm.wall_timeout" :min="10" :max="600" style="width: 160px;" />
+          </a-form-item>
+          <a-form-item label="CPU 限制 (秒)">
+            <a-input-number v-model:value="codeExecForm.cpu_seconds" :min="5" :max="300" style="width: 160px;" />
+          </a-form-item>
+          <a-form-item label="内存 (MB)">
+            <a-input-number v-model:value="codeExecForm.memory_mb" :min="256" :max="8192" style="width: 160px;" />
+            <div class="field-hint">macOS 上内存限制可能不生效</div>
+          </a-form-item>
+          <a-form-item label="允许网络">
+            <a-switch v-model:checked="codeExecForm.allow_network" />
+          </a-form-item>
+          <a-form-item label="允许安装包">
+            <a-switch v-model:checked="codeExecForm.allow_install" />
+          </a-form-item>
+          <a-form-item label="状态持久化">
+            <a-switch v-model:checked="codeExecForm.state_persist" />
+          </a-form-item>
+          <a-form-item label="包白名单">
+            <a-select
+              v-model:value="codeExecForm.package_allowlist"
+              mode="tags"
+              style="width: 100%;"
+              placeholder="pandas, numpy, matplotlib..."
+            />
+          </a-form-item>
+          <a-form-item :wrapper-col="{ offset: 5, span: 14 }">
+            <a-button type="primary" :loading="codeExecSaving" @click="saveCodeExec">保存</a-button>
+          </a-form-item>
+        </a-form>
+      </div>
+    </a-card>
+
+    <a-card style="margin-bottom: 24px;">
+      <template #title>知识库 · 上下文感知检索</template>
+      <template #extra>
+        <a-button
+          type="text"
+          size="small"
+          :title="cardCollapsed.contextual ? '展开' : '收起'"
+          @click.stop="cardCollapsed.contextual = !cardCollapsed.contextual"
+        >
+          <template #icon>
+            <UpOutlined v-if="!cardCollapsed.contextual" />
+            <DownOutlined v-else />
+          </template>
+        </a-button>
+      </template>
+      <div v-show="!cardCollapsed.contextual">
+        <div class="field-hint" style="margin-bottom: 16px;">
+          在向量化前为每个分块生成 LLM 上下文前缀（Anthropic Contextual Retrieval），提升检索召回质量。
+          索引时使用「前缀 + 原文」，检索返回仍为原始分块。
+        </div>
+        <a-form :model="contextualForm" :label-col="{ span: 5 }" :wrapper-col="{ span: 14 }">
+          <a-form-item label="全局启用">
+            <a-switch v-model:checked="contextualForm.enabled" />
+          </a-form-item>
+          <a-form-item label="前缀生成模型">
+            <a-select
+              v-model:value="contextualForm.model_service_id"
+              allow-clear
+              placeholder="默认使用第一个可用模型服务"
+              :options="modelServiceOptions"
+              style="width: 100%"
+            />
+          </a-form-item>
+          <a-form-item label="并发数">
+            <a-input-number v-model:value="contextualForm.max_concurrency" :min="1" :max="32" style="width: 160px;" />
+          </a-form-item>
+          <a-form-item label="单块超时 (秒)">
+            <a-input-number v-model:value="contextualForm.chunk_timeout_seconds" :min="5" :max="120" style="width: 160px;" />
+          </a-form-item>
+          <a-form-item :wrapper-col="{ offset: 5, span: 14 }">
+            <a-button type="primary" :loading="contextualSaving" @click="saveContextual">保存</a-button>
+          </a-form-item>
+        </a-form>
+      </div>
+    </a-card>
+
+    <a-card style="margin-bottom: 24px;">
       <template #title>打开驭屏系统</template>
       <template #extra>
         <a-button
@@ -272,6 +375,8 @@ import { message } from 'ant-design-vue'
 
 const cardCollapsed = reactive({
   tools: true,
+  codeExec: true,
+  contextual: true,
   screenpilot: true,
   letta: true,
   memory: true,
@@ -290,6 +395,26 @@ const tavilyStatus = reactive({
 const tavilyForm = reactive({
   api_key: '',
 })
+
+const codeExecForm = reactive({
+  enabled: true,
+  wall_timeout: 60,
+  cpu_seconds: 30,
+  memory_mb: 2048,
+  allow_network: false,
+  allow_install: true,
+  state_persist: true,
+  package_allowlist: ['pandas', 'numpy', 'matplotlib'],
+})
+const codeExecSaving = ref(false)
+
+const contextualForm = reactive({
+  enabled: false,
+  model_service_id: undefined,
+  max_concurrency: 12,
+  chunk_timeout_seconds: 30,
+})
+const contextualSaving = ref(false)
 
 const lettaForm = reactive({
   enabled: true,
@@ -331,6 +456,64 @@ const screenpilot = reactive({
   enabled: false,
   tools: [],
 })
+
+async function fetchCodeExecConfig() {
+  try {
+    const cfg = await configApi.getCodeExec()
+    codeExecForm.enabled = !!cfg.enabled
+    codeExecForm.wall_timeout = cfg.wall_timeout ?? 60
+    codeExecForm.cpu_seconds = cfg.cpu_seconds ?? 30
+    codeExecForm.memory_mb = cfg.memory_mb ?? 2048
+    codeExecForm.allow_network = !!cfg.allow_network
+    codeExecForm.allow_install = cfg.allow_install !== false
+    codeExecForm.state_persist = cfg.state_persist !== false
+    codeExecForm.package_allowlist = cfg.package_allowlist || []
+  } catch (e) {
+    // ignore
+  }
+}
+
+async function saveCodeExec() {
+  codeExecSaving.value = true
+  try {
+    const res = await configApi.updateCodeExec({ ...codeExecForm })
+    message.success(res.message || '代码执行沙箱配置已保存')
+  } catch (e) {
+    message.error(e.message)
+  } finally {
+    codeExecSaving.value = false
+  }
+}
+
+async function fetchContextualConfig() {
+  try {
+    const cfg = await configApi.getContextualRetrieval()
+    contextualForm.enabled = !!cfg.enabled
+    contextualForm.model_service_id = cfg.model_service_id || undefined
+    contextualForm.max_concurrency = cfg.max_concurrency ?? 12
+    contextualForm.chunk_timeout_seconds = cfg.chunk_timeout_seconds ?? 30
+  } catch (e) {
+    // ignore
+  }
+}
+
+async function saveContextual() {
+  contextualSaving.value = true
+  try {
+    await configApi.updateContextualRetrieval({
+      enabled: !!contextualForm.enabled,
+      model_service_id: contextualForm.model_service_id || '',
+      max_concurrency: contextualForm.max_concurrency,
+      chunk_timeout_seconds: contextualForm.chunk_timeout_seconds,
+    })
+    message.success('上下文感知检索配置已保存')
+    await fetchContextualConfig()
+  } catch (e) {
+    message.error(e.message)
+  } finally {
+    contextualSaving.value = false
+  }
+}
 
 async function fetchScreenpilot() {
   try {
@@ -550,6 +733,8 @@ async function saveRewriteMounts() {
 
 onMounted(async () => {
   await fetchConfig()
+  await fetchCodeExecConfig()
+  await fetchContextualConfig()
   await fetchScreenpilot()
   await fetchLettaConfig()
   await fetchModelServices()

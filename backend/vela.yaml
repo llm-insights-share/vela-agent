@@ -1,11 +1,43 @@
+code_exec:
+  allow_install: true
+  allow_network: false
+  cpu_seconds: 30
+  enabled: true
+  max_artifact_mb: 20
+  max_output_bytes: 65536
+  memory_mb: 2048
+  package_allowlist:
+  - pandas
+  - numpy
+  - matplotlib
+  - scipy
+  - openpyxl
+  - pillow
+  - seaborn
+  - tabulate
+  - dill
+  - akshare
+  state_persist: true
+  venv_path: ''
+  wall_timeout: 60
+knowledge:
+  contextual_retrieval:
+    chunk_timeout_seconds: 30
+    document_excerpt_max_chars: 2000
+    enabled: true
+    max_concurrency: 12
+    min_chunk_length: 50
+    model_service_id: c7d2f984-2dcb-4e9e-883f-658e578f5456
+    prefix_max_tokens: 128
+    temperature: 0.0
+memory:
+  letta:
+    base_url: http://127.0.0.1:8283
+    distill_model_service_id: ''
+    enabled: true
+    gateway_base: http://127.0.0.1:8000
+    gateway_token: vela-local-gateway
+    password: vela-letta-dev
 tools:
   tavily:
     api_key: tvly-dev-*****
-memory:
-  letta:
-    enabled: true
-    base_url: http://127.0.0.1:8283
-    password: vela-letta-dev
-    gateway_base: http://127.0.0.1:8000
-    gateway_token: vela-local-gateway
-    distill_model_service_id: ""
