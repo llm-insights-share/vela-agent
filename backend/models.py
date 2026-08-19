@@ -346,6 +346,78 @@ class HITLApproval(Base):
     reviewed_at = Column(DateTime, nullable=True)
 
 
+class ScheduleTriggerType(str, enum.Enum):
+    CRON = "CRON"
+    MANUAL = "MANUAL"
+
+
+class ScheduleRunStatus(str, enum.Enum):
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    SUCCESS = "SUCCESS"
+    ERROR = "ERROR"
+    HITL_WAIT = "HITL_WAIT"
+    SKIPPED = "SKIPPED"
+
+
+class AgentSchedule(Base):
+    __tablename__ = "agent_schedules"
+
+    schedule_id = Column(String, primary_key=True, default=gen_uuid)
+    name = Column(String(128), unique=True, nullable=False, index=True)
+    description = Column(Text, default="")
+    agent_id = Column(String, ForeignKey("agents.agent_id"), nullable=False, index=True)
+    enabled = Column(Boolean, default=True)
+    cron_expression = Column(String(64), nullable=False, default="0 8 * * *")
+    timezone = Column(String(64), nullable=False, default="Asia/Shanghai")
+    prompt_template = Column(Text, default="")
+    skip_if_running = Column(Boolean, default=True)
+    timeout_seconds = Column(Integer, nullable=True)
+    created_by = Column(String(128), default="")
+    last_fired_at = Column(DateTime, nullable=True)
+    next_run_at = Column(DateTime, nullable=True)
+    last_status = Column(String(32), default="")
+    created_at = Column(DateTime, default=now_utc)
+    updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)
+
+
+class AgentScheduleRun(Base):
+    __tablename__ = "agent_schedule_runs"
+
+    run_id = Column(String, primary_key=True, default=gen_uuid)
+    schedule_id = Column(String, ForeignKey("agent_schedules.schedule_id"), nullable=False, index=True)
+    session_id = Column(String, ForeignKey("sessions.session_id"), nullable=True, index=True)
+    trigger_type = Column(SAEnum(ScheduleTriggerType), default=ScheduleTriggerType.CRON)
+    status = Column(SAEnum(ScheduleRunStatus), default=ScheduleRunStatus.PENDING)
+    scheduled_for = Column(DateTime, nullable=False, default=now_utc)
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
+    prompt_rendered = Column(Text, default="")
+    error_message = Column(Text, default="")
+    token_used = Column(Integer, default=0)
+    summary = Column(Text, default="")
+    created_at = Column(DateTime, default=now_utc)
+
+
+class InboxMessage(Base):
+    __tablename__ = "inbox_messages"
+    __table_args__ = (
+        UniqueConstraint("user_id", "related_type", "related_id", name="uq_inbox_user_related"),
+    )
+
+    message_id = Column(String, primary_key=True, default=gen_uuid)
+    user_id = Column(String, nullable=False, index=True)
+    title = Column(String(256), nullable=False, default="")
+    body = Column(Text, default="")
+    level = Column(String(16), default="info")
+    link_path = Column(String(512), default="")
+    related_type = Column(String(64), default="")
+    related_id = Column(String(128), default="")
+    is_read = Column(Boolean, default=False, index=True)
+    read_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=now_utc)
+
+
 class DataQueryAgentStatus(str, enum.Enum):
     ACTIVE = "ACTIVE"
     INACTIVE = "INACTIVE"

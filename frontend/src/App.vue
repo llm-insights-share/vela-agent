@@ -21,6 +21,7 @@
           <template #title>Agent 管理</template>
           <a-menu-item key="/agents">Agent 列表</a-menu-item>
           <a-menu-item key="/agents/create">创建 Agent</a-menu-item>
+          <a-menu-item key="/schedules">定时任务</a-menu-item>
         </a-sub-menu>
         <a-sub-menu key="models">
           <template #icon><ApiOutlined /></template>
@@ -69,6 +70,35 @@
       <a-layout-header class="header">
         <span class="header-title">Agent Playground</span>
         <div class="header-user">
+          <a-popover
+            v-model:open="inboxOpen"
+            trigger="click"
+            placement="bottomRight"
+            overlay-class-name="inbox-popover"
+          >
+            <template #content>
+              <div class="inbox-panel">
+                <div class="inbox-panel-title">站内消息</div>
+                <a-spin :spinning="inboxLoading">
+                  <div v-if="!inboxItems.length" class="inbox-empty">暂无消息</div>
+                  <div
+                    v-for="msg in inboxItems"
+                    :key="msg.message_id"
+                    class="inbox-item"
+                    :class="{ unread: !msg.is_read }"
+                    @click="onInboxItemClick(msg)"
+                  >
+                    <div class="inbox-item-title">{{ msg.title }}</div>
+                    <div class="inbox-item-body">{{ msg.body }}</div>
+                    <div class="inbox-item-time">{{ formatInboxTime(msg.created_at) }}</div>
+                  </div>
+                </a-spin>
+              </div>
+            </template>
+            <a-badge :count="inboxUnread" :overflow-count="99" color="#b5341c">
+              <BellOutlined class="inbox-bell" />
+            </a-badge>
+          </a-popover>
           <a-dropdown>
             <a class="user-trigger" @click.prevent>
               <a-avatar :size="28" :src="auth.user?.avatar_url || undefined">
@@ -108,29 +138,103 @@ import {
   DesktopOutlined,
   TeamOutlined,
   UserOutlined,
+  BellOutlined,
 } from '@ant-design/icons-vue'
 import {
   startBackgroundSessionWatcher,
   stopBackgroundSessionWatcher,
 } from './composables/useBackgroundSessions'
 import { useAuthStore } from './stores/auth'
+import { inboxApi } from './api'
 
 const router = useRouter()
 const route = useRoute()
 const auth = useAuthStore()
 const collapsed = ref(false)
 const selectedKeys = ref(['/'])
+const inboxUnread = ref(0)
+const inboxItems = ref([])
+const inboxOpen = ref(false)
+const inboxLoading = ref(false)
+let inboxTimer = null
 
 const isAuthPage = computed(() => route.path === '/login' || route.path === '/register')
+
+async function fetchInboxUnread() {
+  try {
+    const res = await inboxApi.unreadCount()
+    inboxUnread.value = res.unread_count || 0
+  } catch (e) {
+    console.error('[inbox] unread-count failed:', e)
+  }
+}
+
+async function fetchInboxList() {
+  inboxLoading.value = true
+  try {
+    const res = await inboxApi.list({ limit: 20 })
+    inboxItems.value = res.items || []
+  } catch (e) {
+    console.error('[inbox] list failed:', e)
+  } finally {
+    inboxLoading.value = false
+  }
+}
+
+function startInboxWatcher() {
+  if (inboxTimer) return
+  fetchInboxUnread()
+  inboxTimer = setInterval(fetchInboxUnread, 8000)
+}
+
+function stopInboxWatcher() {
+  if (inboxTimer) {
+    clearInterval(inboxTimer)
+    inboxTimer = null
+  }
+}
+
+function formatInboxTime(t) {
+  if (!t) return ''
+  const s = String(t).trim().replace(' ', 'T')
+  const hasTz = /Z$/i.test(s) || /[+-]\d{2}:\d{2}$/.test(s)
+  const d = new Date(hasTz ? s : `${s}Z`)
+  if (Number.isNaN(d.getTime())) return String(t)
+  return d.toLocaleString('zh-CN', {
+    hour12: false,
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
+async function onInboxItemClick(msg) {
+  try {
+    if (!msg.is_read) {
+      await inboxApi.markRead(msg.message_id)
+      msg.is_read = true
+      inboxUnread.value = Math.max(0, inboxUnread.value - 1)
+    }
+    inboxOpen.value = false
+    if (msg.link_path) {
+      router.push(msg.link_path)
+    }
+  } catch (e) {
+    console.error('[inbox] mark-read failed:', e)
+  }
+}
 
 onMounted(() => {
   if (!isAuthPage.value) {
     startBackgroundSessionWatcher()
+    startInboxWatcher()
   }
 })
 
 onUnmounted(() => {
   stopBackgroundSessionWatcher()
+  stopInboxWatcher()
 })
 
 watch(
@@ -139,12 +243,20 @@ watch(
     selectedKeys.value = [path]
     if (path === '/login' || path === '/register') {
       stopBackgroundSessionWatcher()
+      stopInboxWatcher()
     } else {
       startBackgroundSessionWatcher()
+      startInboxWatcher()
     }
   },
   { immediate: true }
 )
+
+watch(inboxOpen, (open) => {
+  if (open) {
+    fetchInboxList()
+  }
+})
 
 function onMenuClick({ key }) {
   router.push(key)
@@ -200,6 +312,58 @@ function onUserMenuClick({ key }) {
 .header-user {
   display: flex;
   align-items: center;
+  gap: 16px;
+}
+.inbox-bell {
+  font-size: 18px;
+  color: rgba(255, 255, 255, 0.85);
+  cursor: pointer;
+  padding: 4px;
+}
+.inbox-panel {
+  width: 320px;
+  max-height: 420px;
+  overflow-y: auto;
+}
+.inbox-panel-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #1a1714;
+  margin-bottom: 8px;
+}
+.inbox-empty {
+  color: #8a8178;
+  font-size: 13px;
+  padding: 16px 0;
+  text-align: center;
+}
+.inbox-item {
+  padding: 8px 4px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.inbox-item:hover {
+  background: #f3f0e8;
+}
+.inbox-item.unread .inbox-item-title {
+  font-weight: 700;
+}
+.inbox-item-title {
+  font-size: 13px;
+  color: #1a1714;
+}
+.inbox-item-body {
+  font-size: 12px;
+  color: #5c564e;
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.inbox-item-time {
+  font-size: 11px;
+  color: #8a8178;
+  margin-top: 2px;
 }
 .user-trigger {
   display: inline-flex;

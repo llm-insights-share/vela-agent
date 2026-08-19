@@ -311,6 +311,52 @@ BUILTIN_KB_SEARCH_TOOL = BuiltinTool(
     },
 )
 
+BUILTIN_CREATE_SCHEDULE_TOOL = BuiltinTool(
+    name="create_schedule_task",
+    description=(
+        "创建平台定时任务并写入“定时任务”管理。"
+        "当用户提出提醒、定时查询、周期报告、稍后执行等需求时，必须调用此工具，不能只在回复中口头确认。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "任务名称，如：南京天气提醒",
+            },
+            "description": {
+                "type": "string",
+                "description": "任务说明（可选）",
+            },
+            "cron_expression": {
+                "type": "string",
+                "description": "标准5段cron表达式，如：*/10 * * * *",
+            },
+            "timezone": {
+                "type": "string",
+                "description": "时区，默认 Asia/Shanghai",
+            },
+            "prompt_template": {
+                "type": "string",
+                "description": "到点执行时发送给 Agent 的提示词模板",
+            },
+            "enabled": {
+                "type": "boolean",
+                "description": "是否启用，默认 true",
+            },
+            "skip_if_running": {
+                "type": "boolean",
+                "description": "上一轮未完成是否跳过本轮，默认 true",
+            },
+            "timeout_seconds": {
+                "type": "integer",
+                "description": "单次执行超时秒数（可选）",
+            },
+        },
+        "required": ["name", "cron_expression", "prompt_template"],
+    },
+)
+
 BUILTIN_TOOLS: List[BuiltinTool] = [
     BUILTIN_READ_TOOL,
     BUILTIN_WRITE_TOOL,
@@ -324,6 +370,7 @@ BUILTIN_TOOLS: List[BuiltinTool] = [
     BUILTIN_INSTALL_PACKAGES_TOOL,
     BUILTIN_LIST_WORKSPACE_TOOL,
     BUILTIN_KB_SEARCH_TOOL,
+    BUILTIN_CREATE_SCHEDULE_TOOL,
 ]
 
 

@@ -670,7 +670,7 @@ import {
   FileOutlined, CloseOutlined, LoadingOutlined, StopOutlined, PaperClipOutlined,
   CopyOutlined,
 } from '@ant-design/icons-vue'
-import { agentApi, sessionApi, hitlApi, skillApi } from '../../api'
+import { agentApi, sessionApi, hitlApi, skillApi, inboxApi } from '../../api'
 import { useAuthStore } from '../../stores/auth'
 import { message } from 'ant-design-vue'
 import { marked } from 'marked'
@@ -1279,6 +1279,11 @@ async function refreshCurrentSession() {
     }
 
     if (prevStatus === 'RUNNING' && s.status !== 'RUNNING') {
+      try {
+        await inboxApi.markSessionRead(sessionId.value)
+      } catch (e) {
+        console.error('[inbox] mark session read failed:', e)
+      }
       unwatchBackgroundSession(sessionId.value)
       await fetchSessions()
       stopSessionPoll()

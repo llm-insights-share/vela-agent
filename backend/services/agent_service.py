@@ -1797,6 +1797,13 @@ class AgentLoop:
 
         result: Dict[str, Any]
         if isinstance(tool, BuiltinTool):
+            if tool.name == "create_schedule_task":
+                try:
+                    result = await self._execute_create_schedule_task(args)
+                except Exception as e:
+                    result = {"success": False, "error": f"创建定时任务失败: {str(e)}"}
+                self._memory_record_tool(tool.name, args, result)
+                return result
             if tool.name == "execute_code":
                 code = (args or {}).get("code", "")
                 if self._would_block_code_retry(code):
@@ -1882,6 +1889,76 @@ class AgentLoop:
         fail_result = {"success": False, "error": last_error or "工具执行失败"}
         self._memory_record_tool(tool.name, args, fail_result)
         return fail_result
+
+    async def _execute_create_schedule_task(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        from datetime import datetime, timezone
+        from zoneinfo import ZoneInfo
+        from croniter import croniter
+        from models import AgentSchedule
+
+        payload = dict(args or {})
+        name = (payload.get("name") or "").strip()
+        cron_expression = (payload.get("cron_expression") or "").strip()
+        prompt_template = (payload.get("prompt_template") or "").strip()
+        timezone_name = (payload.get("timezone") or "Asia/Shanghai").strip()
+        description = (payload.get("description") or "").strip()
+        enabled = bool(payload.get("enabled", True))
+        skip_if_running = bool(payload.get("skip_if_running", True))
+        timeout_seconds = payload.get("timeout_seconds")
+
+        if not name:
+            return {"success": False, "error": "name 不能为空"}
+        if not cron_expression:
+            return {"success": False, "error": "cron_expression 不能为空"}
+        if not prompt_template:
+            return {"success": False, "error": "prompt_template 不能为空"}
+
+        try:
+            tz = ZoneInfo(timezone_name)
+        except Exception:
+            return {"success": False, "error": f"无效时区: {timezone_name}"}
+
+        try:
+            next_run = croniter(cron_expression, datetime.now(tz)).get_next(datetime)
+        except Exception as e:
+            return {"success": False, "error": f"无效 cron 表达式: {str(e)}"}
+
+        exists = (
+            self.db.query(AgentSchedule)
+            .filter(AgentSchedule.name == name)
+            .first()
+        )
+        if exists:
+            return {"success": False, "error": f"任务名已存在: {name}"}
+
+        schedule = AgentSchedule(
+            schedule_id=gen_uuid(),
+            name=name,
+            description=description,
+            agent_id=self.agent.agent_id,
+            enabled=enabled,
+            cron_expression=cron_expression,
+            timezone=timezone_name,
+            prompt_template=prompt_template,
+            skip_if_running=skip_if_running,
+            timeout_seconds=int(timeout_seconds) if timeout_seconds else None,
+            created_by=self.session.caller_id or "",
+            next_run_at=next_run.astimezone(timezone.utc),
+        )
+        self.db.add(schedule)
+        self.db.commit()
+        self.db.refresh(schedule)
+        return {
+            "success": True,
+            "result": {
+                "schedule_id": schedule.schedule_id,
+                "name": schedule.name,
+                "cron_expression": schedule.cron_expression,
+                "timezone": schedule.timezone,
+                "next_run_at": schedule.next_run_at.isoformat() if schedule.next_run_at else "",
+                "agent_id": schedule.agent_id,
+            },
+        }
 
     def _memory_record_tool(self, tool_name: str, args: Dict[str, Any], result: Dict[str, Any]):
         if not self.memory_enabled:

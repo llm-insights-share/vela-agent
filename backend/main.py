@@ -1,9 +1,17 @@
+import os
+
+# Must be set before PyTorch/OpenMP (sentence-transformers) initializes.
+# Otherwise asyncio subprocess fork deadlocks the API event loop.
+os.environ.setdefault("KMP_INIT_AT_FORK", "FALSE")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
 from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi import HTTPException
-import os
 from database import init_db, SessionLocal
 from deps import get_current_user
 from auth_config import ADMIN_PASSWORD, ADMIN_USERNAME, AVATAR_DIR
@@ -30,6 +38,8 @@ from routes.auth import router as auth_router
 from routes.users import router as users_router
 from routes.llm_gateway import router as llm_gateway_router
 from routes.code_exec import router as code_exec_router
+from routes.schedules import router as schedules_router
+from routes.inbox import router as inbox_router
 
 app = FastAPI(
     title="Vela Agent Playground API",
@@ -68,6 +78,8 @@ app.include_router(memory_router, dependencies=_auth_deps)
 app.include_router(screenpilot_router, dependencies=_auth_deps)
 app.include_router(query_rewrite_router, dependencies=_auth_deps)
 app.include_router(code_exec_router, dependencies=_auth_deps)
+app.include_router(schedules_router, dependencies=_auth_deps)
+app.include_router(inbox_router, dependencies=_auth_deps)
 
 AVATAR_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/avatars", StaticFiles(directory=str(AVATAR_DIR)), name="avatars")
@@ -134,6 +146,8 @@ def _recover_stale_running_sessions():
             session.pending_context = pending
         if running_sessions:
             db.commit()
+        from services.schedule.runner import recover_stale_schedule_runs
+        recover_stale_schedule_runs(db)
     finally:
         db.close()
 
@@ -144,7 +158,10 @@ async def on_startup():
     seed_admin()
     _recover_stale_running_sessions()
     from services.workflow_cron_scheduler import cron_scheduler
+    from services.schedule.scheduler import schedule_scheduler
+
     cron_scheduler.start()
+    schedule_scheduler.start()
     from models import ModelProvider, ProviderStatus, gen_uuid
     db = SessionLocal()
     try:
@@ -192,8 +209,10 @@ async def on_shutdown():
         print(f"[shutdown] ScreenPilot MCP pool: {e}")
     try:
         from services.workflow_cron_scheduler import cron_scheduler
+        from services.schedule.scheduler import schedule_scheduler
 
         cron_scheduler.stop()
+        schedule_scheduler.stop()
     except Exception:
         pass
 

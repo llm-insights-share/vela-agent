@@ -56,6 +56,16 @@ const routes = [
     component: () => import('../views/agents/AgentWorkflow.vue'),
   },
   {
+    path: '/schedules',
+    name: 'ScheduleList',
+    component: () => import('../views/schedules/ScheduleList.vue'),
+  },
+  {
+    path: '/schedules/:id',
+    name: 'ScheduleDetail',
+    component: () => import('../views/schedules/ScheduleDetail.vue'),
+  },
+  {
     path: '/providers',
     name: 'ProviderList',
     component: () => import('../views/services/ProviderList.vue'),

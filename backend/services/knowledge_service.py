@@ -42,6 +42,9 @@ class SentenceTransformerEmbedding:
         os.environ.setdefault("HF_HUB_OFFLINE", "1")
         os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
+        os.environ.setdefault("KMP_INIT_AT_FORK", "FALSE")
+        os.environ.setdefault("OMP_NUM_THREADS", "1")
+        os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
         from sentence_transformers import SentenceTransformer
         if model_name:
             self._model = SentenceTransformer(model_name)

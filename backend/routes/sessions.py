@@ -61,7 +61,17 @@ def _run_session_chat_background(session_id: str, request_data: Dict[str, Any]):
                 persist_user_message=False,
             )
             db.refresh(session)
+            pending = dict(session.pending_context or {})
+            job_key = str((pending.get("background_job") or {}).get("started_at") or "")
             agent_service.finalize_background_chat(db, session, result)
+            db.refresh(session)
+            from services.inbox import notify_async_session
+            notify_async_session(
+                db,
+                session,
+                job_key=job_key,
+                aborted=bool(result.get("aborted")),
+            )
         except Exception as e:
             traceback.print_exc()
             try:
@@ -78,12 +88,15 @@ def _run_session_chat_background(session_id: str, request_data: Dict[str, Any]):
                     flag_modified(session, "messages")
                     session.status = SessionStatus.ERROR
                     pending = dict(session.pending_context or {})
-                    job = pending.get("background_job", {})
+                    job = dict(pending.get("background_job") or {})
+                    job_key = str(job.get("started_at") or "")
                     job["error"] = str(e)
                     pending["background_job"] = job
                     session.pending_context = pending
                     session.last_active_at = now_utc()
                     db.commit()
+                    from services.inbox import notify_async_session
+                    notify_async_session(db, session, job_key=job_key)
             except Exception:
                 traceback.print_exc()
         finally:

@@ -34,6 +34,7 @@ def get_db():
 def init_db():
     from models import (
         Agent, AgentVersion, ModelProvider, ModelService, SkillPack, KnowledgeBase,
+        AgentSchedule, AgentScheduleRun, InboxMessage,
         DataQueryAgent, DataQueryDatasourceBinding, DataQueryExecutionLog,
         DataTableDictionary, DataDictionaryItem, DataCodeMapping, DataQueryExample, DataTermMapping,
         DataQueryFeedback, DataQueryQualityStats,

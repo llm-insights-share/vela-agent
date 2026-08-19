@@ -56,6 +56,16 @@
             <a-tag v-for="t in agent.tags || []" :key="t">{{ t }}</a-tag>
             <span v-if="!agent.tags?.length" style="color: #9e9590">无</span>
           </a-card>
+          <a-card title="定时任务" style="margin-bottom: 16px">
+            <a-space direction="vertical" style="width: 100%">
+              <a-button size="small" @click="$router.push(`/schedules`)">前往任务列表</a-button>
+              <a-empty v-if="!schedules.length" description="暂无定时任务" />
+              <a-space v-for="item in schedules" :key="item.schedule_id" style="display:flex; justify-content:space-between;">
+                <a @click="$router.push(`/schedules/${item.schedule_id}`)">{{ item.name }}</a>
+                <a-tag :color="item.enabled ? 'green' : 'default'">{{ item.enabled ? '启用' : '停用' }}</a-tag>
+              </a-space>
+            </a-space>
+          </a-card>
         </a-col>
       </a-row>
 
@@ -97,7 +107,7 @@
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
-import { agentApi } from '../../api'
+import { agentApi, scheduleApi } from '../../api'
 import { message } from 'ant-design-vue'
 
 const route = useRoute()
@@ -105,6 +115,7 @@ const agentId = route.params.id
 const loading = ref(false)
 const agent = reactive({})
 const versions = ref([])
+const schedules = ref([])
 const validateOpen = ref(false)
 const validateResult = ref(null)
 
@@ -128,12 +139,14 @@ function statusLabel(s) {
 async function fetchAgent() {
   loading.value = true
   try {
-    const [a, v] = await Promise.all([
+    const [a, v, s] = await Promise.all([
       agentApi.get(agentId),
       agentApi.versions(agentId),
+      scheduleApi.list({ agent_id: agentId, page_size: 20 }),
     ])
     Object.assign(agent, a)
     versions.value = v
+    schedules.value = s.items || []
   } catch (e) {
     message.error(e.message)
   } finally {

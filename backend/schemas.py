@@ -495,6 +495,107 @@ class SessionResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class ScheduleCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=128)
+    description: str = Field(default="", max_length=2048)
+    agent_id: str
+    enabled: bool = True
+    cron_expression: str = Field(..., min_length=5, max_length=64)
+    timezone: str = Field(default="Asia/Shanghai", min_length=1, max_length=64)
+    prompt_template: str = Field(default="", max_length=32000)
+    skip_if_running: bool = True
+    timeout_seconds: Optional[int] = Field(default=None, ge=5, le=3600)
+
+
+class ScheduleUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=128)
+    description: Optional[str] = Field(default=None, max_length=2048)
+    agent_id: Optional[str] = None
+    enabled: Optional[bool] = None
+    cron_expression: Optional[str] = Field(default=None, min_length=5, max_length=64)
+    timezone: Optional[str] = Field(default=None, min_length=1, max_length=64)
+    prompt_template: Optional[str] = Field(default=None, max_length=32000)
+    skip_if_running: Optional[bool] = None
+    timeout_seconds: Optional[int] = Field(default=None, ge=5, le=3600)
+
+
+class ScheduleResponse(BaseModel):
+    schedule_id: str
+    name: str
+    description: str = ""
+    agent_id: str
+    agent_name: str = ""
+    enabled: bool = True
+    cron_expression: str
+    timezone: str = "Asia/Shanghai"
+    prompt_template: str = ""
+    skip_if_running: bool = True
+    timeout_seconds: Optional[int] = None
+    created_by: str = ""
+    last_fired_at: Optional[datetime] = None
+    next_run_at: Optional[datetime] = None
+    last_status: str = ""
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+    @field_validator("last_status", "created_by", "description", "prompt_template", mode="before")
+    @classmethod
+    def _none_to_empty_str(cls, v):
+        return "" if v is None else v
+
+
+class ScheduleRunResponse(BaseModel):
+    run_id: str
+    schedule_id: str
+    session_id: Optional[str] = None
+    trigger_type: str
+    status: str
+    scheduled_for: Optional[datetime] = None
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    prompt_rendered: str = ""
+    error_message: str = ""
+    token_used: int = 0
+    summary: str = ""
+    created_at: Optional[datetime] = None
+    agent_id: str = ""
+    agent_name: str = ""
+
+    model_config = {"from_attributes": True}
+
+
+class InboxMessageResponse(BaseModel):
+    message_id: str
+    user_id: str
+    title: str
+    body: str = ""
+    level: str = "info"
+    link_path: str = ""
+    related_type: str = ""
+    related_id: str = ""
+    is_read: bool = False
+    read_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+class InboxUnreadCountResponse(BaseModel):
+    unread_count: int = 0
+
+
+class ScheduleCronPreviewRequest(BaseModel):
+    cron_expression: str = Field(..., min_length=5, max_length=64)
+    timezone: str = Field(default="Asia/Shanghai", min_length=1, max_length=64)
+    count: int = Field(default=5, ge=1, le=20)
+
+
+class ScheduleCronPreviewResponse(BaseModel):
+    next_runs: List[str] = Field(default_factory=list)
+
+
 class LlmCallLogItem(BaseModel):
     call_id: str
     seq: int

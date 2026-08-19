@@ -65,6 +65,9 @@ def approve_action(
     # WF-IMP-08: 工作流 HITL 审批
     if approval.tool_name == "__workflow_hitl__":
         result_data = _resume_workflow_after_hitl(db, session, approval, approved=True)
+        if session and (session.caller_type or "").upper() == "SCHEDULE":
+            from services.schedule.runner import sync_schedule_run_from_session
+            sync_schedule_run_from_session(db, session.session_id)
         db.commit()
         return result_data
 
@@ -83,6 +86,9 @@ def approve_action(
             session.pending_context = {}
         result_data["final_result"] = final_result
         result_data["kind"] = "delivery"
+        if session and (session.caller_type or "").upper() == "SCHEDULE":
+            from services.schedule.runner import sync_schedule_run_from_session
+            sync_schedule_run_from_session(db, session.session_id)
         db.commit()
         return result_data
 
@@ -109,6 +115,9 @@ def approve_action(
             session.messages = messages
             session.pending_context = {}
         db.commit()
+        if session and (session.caller_type or "").upper() == "SCHEDULE":
+            from services.schedule.runner import sync_schedule_run_from_session
+            sync_schedule_run_from_session(db, session.session_id)
         return {
             "success": True,
             "message": "验证码已提交",
@@ -134,6 +143,9 @@ def approve_action(
                 result_data = _resume_workflow_after_hitl(db, session, approval, approved=True)
                 result_data["tool_result"] = tool_result_str
                 result_data["kind"] = "workflow"
+                if session and (session.caller_type or "").upper() == "SCHEDULE":
+                    from services.schedule.runner import sync_schedule_run_from_session
+                    sync_schedule_run_from_session(db, session.session_id)
                 db.commit()
                 return result_data
 
@@ -147,6 +159,9 @@ def approve_action(
             session.messages = messages
             session.pending_context = {}
         db.commit()
+        if session and (session.caller_type or "").upper() == "SCHEDULE":
+            from services.schedule.runner import sync_schedule_run_from_session
+            sync_schedule_run_from_session(db, session.session_id)
         return {
             "success": True,
             "message": "已批准",
@@ -170,6 +185,9 @@ def approve_action(
         session.pending_context = {}
 
     db.commit()
+    if session and (session.caller_type or "").upper() == "SCHEDULE":
+        from services.schedule.runner import sync_schedule_run_from_session
+        sync_schedule_run_from_session(db, session.session_id)
     result_data["kind"] = "tool_call"
     return result_data
 
@@ -225,6 +243,9 @@ def reject_action(
         session.pending_context = {}
 
     db.commit()
+    if session and (session.caller_type or "").upper() == "SCHEDULE":
+        from services.schedule.runner import sync_schedule_run_from_session
+        sync_schedule_run_from_session(db, session.session_id)
     return {
         "success": True,
         "message": "已拒绝",

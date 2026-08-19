@@ -252,6 +252,27 @@ export const workflowApi = {
   triggerCron: (agentId) => api.post(`/agents/${agentId}/workflow/cron/trigger`),
 }
 
+export const scheduleApi = {
+  list: (params) => api.get('/schedules', { params }),
+  create: (data) => api.post('/schedules', data),
+  get: (id) => api.get(`/schedules/${id}`),
+  update: (id, data) => api.put(`/schedules/${id}`, data),
+  delete: (id) => api.delete(`/schedules/${id}`),
+  enable: (id) => api.post(`/schedules/${id}/enable`),
+  disable: (id) => api.post(`/schedules/${id}/disable`),
+  trigger: (id) => api.post(`/schedules/${id}/trigger`),
+  listRuns: (id, params) => api.get(`/schedules/${id}/runs`, { params }),
+  previewCron: (data) => api.post('/schedules/preview-cron', data),
+  listRecentRuns: (params) => api.get('/schedules/runs/recent', { params }),
+}
+
+export const inboxApi = {
+  list: (params) => api.get('/inbox/messages', { params }),
+  unreadCount: () => api.get('/inbox/unread-count'),
+  markRead: (id) => api.post(`/inbox/messages/${id}/read`),
+  markSessionRead: (sessionId) => api.post(`/inbox/sessions/${sessionId}/read`),
+}
+
 export const dataQueryApi = {
   listAgents: (params) => api.get('/dataquery-agents', { params }),
   createAgent: (data) => api.post('/dataquery-agents', data),

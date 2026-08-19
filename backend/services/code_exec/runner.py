@@ -132,16 +132,18 @@ async def _run_subprocess(
     env: Dict[str, str],
     timeout: int,
     max_output_bytes: int,
-    preexec_fn=None,
+    preexec_fn=None,  # kept for callers; ignored (fork+OpenMP deadlock)
 ) -> Dict[str, Any]:
     start = time.monotonic()
+    _ = preexec_fn
+    # Do not pass preexec_fn: it forces fork() and can deadlock the uvloop
+    # in OpenMP/PyTorch atfork after sentence-transformers is loaded.
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd,
         env=env,
-        preexec_fn=preexec_fn,
         start_new_session=True,
     )
 

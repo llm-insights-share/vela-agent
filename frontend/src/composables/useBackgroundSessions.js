@@ -1,6 +1,6 @@
 import { notification } from 'ant-design-vue'
 import router from '../router'
-import { sessionApi } from '../api'
+import { inboxApi, sessionApi } from '../api'
 
 const STORAGE_KEY = 'vela_watched_sessions'
 const POLL_INTERVAL_MS = 3000
@@ -89,7 +89,13 @@ async function pollWatchedSessions() {
       const session = await sessionApi.get(watched.sessionId)
       if (session.status === 'RUNNING') continue
 
-      if (!isUserViewingSession(watched.sessionId, watched.agentId)) {
+      if (isUserViewingSession(watched.sessionId, watched.agentId)) {
+        try {
+          await inboxApi.markSessionRead(watched.sessionId)
+        } catch (e) {
+          console.error('[backgroundSessions] mark session inbox read failed:', e)
+        }
+      } else {
         showCompletionNotification(watched, session)
       }
       unwatchBackgroundSession(watched.sessionId)

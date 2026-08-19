@@ -9,13 +9,24 @@ LETTA_PORT="${LETTA_PORT:-8283}"
 
 export SCREENPILOT_ENABLED=true
 export SCREENPILOT_HEADLESS=true   # 无头
+export KMP_INIT_AT_FORK=FALSE
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export TOKENIZERS_PARALLELISM=false
 
 echo "=== 启动所有服务 ==="
 
 # Start backend first (Letta LLM/embedding gateway depends on :8000)
 echo "启动后端服务 (端口 8000)..."
 cd "$BACKEND_DIR"
-nohup uvicorn main:app --host 0.0.0.0 --port 8000 --reload > "$PROJECT_DIR/backend.log" 2>&1 &
+# Exclude data/ (code-exec writes *.py) and letta/ (venv) so --reload
+# cannot freeze the API by restarting mid-request.
+nohup uvicorn main:app --host 0.0.0.0 --port 8000 --reload \
+  --reload-exclude "$BACKEND_DIR/data" \
+  --reload-exclude "$BACKEND_DIR/letta" \
+  --reload-exclude data \
+  --reload-exclude letta \
+  > "$PROJECT_DIR/backend.log" 2>&1 &
 echo "后端服务已启动 (PID: $!), 日志: $PROJECT_DIR/backend.log"
 
 # Wait briefly for backend so Letta can reach /llm-gateway
