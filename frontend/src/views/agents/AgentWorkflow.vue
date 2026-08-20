@@ -174,9 +174,11 @@
         <template v-if="selectedNode.type === 'tool'">
           <a-form-item label="工具">
             <a-select v-model:value="selectedNode.data.tool_id" placeholder="选择工具">
-              <a-select-option v-for="t in toolList" :key="t.tool_id" :value="t.tool_id">
-                {{ t.display_name || t.name }}
-              </a-select-option>
+              <a-select-opt-group v-for="group in groupedTools" :key="group.label" :label="group.label">
+                <a-select-option v-for="t in group.items" :key="t.tool_id" :value="t.tool_id">
+                  {{ t.display_name || t.name }} ({{ t.tool_type }})
+                </a-select-option>
+              </a-select-opt-group>
             </a-select>
           </a-form-item>
           <a-form-item label="参数 (JSON)">
@@ -322,6 +324,23 @@ const drawerVisible = ref(false)
 const selectedNode = ref(null)
 const modelServices = ref([])
 const toolList = ref([])
+const groupedTools = computed(() => {
+  const groups = new Map()
+  const others = []
+  for (const t of toolList.value) {
+    if (t.tool_type === 'mcp' && t.mcp_server_name) {
+      const label = `MCP · ${t.mcp_server_name}`
+      if (!groups.has(label)) groups.set(label, [])
+      groups.get(label).push(t)
+    } else {
+      others.push(t)
+    }
+  }
+  const result = []
+  for (const [label, items] of groups) result.push({ label, items })
+  if (others.length) result.push({ label: groups.size ? '其他工具' : '全部工具', items: others })
+  return result
+})
 const candidates = ref([])
 const screenSystems = ref([])
 const uiSkills = ref([])

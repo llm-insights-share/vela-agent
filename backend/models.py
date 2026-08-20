@@ -151,6 +151,8 @@ class Agent(Base):
     max_iterations = Column(Integer, default=10)
     # SGL-CFG-03: 单步超时时间（秒）
     step_timeout_seconds = Column(Integer, default=60)
+    # SGL-CFG-08: 整体对话超时（秒）
+    timeout_seconds = Column(Integer, default=180)
     # SGL-CFG-04: 工具失败重试次数
     tool_retry_count = Column(Integer, default=2)
     # SGL-CFG-04: 退避策略 fixed/exponential
@@ -286,8 +288,71 @@ class Tool(Base):
     config = Column(JSON, default=dict)
     parameters_schema = Column(JSON, default=dict)
     status = Column(SAEnum(ToolStatus), default=ToolStatus.ACTIVE)
+    mcp_server_id = Column(String, ForeignKey("mcp_servers.server_id"), nullable=True, index=True)
     created_at = Column(DateTime, default=now_utc)
     updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)
+
+    mcp_server = relationship("McpServer", back_populates="tools")
+
+
+class McpServer(Base):
+    __tablename__ = "mcp_servers"
+
+    server_id = Column(String, primary_key=True, default=gen_uuid)
+    name = Column(String(128), unique=True, nullable=False, index=True)
+    display_name = Column(String(256), default="")
+    description = Column(Text, default="")
+    transport = Column(String(32), nullable=False, default="stdio")
+    command = Column(String(256), default="")
+    args = Column(JSON, default=list)
+    env = Column(JSON, default=dict)
+    url = Column(String(1024), default="")
+    headers = Column(JSON, default=dict)
+    auth_type = Column(String(16), default="none")
+    status = Column(String(16), default="ACTIVE")
+    last_synced_at = Column(DateTime, nullable=True)
+    last_error = Column(Text, default="")
+    created_at = Column(DateTime, default=now_utc)
+    updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)
+
+    tools = relationship("Tool", back_populates="mcp_server")
+    oauth_credential = relationship("McpOAuthCredential", back_populates="server", uselist=False, cascade="all, delete-orphan")
+
+
+class McpOAuthCredential(Base):
+    __tablename__ = "mcp_oauth_credentials"
+
+    credential_id = Column(String, primary_key=True, default=gen_uuid)
+    server_id = Column(String, ForeignKey("mcp_servers.server_id"), nullable=False, unique=True, index=True)
+    client_id = Column(String(256), default="")
+    client_secret_enc = Column(Text, default="")
+    authorization_endpoint = Column(String(1024), default="")
+    token_endpoint = Column(String(1024), default="")
+    registration_endpoint = Column(String(1024), default="")
+    resource = Column(String(1024), default="")
+    redirect_uri = Column(String(1024), default="")
+    access_token_enc = Column(Text, default="")
+    refresh_token_enc = Column(Text, default="")
+    token_type = Column(String(32), default="Bearer")
+    scope = Column(String(512), default="")
+    expires_at = Column(DateTime, nullable=True)
+    as_metadata_json = Column(Text, default="")
+    created_at = Column(DateTime, default=now_utc)
+    updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)
+
+    server = relationship("McpServer", back_populates="oauth_credential")
+
+
+class McpOAuthState(Base):
+    __tablename__ = "mcp_oauth_states"
+
+    state = Column(String(128), primary_key=True)
+    server_id = Column(String, ForeignKey("mcp_servers.server_id"), nullable=False, index=True)
+    code_verifier = Column(String(256), default="")
+    redirect_uri = Column(String(1024), default="")
+    frontend_redirect = Column(String(1024), default="")
+    created_at = Column(DateTime, default=now_utc)
+    expires_at = Column(DateTime, nullable=False)
 
 
 class AgentToolBinding(Base):
@@ -466,6 +531,7 @@ class DataQueryDatasourceBinding(Base):
     db_type = Column(String(32), default="sqlite")
     db_url = Column(String(1024), default="")
     schema_name = Column(String(128), default="")
+    business_scope = Column(Text, default="")
     table_whitelist = Column(JSON, default=list)
     sensitive_columns = Column(JSON, default=list)
     default_limit = Column(Integer, default=200)

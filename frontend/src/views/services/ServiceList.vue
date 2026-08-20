@@ -14,14 +14,21 @@
           style="width: 200px"
           placeholder="全部供应商"
           allow-clear
-          @change="fetchServices"
+          @change="onFilterChange"
         >
           <a-select-option v-for="p in providers" :key="p.provider_id" :value="p.provider_id">
             {{ p.display_name }}
           </a-select-option>
         </a-select>
       </div>
-      <a-table :columns="columns" :data-source="services" :loading="loading" row-key="model_service_id" :pagination="false">
+      <a-table
+        :columns="columns"
+        :data-source="services"
+        :loading="loading"
+        row-key="model_service_id"
+        :pagination="pagination"
+        @change="onTableChange"
+      >
         <template #bodyCell="{ column, record }">
           <template v-if="column.key === 'status'">
             <a-tag :color="record.status === 'ACTIVE' ? 'green' : 'red'">{{ record.status }}</a-tag>
@@ -75,6 +82,7 @@ const filterProviderId = ref('')
 const modalOpen = ref(false)
 const editing = ref(null)
 const saving = ref(false)
+const pagination = reactive({ current: 1, pageSize: 20, total: 0, showSizeChanger: false })
 
 const columns = [
   { title: '供应商', dataIndex: 'provider_code', width: 120 },
@@ -97,17 +105,32 @@ const form = reactive({
 async function fetchServices() {
   loading.value = true
   try {
-    const params = { page_size: 100 }
+    const params = {
+      page: pagination.current,
+      page_size: pagination.pageSize,
+    }
     if (filterProviderId.value) {
       params.provider_id = filterProviderId.value
     }
     const res = await serviceApi.list(params)
-    services.value = res.items
+    services.value = res.items || []
+    pagination.total = res.total || 0
   } catch (e) {
     message.error(e.message)
   } finally {
     loading.value = false
   }
+}
+
+function onTableChange(pag) {
+  pagination.current = pag.current
+  pagination.pageSize = pag.pageSize
+  fetchServices()
+}
+
+function onFilterChange() {
+  pagination.current = 1
+  fetchServices()
 }
 
 onMounted(async () => {

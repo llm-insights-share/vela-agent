@@ -13,9 +13,10 @@
           <a-list :data-source="agents" size="small" bordered>
             <template #renderItem="{ item }">
               <a-list-item :class="{ active: item.dq_agent_id === currentAgentId }" @click="selectAgent(item)">
-                <div style="width:100%">
+                <div class="dq-agent-row">
                   <div><strong>{{ item.name }}</strong></div>
                   <div class="meta-line">{{ item.status }} · {{ item.model_service_id }}</div>
+                  <a class="dq-chat-test-link" @click.stop="openChatTest(item)">对话测试</a>
                 </div>
               </a-list-item>
             </template>
@@ -84,6 +85,11 @@
                 <a-table-column title="表白名单(逗号)" key="table_whitelist">
                   <template #default="{ record }"><a-input :value="(record.table_whitelist||[]).join(',')" @change="onWhitelistChange(record, $event.target.value)" /></template>
                 </a-table-column>
+                <a-table-column title="数据业务范围" key="business_scope" width="180">
+                  <template #default="{ record }">
+                    <a-input v-model:value="record.business_scope" placeholder="如：沪市行情、订单明细" :maxlength="200" />
+                  </template>
+                </a-table-column>
                 <a-table-column title="操作" key="action" width="80">
                   <template #default="{ index }"><a-button danger size="small" @click="removeDatasource(index)">删</a-button></template>
                 </a-table-column>
@@ -92,7 +98,7 @@
                 <a-button type="primary" :disabled="!currentAgentId" @click="saveDatasourceBindings">保存数据源绑定</a-button>
               </div>
               <a-card size="small" style="margin-top:12px">
-                <template #title>nl2sql_query 按普通工具方式接入</template>
+                <template #title>按 DataQueryAgent 生成 NL2SQL 工具</template>
                 <template #extra>
                   <a-button
                     type="primary"
@@ -107,7 +113,7 @@
                 <a-alert
                   type="info"
                   show-icon
-                  description="在工具管理中创建/更新工具：name=nl2sql_query，tool_type=restful(或mcp/local_python)，并在 config 中设置 adapter=dataquery_agent 与 dq_agent_id。"
+                  description="为当前 Agent 生成独立工具（name=nl2sql_<agent>），config 中写入 adapter=dataquery_agent 与 dq_agent_id，描述含各数据源及绑定表中的「数据业务范围」（100字内）。"
                 />
               </a-card>
             </a-tab-pane>
@@ -228,6 +234,9 @@
               </a-card>
               <a-card size="small" title="最近查询日志">
                 <a-table :data-source="queryLogs" rowKey="log_id" size="small" :pagination="monitorPagination">
+                  <a-table-column title="操作时间" key="created_at" width="180">
+                    <template #default="{ record }">{{ formatLogTime(record.created_at) }}</template>
+                  </a-table-column>
                   <a-table-column title="状态" dataIndex="execution_status" />
                   <a-table-column title="问题" dataIndex="question" ellipsis />
                   <a-table-column title="耗时ms" dataIndex="duration_ms" />
@@ -355,6 +364,32 @@
         <a-form-item label="启用"><a-switch v-model:checked="termForm.enabled" /></a-form-item>
       </a-form>
     </a-modal>
+
+    <a-modal
+      v-model:open="chatTestOpen"
+      :title="`对话测试 · ${chatTestAgent?.name || ''}`"
+      :footer="null"
+      width="720px"
+      destroyOnClose
+      @cancel="closeChatTest"
+    >
+      <div class="dq-chat-log">
+        <div v-if="!chatTestMessages.length" class="dq-chat-empty">用自然语言提问，将调用当前 DataQueryAgent 执行 NL2SQL。</div>
+        <div v-for="(m, i) in chatTestMessages" :key="i" :class="['dq-chat-msg', m.role]">
+          <div class="dq-chat-role">{{ m.role === 'user' ? '你' : 'DataQuery' }}</div>
+          <pre class="dq-chat-body">{{ m.text }}</pre>
+        </div>
+      </div>
+      <div class="dq-chat-composer">
+        <a-textarea
+          v-model:value="chatTestInput"
+          :rows="2"
+          placeholder="例如：最近一个月订单数量是多少？"
+          @pressEnter="onChatTestEnter"
+        />
+        <a-button type="primary" :loading="chatTestSending" @click="sendChatTest">发送</a-button>
+      </div>
+    </a-modal>
   </div>
 </template>
 
@@ -381,6 +416,12 @@ const qualityStats = ref([])
 const monitorPagination = { pageSize: 20, showSizeChanger: false }
 const modelServices = ref([])
 const generatingTool = ref(false)
+const chatTestOpen = ref(false)
+const chatTestAgent = ref(null)
+const chatTestInput = ref('')
+const chatTestSending = ref(false)
+const chatTestMessages = ref([])
+const chatTestSessionId = ref('')
 
 const tableAnnotateModalOpen = ref(false)
 const tableAnnotateForm = ref({
@@ -587,6 +628,7 @@ function addDatasource() {
     default_limit: 200,
     timeout_seconds: 30,
     status: 'ACTIVE',
+    business_scope: '',
   })
 }
 
@@ -1025,6 +1067,100 @@ function deleteTerm(item) {
   })
 }
 
+function formatLogTime(v) {
+  if (!v) return '-'
+  const d = new Date(v)
+  if (Number.isNaN(d.getTime())) return String(v)
+  return d.toLocaleString()
+}
+
+function toolDqAgentId(tool) {
+  return (tool && tool.config && tool.config.dq_agent_id) || ''
+}
+
+function slugNl2sqlToolName(agentName, dqAgentId, usedNames) {
+  const raw = String(agentName || '')
+    .replace(/[^a-zA-Z0-9_]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 40)
+  let base = `nl2sql_${raw || String(dqAgentId || '').slice(0, 8)}`
+  if (!usedNames.has(base)) return base.slice(0, 128)
+  return `nl2sql_${raw || 'agent'}_${String(dqAgentId || '').slice(0, 8)}`.replace(/__+/g, '_').slice(0, 128)
+}
+
+function truncateChars(text, max) {
+  const s = String(text || '')
+  if (s.length <= max) return s
+  return `${s.slice(0, Math.max(0, max - 1))}…`
+}
+
+function buildNl2sqlDescription(agentName, dsList) {
+  const scopes = (dsList || []).map((d) => {
+    const n = d.datasource_name || d.datasource_id || '未命名'
+    const type = d.db_type ? `(${d.db_type})` : ''
+    const scope = String(d.business_scope || '').trim() || '未填写业务范围'
+    return `${n}${type}:${scope}`
+  })
+  const dsText = scopes.length ? scopes.join('；') : '未绑定数据源'
+  return truncateChars(`NL2SQL查询（Agent:${agentName}；${dsText}）`, 100)
+}
+
+function onChatTestEnter(e) {
+  if (e.shiftKey) return
+  e.preventDefault()
+  sendChatTest()
+}
+
+function formatChatResult(res) {
+  if (!res) return '无返回'
+  if (res.success === false) return `失败: ${res.error || res.detail || JSON.stringify(res)}`
+  const sql = res.generated_sql || ''
+  const count = res.row_count ?? (Array.isArray(res.rows) ? res.rows.length : 0)
+  const preview = Array.isArray(res.rows) ? JSON.stringify(res.rows.slice(0, 5), null, 2) : ''
+  const parts = [
+    sql ? `SQL:\n${sql}` : '',
+    `行数: ${count}${res.duration_ms != null ? ` · ${res.duration_ms}ms` : ''}`,
+    preview ? `结果预览:\n${preview}` : '',
+  ].filter(Boolean)
+  return parts.join('\n\n') || JSON.stringify(res, null, 2)
+}
+
+function openChatTest(item) {
+  chatTestAgent.value = item
+  chatTestInput.value = ''
+  chatTestMessages.value = []
+  chatTestSessionId.value = (typeof crypto !== 'undefined' && crypto.randomUUID)
+    ? crypto.randomUUID()
+    : `dqtest_${Date.now()}`
+  chatTestOpen.value = true
+}
+
+function closeChatTest() {
+  chatTestOpen.value = false
+}
+
+async function sendChatTest() {
+  const question = (chatTestInput.value || '').trim()
+  if (!question || !chatTestAgent.value) return
+  chatTestMessages.value = [...chatTestMessages.value, { role: 'user', text: question }]
+  chatTestInput.value = ''
+  chatTestSending.value = true
+  try {
+    const res = await dataQueryApi.testQuery(chatTestAgent.value.dq_agent_id, {
+      question,
+      session_id: chatTestSessionId.value,
+    })
+    chatTestMessages.value = [...chatTestMessages.value, { role: 'assistant', text: formatChatResult(res) }]
+    if (chatTestAgent.value.dq_agent_id === currentAgentId.value) {
+      await loadLogs()
+    }
+  } catch (e) {
+    chatTestMessages.value = [...chatTestMessages.value, { role: 'assistant', text: `失败: ${e.message}` }]
+  } finally {
+    chatTestSending.value = false
+  }
+}
+
 async function generateNl2sqlTool() {
   if (!currentAgentId.value) {
     message.warning('请先选择 DataQueryAgent')
@@ -1033,10 +1169,24 @@ async function generateNl2sqlTool() {
   generatingTool.value = true
   try {
     const existing = await toolApi.list({ page_size: 100 })
-    const found = (existing.items || []).find((t) => t.name === 'nl2sql_query')
+    const items = existing.items || []
+    let found = items.find((t) => toolDqAgentId(t) === currentAgentId.value)
+    const legacy = items.find((t) => t.name === 'nl2sql_query')
+    if (!found && legacy) {
+      const lid = toolDqAgentId(legacy)
+      if (!lid || lid === currentAgentId.value) found = legacy
+    }
+    const usedNames = new Set(items.filter((t) => t.tool_id !== found?.tool_id).map((t) => t.name))
+    const toolName = slugNl2sqlToolName(currentAgent.value?.name, currentAgentId.value, usedNames)
+    const dsList = await dataQueryApi.getDatasources(currentAgentId.value)
+    const description = buildNl2sqlDescription(
+      currentAgent.value?.name || currentAgentId.value,
+      dsList,
+    )
     const toolPayload = {
-      display_name: 'NL2SQL 查询工具',
-      description: '将自然语言问题交给 DataQueryAgent 执行 NL2SQL 查询',
+      name: toolName,
+      display_name: `NL2SQL · ${currentAgent.value?.name || toolName}`,
+      description,
       config: {
         adapter: 'dataquery_agent',
         dq_agent_id: currentAgentId.value,
@@ -1054,16 +1204,31 @@ async function generateNl2sqlTool() {
         required: ['question'],
       },
     }
+    let saved
     if (found) {
-      await toolApi.update(found.tool_id, toolPayload)
-      message.success('已更新 nl2sql_query 工具并绑定当前 DataQueryAgent')
+      saved = await toolApi.update(found.tool_id, toolPayload)
     } else {
-      await toolApi.create({
-        name: 'nl2sql_query',
+      saved = await toolApi.create({
         tool_type: 'restful',
         ...toolPayload,
       })
-      message.success('已创建 nl2sql_query 工具并绑定当前 DataQueryAgent')
+    }
+    const cfg = saved?.config || {}
+    if (cfg.adapter !== 'dataquery_agent' || cfg.dq_agent_id !== currentAgentId.value) {
+      message.error(`工具 ${toolName} 已保存，但 config 未正确写入 adapter/dq_agent_id`)
+      return
+    }
+    try {
+      const testRes = await toolApi.test(saved.tool_id, {
+        parameters: { question: '查询当前可访问数据的概况' },
+      })
+      if (testRes && testRes.success) {
+        message.success(`已生成工具 ${toolName}，冒烟测试通过`)
+      } else {
+        message.warning(`已生成工具 ${toolName}，测试未通过: ${testRes?.error || '未知错误'}`)
+      }
+    } catch (te) {
+      message.warning(`已生成工具 ${toolName}，测试未通过: ${te.message}`)
     }
   } catch (e) {
     message.error(e.message)
@@ -1100,7 +1265,46 @@ onMounted(async () => {
   color: #999;
   font-size: 12px;
 }
+.dq-agent-row {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+.dq-chat-test-link {
+  margin-top: 6px;
+  font-size: 13px;
+}
 .active {
   background: #f0f5ff;
 }
+.dq-chat-log {
+  min-height: 240px;
+  max-height: 420px;
+  overflow-y: auto;
+  background: #faf8f4;
+  border-radius: 6px;
+  padding: 12px;
+}
+.dq-chat-empty { color: #9e9590; font-size: 13px; }
+.dq-chat-msg { margin-bottom: 12px; }
+.dq-chat-msg.user .dq-chat-role { color: #3a6ea5; }
+.dq-chat-msg.assistant .dq-chat-role { color: #b5341c; }
+.dq-chat-role { font-size: 12px; font-weight: 600; margin-bottom: 4px; }
+.dq-chat-body {
+  margin: 0;
+  white-space: pre-wrap;
+  font-size: 12px;
+  color: #3a342e;
+  background: #fff;
+  padding: 8px 10px;
+  border-radius: 6px;
+}
+.dq-chat-composer {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+  align-items: flex-start;
+}
+.dq-chat-composer :deep(textarea) { flex: 1; }
 </style>

@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from database import get_db
 from models import ScreenCredential, ScreenSystem, UiAuditLog, gen_uuid, now_utc
-from services.screenpilot.config import is_screenpilot_enabled
+from services.screenpilot.config import CU_TOOL_NAMES, is_screenpilot_enabled
 from services.screenpilot.crypto_util import decrypt_secret, encrypt_secret
 
 logger = logging.getLogger(__name__)
@@ -97,7 +97,7 @@ def mcp_pool_status():
         "adapter": "screenpilot",
         "inprocess_available": True,
         "pool_process_alive": alive,
-        "tools": 8,
+        "tools": len(CU_TOOL_NAMES),
     }
 
 
@@ -109,7 +109,7 @@ def screenpilot_status(db: Session = Depends(get_db)):
     return {
         "enabled": is_screenpilot_enabled(),
         "service": "vela-screenpilot",
-        "mcp_registered": len(tools) >= 8,
+        "mcp_registered": len(tools) >= len(CU_TOOL_NAMES),
         "mcp_tools": tools,
     }
 

@@ -380,6 +380,7 @@ def _agent_to_dict(agent: Agent, db: Session) -> dict:
         "tool_bindings": tool_bindings_out,
         "max_iterations": agent.max_iterations if agent.max_iterations is not None else 10,
         "step_timeout_seconds": agent.step_timeout_seconds if agent.step_timeout_seconds is not None else 60,
+        "timeout_seconds": agent.timeout_seconds if agent.timeout_seconds is not None else 180,
         "tool_retry_count": agent.tool_retry_count if agent.tool_retry_count is not None else 2,
         "tool_retry_backoff": agent.tool_retry_backoff or "fixed",
         "allow_repeat_tool_calls": agent.allow_repeat_tool_calls if agent.allow_repeat_tool_calls is not None else True,

@@ -40,6 +40,7 @@ from routes.llm_gateway import router as llm_gateway_router
 from routes.code_exec import router as code_exec_router
 from routes.schedules import router as schedules_router
 from routes.inbox import router as inbox_router
+from routes.mcp_servers import router as mcp_servers_router, oauth_callback_router
 
 app = FastAPI(
     title="Vela Agent Playground API",
@@ -80,6 +81,8 @@ app.include_router(query_rewrite_router, dependencies=_auth_deps)
 app.include_router(code_exec_router, dependencies=_auth_deps)
 app.include_router(schedules_router, dependencies=_auth_deps)
 app.include_router(inbox_router, dependencies=_auth_deps)
+app.include_router(mcp_servers_router, dependencies=_auth_deps)
+app.include_router(oauth_callback_router)
 
 AVATAR_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/avatars", StaticFiles(directory=str(AVATAR_DIR)), name="avatars")

@@ -68,9 +68,11 @@
         </a-form-item>
         <a-form-item label="工具" name="tool_ids">
           <a-select v-model:value="form.tool_ids" mode="multiple" placeholder="选择工具" @change="onToolSelectionChange">
-            <a-select-option v-for="t in toolList" :key="t.tool_id" :value="t.tool_id">
-              {{ t.display_name || t.name }} ({{ t.tool_type }})
-            </a-select-option>
+            <a-select-opt-group v-for="group in groupedTools" :key="group.label" :label="group.label">
+              <a-select-option v-for="t in group.items" :key="t.tool_id" :value="t.tool_id">
+                {{ t.display_name || t.name }} ({{ t.tool_type }})
+              </a-select-option>
+            </a-select-opt-group>
           </a-select>
         </a-form-item>
 
@@ -104,6 +106,10 @@
         <a-form-item label="单步超时(秒)" name="step_timeout_seconds">
           <a-input-number v-model:value="form.step_timeout_seconds" :min="5" :max="600" style="width: 100%" />
           <span class="form-hint">单个工具调用的超时时间，默认 60 秒</span>
+        </a-form-item>
+        <a-form-item label="整体超时(秒)" name="timeout_seconds">
+          <a-input-number v-model:value="form.timeout_seconds" :min="10" :max="600" style="width: 100%" />
+          <span class="form-hint">单次对话整体超时，默认 180 秒；带 Skill/Web 搜索建议 ≥180</span>
         </a-form-item>
         <a-form-item label="工具重试次数" name="tool_retry_count">
           <a-input-number v-model:value="form.tool_retry_count" :min="0" :max="10" style="width: 100%" />
@@ -154,6 +160,26 @@ const skills = ref([])
 const knowledgeBases = ref([])
 const toolList = ref([])
 
+const groupedTools = computed(() => {
+  const groups = new Map()
+  const others = []
+  for (const t of toolList.value) {
+    if (t.tool_type === 'mcp' && t.mcp_server_name) {
+      const label = `MCP · ${t.mcp_server_name}`
+      if (!groups.has(label)) groups.set(label, [])
+      groups.get(label).push(t)
+    } else {
+      others.push(t)
+    }
+  }
+  const result = []
+  for (const [label, items] of groups) {
+    result.push({ label, items })
+  }
+  if (others.length) result.push({ label: groups.size ? '其他工具' : '全部工具', items: others })
+  return result
+})
+
 const isEdit = computed(() => !!route.params.id)
 const agentId = computed(() => route.params.id)
 
@@ -173,6 +199,7 @@ const form = reactive({
   tool_permissions: {},
   max_iterations: 10,
   step_timeout_seconds: 60,
+  timeout_seconds: 180,
   tool_retry_count: 2,
   tool_retry_backoff: 'fixed',
   allow_repeat_tool_calls: true,
@@ -239,6 +266,7 @@ onMounted(async () => {
         tool_permissions: agent.tool_permissions || {},
         max_iterations: agent.max_iterations || 10,
         step_timeout_seconds: agent.step_timeout_seconds || 60,
+        timeout_seconds: agent.timeout_seconds || 180,
         tool_retry_count: agent.tool_retry_count ?? 2,
         tool_retry_backoff: agent.tool_retry_backoff || 'fixed',
         allow_repeat_tool_calls: agent.allow_repeat_tool_calls ?? true,

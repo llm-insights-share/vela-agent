@@ -31,6 +31,32 @@ from services.dataquery_schema_ranker import TableCatalogEntry, dataquery_schema
 from services.model_provider import model_provider_service
 
 
+def _json_safe_value(value: Any) -> Any:
+    """Convert DB driver types (Decimal, datetime, etc.) to JSON-serializable values."""
+    from decimal import Decimal
+    from datetime import date, datetime, time
+    from uuid import UUID
+
+    if isinstance(value, Decimal):
+        integral = value.to_integral_value()
+        if value == integral:
+            return int(integral)
+        return float(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, (date, time)):
+        return value.isoformat()
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, dict):
+        return {k: _json_safe_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_value(v) for v in value]
+    return value
+
+
 class DataQueryService:
     SQL_BLOCK_LIST = ("insert", "update", "delete", "drop", "alter", "truncate", "create", "grant", "revoke")
     MAX_SQL_REWRITE_RETRIES = 3
@@ -797,7 +823,7 @@ class DataQueryService:
                 with conn.begin():
                     DataQueryService._set_query_timeout(conn, datasource.db_type, timeout)
                     result = conn.execution_options(timeout=timeout).execute(text(sql))
-                    rows = [dict(row._mapping) for row in result.fetchall()]
+                    rows = [{k: _json_safe_value(v) for k, v in dict(row._mapping).items()} for row in result.fetchall()]
                     cols = list(result.keys())
                 return rows, cols
         except Exception as exc:

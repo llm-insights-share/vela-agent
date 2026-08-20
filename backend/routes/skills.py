@@ -7,7 +7,13 @@ import json
 import yaml
 from database import get_db
 from models import SkillPack, SkillPackStatus, AgentSkillBinding, gen_uuid, now_utc
-from schemas import SkillPackCreate, SkillPackUpdate, SkillPackResponse, PaginatedResponse
+from schemas import (
+    SkillPackCreate,
+    SkillPackUpdate,
+    SkillPackResponse,
+    SkillManifestSchema,
+    PaginatedResponse,
+)
 
 router = APIRouter(prefix="/api/v1/skills", tags=["skills"])
 
@@ -47,6 +53,7 @@ def create_skill(data: SkillPackCreate, db: Session = Depends(get_db)):
         scope=data.scope,
         tools=data.tools,
         description=data.description,
+        manifest={},
     )
     db.add(skill)
     db.commit()
@@ -68,12 +75,39 @@ def update_skill(skill_pack_id: str, data: SkillPackUpdate, db: Session = Depend
     if not skill:
         raise HTTPException(status_code=404, detail="Skill 包不存在")
     update_fields = data.model_dump(exclude_unset=True)
+
+    if "manifest" in update_fields:
+        incoming = update_fields.pop("manifest") or {}
+        merged = _deep_merge_dict(skill.manifest or {}, incoming)
+        try:
+            validated = SkillManifestSchema.model_validate(merged)
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=f"manifest 校验失败: {exc}") from exc
+        manifest_dict = validated.model_dump()
+        skill.manifest = manifest_dict
+        if manifest_dict.get("description"):
+            skill.description = str(manifest_dict["description"])
+        if manifest_dict.get("version"):
+            skill.version = str(manifest_dict["version"])
+
     for key, value in update_fields.items():
         if hasattr(skill, key):
             setattr(skill, key, value)
+
+    skill.updated_at = now_utc()
     db.commit()
     db.refresh(skill)
     return SkillPackResponse.model_validate(skill)
+
+
+def _deep_merge_dict(base: dict, overlay: dict) -> dict:
+    result = dict(base or {})
+    for key, value in (overlay or {}).items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge_dict(result[key], value)
+        else:
+            result[key] = value
+    return result
 
 
 @router.post("/{skill_pack_id}/unpublish")

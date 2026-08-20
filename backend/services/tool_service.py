@@ -36,7 +36,7 @@ class ToolExecutionService:
     ) -> Dict[str, Any]:
         try:
             config = tool.config or {}
-            if config.get("adapter") == "dataquery_agent":
+            if self._is_dataquery_tool(tool, config):
                 return await self._execute_dataquery_agent(tool, parameters)
             if tool.tool_type == ToolType.MCP:
                 return await self._execute_mcp(tool, parameters, timeout_seconds)
@@ -49,13 +49,68 @@ class ToolExecutionService:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    @staticmethod
+    def _is_dataquery_tool(tool: Tool, config: Dict[str, Any]) -> bool:
+        if isinstance(config, dict) and config.get("adapter") == "dataquery_agent":
+            return True
+        return getattr(tool, "name", "") == "nl2sql_query"
+
+    def _resolve_dq_agent_id(self, parameters: Dict[str, Any], config: Dict[str, Any]) -> str:
+        dq_agent_id = (parameters or {}).get("dq_agent_id") or (config or {}).get("dq_agent_id") or ""
+        if dq_agent_id:
+            return dq_agent_id
+        db = SessionLocal()
+        try:
+            from models import DataQueryAgent, DataQueryAgentStatus
+            agents = (
+                db.query(DataQueryAgent)
+                .filter(DataQueryAgent.status == DataQueryAgentStatus.ACTIVE)
+                .all()
+            )
+            if len(agents) == 1:
+                return agents[0].dq_agent_id
+            return ""
+        finally:
+            db.close()
+
+    def _heal_dataquery_config(self, tool: Tool, dq_agent_id: str) -> None:
+        config = dict(tool.config or {})
+        changed = False
+        if config.get("adapter") != "dataquery_agent":
+            config["adapter"] = "dataquery_agent"
+            changed = True
+        if dq_agent_id and not config.get("dq_agent_id"):
+            config["dq_agent_id"] = dq_agent_id
+            changed = True
+        if not changed:
+            return
+        db = SessionLocal()
+        try:
+            from sqlalchemy.orm.attributes import flag_modified
+            row = db.query(Tool).filter(Tool.tool_id == tool.tool_id).first()
+            if not row:
+                return
+            merged = dict(row.config or {})
+            merged["adapter"] = "dataquery_agent"
+            if dq_agent_id:
+                merged["dq_agent_id"] = dq_agent_id
+            row.config = merged
+            flag_modified(row, "config")
+            db.commit()
+            tool.config = merged
+        finally:
+            db.close()
+
     async def _execute_dataquery_agent(self, tool: Tool, parameters: Dict[str, Any]) -> Dict[str, Any]:
         from services.dataquery_service import dataquery_service
 
         config = tool.config or {}
-        dq_agent_id = parameters.get("dq_agent_id") or config.get("dq_agent_id", "")
+        dq_agent_id = self._resolve_dq_agent_id(parameters, config)
+        self._heal_dataquery_config(tool, dq_agent_id)
         question = parameters.get("question") or parameters.get("query") or ""
-        datasource_id = parameters.get("datasource_id")
+        datasource_id = parameters.get("datasource_id") or None
+        if not datasource_id:
+            datasource_id = None
         top_k = int(parameters.get("top_k", 100))
         strict_mode = bool(parameters.get("strict_mode", True))
         return_sql_only = bool(parameters.get("return_sql_only", False))
@@ -106,231 +161,102 @@ class ToolExecutionService:
     async def _execute_mcp(
         self, tool: Tool, parameters: Dict[str, Any], timeout_seconds: int
     ) -> Dict[str, Any]:
-        config = tool.config or {}
-        command = config.get("mcp_command", "") or config.get("command", "")
-        args = config.get("mcp_args", []) or config.get("args", [])
-        env = config.get("mcp_env", {}) or config.get("env", {})
+        from services.mcp.client import call_mcp_tool
+        from services.mcp.jsonrpc import McpAuthError, McpError
+
+        config = dict(tool.config or {})
         raw_tool_name = config.get("mcp_tool_name", "") or config.get("server_name", tool.name)
         mcp_tool_name = self._resolve_mcp_tool_name(raw_tool_name, parameters, tool.name)
 
-        # ScreenPilot 进程内直调（最快，无子进程）
         if config.get("adapter") == "screenpilot":
             from services.screenpilot.mcp_pool import call_screenpilot_inprocess
 
             return await call_screenpilot_inprocess(mcp_tool_name, parameters)
 
-        if not command:
-            return {"success": False, "error": "MCP 工具缺少 command 配置"}
-
-        merged_env = {**os.environ, **env}
-
-        # ScreenPilot MCP 长驻进程池
         if config.get("mcp_pool") or config.get("screenpilot_pool"):
             from services.screenpilot.mcp_pool import default_pool_command, screenpilot_mcp_pool
 
+            command = config.get("mcp_command", "") or config.get("command", "")
+            args = config.get("mcp_args", []) or config.get("args", [])
+            env = config.get("mcp_env", {}) or config.get("env", {})
+            merged_env = {**os.environ, **env}
             pool_cmd, pool_args, pool_env = default_pool_command()
-            use_cmd = command or pool_cmd
-            use_args = args or pool_args
-            use_env = {**pool_env, **merged_env}
             return await screenpilot_mcp_pool.call_tool(
                 mcp_tool_name,
                 parameters,
-                command=use_cmd,
-                args=use_args,
-                env=use_env,
+                command=command or pool_cmd,
+                args=args or pool_args,
+                env={**pool_env, **merged_env},
                 timeout_seconds=float(timeout_seconds),
             )
 
+        db = SessionLocal()
         try:
-            process = await asyncio.create_subprocess_exec(
-                command, *args,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=merged_env,
-            )
+            from services.mcp.server_service import resolve_tool_connection
 
-            init_request = {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {},
-                    "clientInfo": {"name": "vela-agent", "version": "1.0.0"},
-                },
-            }
+            config = await resolve_tool_connection(db, tool)
+        except McpAuthError as e:
+            return {"success": False, "error": str(e)}
+        except McpError as e:
+            return {"success": False, "error": str(e)}
+        finally:
+            db.close()
 
-            init_str = json.dumps(init_request) + "\n"
-            process.stdin.write(init_str.encode())
-            await process.stdin.drain()
-
-            init_response = await asyncio.wait_for(
-                process.stdout.readline(), timeout=10
-            )
-            init_data = json.loads(init_response.decode().strip())
-
-            if "error" in init_data:
-                process.terminate()
-                return {"success": False, "error": f"MCP 初始化失败: {init_data['error']}"}
-
-            initialized_notification = {
-                "jsonrpc": "2.0",
-                "method": "notifications/initialized",
-                "params": {},
-            }
-            notif_str = json.dumps(initialized_notification) + "\n"
-            process.stdin.write(notif_str.encode())
-            await process.stdin.drain()
-
-            tool_call_request = {
-                "jsonrpc": "2.0",
-                "id": 2,
-                "method": "tools/call",
-                "params": {
-                    "name": mcp_tool_name,
-                    "arguments": parameters,
-                },
-            }
-
-            call_str = json.dumps(tool_call_request) + "\n"
-            process.stdin.write(call_str.encode())
-            await process.stdin.drain()
-
-            call_response = await asyncio.wait_for(
-                process.stdout.readline(), timeout=timeout_seconds
-            )
-            call_data = json.loads(call_response.decode().strip())
-
-            process.terminate()
-            await process.wait()
-
-            if "error" in call_data:
-                return {"success": False, "error": f"MCP 调用失败: {call_data['error']}"}
-
-            result = call_data.get("result", {})
-            if result.get("isError"):
-                err_text = ""
-                for item in result.get("content", []):
-                    if isinstance(item, dict) and item.get("type") == "text":
-                        err_text = item.get("text", "")
-                        break
-                return {"success": False, "error": err_text or "MCP 工具返回错误"}
-
-            content = result.get("content", [])
-            text_parts = []
-            for item in content:
-                if isinstance(item, dict) and item.get("type") == "text":
-                    text_parts.append(item.get("text", ""))
-                elif isinstance(item, str):
-                    text_parts.append(item)
-
-            result_text = "\n".join(text_parts) if text_parts else json.dumps(result)
-            if self._mcp_result_indicates_failure(result, result_text):
-                return {"success": False, "error": result_text}
-
-            return {
-                "success": True,
-                "result": result_text,
-            }
-
-        except asyncio.TimeoutError:
-            if process:
-                process.terminate()
-            return {"success": False, "error": f"MCP 调用超时 ({timeout_seconds}s)"}
-        except Exception as e:
-            if process:
-                process.terminate()
-            return {"success": False, "error": f"MCP 调用异常: {str(e)}"}
+        result = await call_mcp_tool(config, mcp_tool_name, parameters, timeout_seconds=timeout_seconds)
+        if result.get("success"):
+            raw = result.get("raw") if isinstance(result.get("raw"), dict) else {}
+            text = result.get("result") or ""
+            if self._mcp_result_indicates_failure(raw, text):
+                return {"success": False, "error": text}
+        return result
 
     async def discover_mcp_tools(
-        self, command: str, args: list, env: dict = None, timeout_seconds: int = 30
+        self,
+        command: str = "",
+        args: list = None,
+        env: dict = None,
+        timeout_seconds: int = 30,
+        transport: str = "stdio",
+        url: str = "",
+        headers: dict = None,
+        auth_type: str = "none",
+        auth_token: str = "",
+        mcp_server_id: str = "",
     ) -> Dict[str, Any]:
-        merged_env = {**os.environ, **(env or {})}
+        from services.mcp.client import discover_mcp_tools as mcp_discover
+        from services.mcp.jsonrpc import McpAuthError, McpError
 
-        try:
-            process = await asyncio.create_subprocess_exec(
-                command, *args,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=merged_env,
-            )
+        if mcp_server_id:
+            db = SessionLocal()
+            try:
+                from models import McpServer
+                from services.mcp.server_service import connection_config_for_server
 
-            init_request = {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {},
-                    "clientInfo": {"name": "vela-agent", "version": "1.0.0"},
-                },
-            }
+                server = db.query(McpServer).filter(McpServer.server_id == mcp_server_id).first()
+                if not server:
+                    return {"success": False, "error": "MCP Server 不存在"}
+                cfg = await connection_config_for_server(db, server)
+            except McpAuthError as e:
+                return {"success": False, "error": str(e)}
+            except McpError as e:
+                return {"success": False, "error": str(e)}
+            finally:
+                db.close()
+            return await mcp_discover(cfg, timeout_seconds=timeout_seconds)
 
-            init_str = json.dumps(init_request) + "\n"
-            process.stdin.write(init_str.encode())
-            await process.stdin.drain()
-
-            init_response = await asyncio.wait_for(
-                process.stdout.readline(), timeout=10
-            )
-            init_data = json.loads(init_response.decode().strip())
-
-            if "error" in init_data:
-                process.terminate()
-                return {"success": False, "error": f"MCP 初始化失败: {init_data['error']}"}
-
-            initialized_notification = {
-                "jsonrpc": "2.0",
-                "method": "notifications/initialized",
-                "params": {},
-            }
-            notif_str = json.dumps(initialized_notification) + "\n"
-            process.stdin.write(notif_str.encode())
-            await process.stdin.drain()
-
-            list_request = {
-                "jsonrpc": "2.0",
-                "id": 2,
-                "method": "tools/list",
-                "params": {},
-            }
-
-            list_str = json.dumps(list_request) + "\n"
-            process.stdin.write(list_str.encode())
-            await process.stdin.drain()
-
-            list_response = await asyncio.wait_for(
-                process.stdout.readline(), timeout=timeout_seconds
-            )
-            list_data = json.loads(list_response.decode().strip())
-
-            process.terminate()
-            await process.wait()
-
-            if "error" in list_data:
-                return {"success": False, "error": f"获取工具列表失败: {list_data['error']}"}
-
-            tools = list_data.get("result", {}).get("tools", [])
-            tool_info_list = []
-            for t in tools:
-                tool_info_list.append({
-                    "name": t.get("name", ""),
-                    "description": t.get("description", ""),
-                    "inputSchema": t.get("inputSchema", {}),
-                })
-
-            return {"success": True, "tools": tool_info_list, "total": len(tool_info_list)}
-
-        except asyncio.TimeoutError:
-            if process:
-                process.terminate()
-            return {"success": False, "error": f"获取工具列表超时 ({timeout_seconds}s)"}
-        except Exception as e:
-            if process:
-                process.terminate()
-            return {"success": False, "error": f"获取工具列表异常: {str(e)}"}
+        return await mcp_discover(
+            {
+                "transport": transport or "stdio",
+                "mcp_command": command or "",
+                "mcp_args": args or [],
+                "mcp_env": env or {},
+                "mcp_url": url or "",
+                "mcp_headers": headers or {},
+                "auth_type": auth_type or "none",
+                "auth_token": auth_token or "",
+            },
+            timeout_seconds=timeout_seconds,
+        )
 
     async def _execute_restful(
         self, tool: Tool, parameters: Dict[str, Any], timeout_seconds: int

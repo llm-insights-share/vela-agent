@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, model_validator, field_validator
+from pydantic import BaseModel, Field, model_validator, field_validator, ConfigDict
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 
@@ -89,6 +89,7 @@ class AgentCreate(BaseModel):
     # SGL-CFG-02~07: ReAct 循环参数
     max_iterations: int = Field(default=10, ge=1, le=50)
     step_timeout_seconds: int = Field(default=60, ge=5, le=600)
+    timeout_seconds: int = Field(default=180, ge=10, le=600)
     tool_retry_count: int = Field(default=2, ge=0, le=10)
     tool_retry_backoff: str = Field(default="fixed", pattern="^(fixed|exponential)$")
     allow_repeat_tool_calls: bool = Field(default=True)
@@ -118,6 +119,7 @@ class AgentUpdate(BaseModel):
     change_summary: str = Field(default="")
     max_iterations: Optional[int] = None
     step_timeout_seconds: Optional[int] = None
+    timeout_seconds: Optional[int] = None
     tool_retry_count: Optional[int] = None
     tool_retry_backoff: Optional[str] = None
     allow_repeat_tool_calls: Optional[bool] = None
@@ -231,6 +233,7 @@ class AgentResponse(BaseModel):
     tool_names: List[str] = []
     max_iterations: int = 10
     step_timeout_seconds: int = 60
+    timeout_seconds: int = 180
     tool_retry_count: int = 2
     tool_retry_backoff: str = "fixed"
     allow_repeat_tool_calls: bool = True
@@ -275,6 +278,21 @@ class SkillPackCreate(BaseModel):
     description: str = Field(default="")
 
 
+class SkillToolBudgetSchema(BaseModel):
+    max_web_search: int = Field(default=5, ge=1, le=50)
+    max_tavily_per_iter: int = Field(default=2, ge=1, le=10)
+    max_tool_rounds: int = Field(default=3, ge=1, le=20)
+    min_timeout_seconds: int = Field(default=180, ge=10, le=600)
+
+
+class SkillManifestSchema(BaseModel):
+    trigger_keywords: List[str] = Field(default_factory=list)
+    tool_budget: SkillToolBudgetSchema = Field(default_factory=SkillToolBudgetSchema)
+    execution_hints: str = Field(default="")
+
+    model_config = ConfigDict(extra="allow")
+
+
 class SkillPackUpdate(BaseModel):
     name: Optional[str] = None
     version: Optional[str] = None
@@ -282,6 +300,7 @@ class SkillPackUpdate(BaseModel):
     tools: Optional[List[Dict[str, Any]]] = None
     description: Optional[str] = None
     status: Optional[str] = None
+    manifest: Optional[Dict[str, Any]] = None
 
 
 class SkillPackResponse(BaseModel):
@@ -667,6 +686,7 @@ class DataQueryDatasourceBindingItem(BaseModel):
     db_type: str = Field(default="sqlite", pattern="^(sqlite|postgresql|mysql)$")
     db_url: str = Field(..., min_length=1, max_length=1024)
     schema_name: str = ""
+    business_scope: str = Field(default="", max_length=200)
     table_whitelist: List[str] = Field(default_factory=list)
     sensitive_columns: List[str] = Field(default_factory=list)
     default_limit: int = Field(default=200, ge=1, le=5000)
@@ -682,6 +702,7 @@ class DataQueryDatasourceBindingResponse(BaseModel):
     db_type: str = "sqlite"
     db_url: str = ""
     schema_name: str = ""
+    business_scope: str = ""
     table_whitelist: List[str] = []
     sensitive_columns: List[str] = []
     default_limit: int = 200
@@ -936,14 +957,17 @@ class ToolCreate(BaseModel):
     tool_type: str = Field(..., pattern="^(mcp|restful|local_python)$")
     config: Dict[str, Any] = Field(default_factory=dict)
     parameters_schema: Dict[str, Any] = Field(default_factory=dict)
+    mcp_server_id: Optional[str] = None
 
 
 class ToolUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=128)
     display_name: Optional[str] = None
     description: Optional[str] = None
     config: Optional[Dict[str, Any]] = None
     parameters_schema: Optional[Dict[str, Any]] = None
     status: Optional[str] = None
+    mcp_server_id: Optional[str] = None
 
 
 class ToolResponse(BaseModel):
@@ -955,6 +979,8 @@ class ToolResponse(BaseModel):
     config: Dict[str, Any] = {}
     parameters_schema: Dict[str, Any] = {}
     status: str = "ACTIVE"
+    mcp_server_id: Optional[str] = None
+    mcp_server_name: str = ""
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -966,10 +992,72 @@ class ToolTestRequest(BaseModel):
 
 
 class McpDiscoverRequest(BaseModel):
-    command: str = Field(..., min_length=1)
+    transport: str = Field(default="stdio")
+    command: str = Field(default="")
     args: List[str] = Field(default_factory=list)
     env: Dict[str, str] = Field(default_factory=dict)
+    url: str = Field(default="")
+    headers: Dict[str, str] = Field(default_factory=dict)
+    auth_type: str = Field(default="none")
+    auth_token: str = Field(default="")
+    mcp_server_id: str = Field(default="")
     timeout_seconds: int = Field(default=30, ge=1, le=300)
+
+
+class McpServerCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=128)
+    display_name: str = Field(default="", max_length=256)
+    description: str = Field(default="")
+    transport: str = Field(default="stdio")
+    command: str = Field(default="")
+    args: List[str] = Field(default_factory=list)
+    env: Dict[str, str] = Field(default_factory=dict)
+    url: str = Field(default="")
+    headers: Dict[str, str] = Field(default_factory=dict)
+    auth_type: str = Field(default="none")
+
+
+class McpServerUpdate(BaseModel):
+    display_name: Optional[str] = None
+    description: Optional[str] = None
+    transport: Optional[str] = None
+    command: Optional[str] = None
+    args: Optional[List[str]] = None
+    env: Optional[Dict[str, str]] = None
+    url: Optional[str] = None
+    headers: Optional[Dict[str, str]] = None
+    auth_type: Optional[str] = None
+    status: Optional[str] = None
+
+
+class McpServerResponse(BaseModel):
+    server_id: str
+    name: str
+    display_name: str = ""
+    description: str = ""
+    transport: str
+    command: str = ""
+    args: List[Any] = []
+    env: Dict[str, Any] = {}
+    url: str = ""
+    headers: Dict[str, Any] = {}
+    auth_type: str = "none"
+    status: str = "ACTIVE"
+    last_synced_at: Optional[datetime] = None
+    last_error: str = ""
+    oauth_status: str = "not_required"
+    source: str = ""
+    tool_count: int = 0
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+class McpOAuthStartRequest(BaseModel):
+    frontend_redirect: str = Field(default="")
+    client_id: str = Field(default="")
+    scope: str = Field(default="")
 
 
 class PaginatedResponse(BaseModel):

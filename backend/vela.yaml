@@ -30,6 +30,9 @@ knowledge:
     model_service_id: c7d2f984-2dcb-4e9e-883f-658e578f5456
     prefix_max_tokens: 128
     temperature: 0.0
+mcp:
+  oauth:
+    redirect_uri: ''
 memory:
   letta:
     base_url: http://127.0.0.1:8283

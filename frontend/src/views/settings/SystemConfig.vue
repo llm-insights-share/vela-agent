@@ -179,7 +179,8 @@
           <div class="screenpilot-card-main">
             <div>
               <div class="field-hint" style="margin-bottom: 8px;">
-                打开后自动注册 8 个 <code>cu_*</code> MCP 工具（导航 / 观测 / 动作 / 提取 / 技能重放 / 技能编译 / 技能搜索 / 任务执行）；关闭则移除这些工具并解除 Agent 绑定。
+                打开后自动注册 {{ screenpilot.tools.length || 10 }} 个 <code>cu_*</code> MCP 工具（导航 / 观测 / 动作 / 提取 / 技能重放 / 技能编译 / 技能搜索 / 任务执行 / OTP / Vision）。关闭则移除这些工具并解除 Agent 绑定。
+                可在 <a href="/tools">工具管理</a> 中查看。
               </div>
               <div v-if="screenpilot.tools.length" class="sp-tools">
                 <a-tag v-for="t in screenpilot.tools" :key="t.tool_id" color="blue">

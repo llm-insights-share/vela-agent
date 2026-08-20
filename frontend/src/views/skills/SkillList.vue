@@ -86,9 +86,9 @@
     <a-modal
       v-model:open="detailOpen"
       title="Skill 包详情"
-      :footer="null"
-      width="900px"
+      width="920px"
       destroy-on-close
+      @cancel="resetManifestEditor"
     >
       <div v-if="detailLoading" class="detail-loading">
         <a-spin tip="加载中..." />
@@ -100,6 +100,79 @@
           <a-descriptions-item label="范围">{{ scopeLabel(detail.scope) }}</a-descriptions-item>
           <a-descriptions-item label="描述">{{ detail.description || '（无）' }}</a-descriptions-item>
         </a-descriptions>
+
+        <a-collapse v-model:activeKey="manifestPanelKeys" class="manifest-collapse">
+          <a-collapse-panel key="manifest" header="Manifest 配置">
+            <div class="manifest-summary">{{ manifestSummaryText }}</div>
+            <p class="manifest-hint">重新导入 zip 会覆盖数据库中的 manifest；此处编辑仅更新 DB，不回写包内 SKILL.md。</p>
+            <a-form :label-col="{ span: 6 }" :wrapper-col="{ span: 17 }" class="manifest-form">
+              <a-form-item label="触发词">
+                <a-select
+                  v-model:value="manifestForm.trigger_keywords"
+                  mode="tags"
+                  placeholder="输入后回车添加，如：开盘走势"
+                  style="width: 100%"
+                  @change="syncManifestJsonFromForm"
+                />
+              </a-form-item>
+              <a-form-item label="搜索上限">
+                <a-input-number
+                  v-model:value="manifestForm.tool_budget.max_web_search"
+                  :min="1"
+                  :max="50"
+                  style="width: 100%"
+                  @change="syncManifestJsonFromForm"
+                />
+              </a-form-item>
+              <a-form-item label="每轮 Tavily 上限">
+                <a-input-number
+                  v-model:value="manifestForm.tool_budget.max_tavily_per_iter"
+                  :min="1"
+                  :max="10"
+                  style="width: 100%"
+                  @change="syncManifestJsonFromForm"
+                />
+              </a-form-item>
+              <a-form-item label="工具轮次上限">
+                <a-input-number
+                  v-model:value="manifestForm.tool_budget.max_tool_rounds"
+                  :min="1"
+                  :max="20"
+                  style="width: 100%"
+                  @change="syncManifestJsonFromForm"
+                />
+              </a-form-item>
+              <a-form-item label="最小超时(秒)">
+                <a-input-number
+                  v-model:value="manifestForm.tool_budget.min_timeout_seconds"
+                  :min="10"
+                  :max="600"
+                  style="width: 100%"
+                  @change="syncManifestJsonFromForm"
+                />
+              </a-form-item>
+              <a-form-item label="执行提示">
+                <a-textarea
+                  v-model:value="manifestForm.execution_hints"
+                  :rows="4"
+                  placeholder="注入给模型的 Skill 执行效率提示"
+                  @change="syncManifestJsonFromForm"
+                />
+              </a-form-item>
+            </a-form>
+            <a-collapse v-model:activeKey="manifestJsonKeys" ghost @change="onManifestJsonPanelChange">
+              <a-collapse-panel key="json" header="高级 JSON">
+                <a-textarea
+                  v-model:value="manifestJsonText"
+                  :rows="12"
+                  class="manifest-json-editor"
+                  spellcheck="false"
+                  @blur="applyManifestJsonToForm"
+                />
+              </a-collapse-panel>
+            </a-collapse>
+          </a-collapse-panel>
+        </a-collapse>
 
         <div class="detail-section">
           <div class="section-label">引用 Skill</div>
@@ -134,6 +207,17 @@
             </div>
           </div>
         </div>
+      </template>
+      <template #footer>
+        <a-button @click="detailOpen = false">关闭</a-button>
+        <a-button
+          type="primary"
+          :loading="manifestSaving"
+          :disabled="!manifestDirty"
+          @click="saveManifest"
+        >
+          保存 Manifest
+        </a-button>
       </template>
     </a-modal>
 
@@ -206,8 +290,157 @@ const toolsText = ref('[]')
 const detailOpen = ref(false)
 const detailLoading = ref(false)
 const detail = ref(null)
+const manifestSaving = ref(false)
+const manifestPanelKeys = ref(['manifest'])
+const manifestJsonKeys = ref([])
+const manifestJsonText = ref('{}')
+const savedManifestSnapshot = ref('{}')
+const manifestForm = reactive({
+  trigger_keywords: [],
+  tool_budget: {
+    max_web_search: 5,
+    max_tavily_per_iter: 2,
+    max_tool_rounds: 3,
+    min_timeout_seconds: 180,
+  },
+  execution_hints: '',
+})
+let manifestExtraFields = {}
 const selectedFileKeys = ref([])
 const selectedFileContent = ref('')
+
+const DEFAULT_TOOL_BUDGET = {
+  max_web_search: 5,
+  max_tavily_per_iter: 2,
+  max_tool_rounds: 3,
+  min_timeout_seconds: 180,
+}
+
+const manifestDirty = computed(() => {
+  try {
+    return JSON.stringify(getManifestForSave()) !== savedManifestSnapshot.value
+  } catch {
+    return true
+  }
+})
+
+const manifestSummaryText = computed(() => {
+  const kw = manifestForm.trigger_keywords?.length || 0
+  const maxSearch = manifestForm.tool_budget?.max_web_search ?? DEFAULT_TOOL_BUDGET.max_web_search
+  const minTimeout = manifestForm.tool_budget?.min_timeout_seconds ?? DEFAULT_TOOL_BUDGET.min_timeout_seconds
+  return `触发词 ${kw} 个 · 搜索上限 ${maxSearch} · 最小超时 ${minTimeout}s`
+})
+
+function manifestFromDetail(record) {
+  const m = record?.manifest || {}
+  manifestExtraFields = { ...m }
+  delete manifestExtraFields.trigger_keywords
+  delete manifestExtraFields.tool_budget
+  delete manifestExtraFields.execution_hints
+  const tb = { ...DEFAULT_TOOL_BUDGET, ...(m.tool_budget || {}) }
+  return {
+    trigger_keywords: Array.isArray(m.trigger_keywords) ? [...m.trigger_keywords] : [],
+    tool_budget: { ...tb },
+    execution_hints: m.execution_hints || '',
+  }
+}
+
+function formToManifestObject() {
+  return {
+    ...manifestExtraFields,
+    trigger_keywords: manifestForm.trigger_keywords || [],
+    tool_budget: { ...manifestForm.tool_budget },
+    execution_hints: manifestForm.execution_hints || '',
+  }
+}
+
+function validateManifestJson(text) {
+  try {
+    const parsed = JSON.parse(text || '{}')
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return { ok: false, error: 'manifest 必须是 JSON 对象' }
+    }
+    return { ok: true, value: parsed }
+  } catch (e) {
+    return { ok: false, error: e.message || 'JSON 格式错误' }
+  }
+}
+
+function applyManifestToForm(manifestObj) {
+  const m = manifestObj || {}
+  manifestExtraFields = { ...m }
+  delete manifestExtraFields.trigger_keywords
+  delete manifestExtraFields.tool_budget
+  delete manifestExtraFields.execution_hints
+  manifestForm.trigger_keywords = Array.isArray(m.trigger_keywords) ? [...m.trigger_keywords] : []
+  manifestForm.tool_budget = { ...DEFAULT_TOOL_BUDGET, ...(m.tool_budget || {}) }
+  manifestForm.execution_hints = m.execution_hints || ''
+}
+
+function syncManifestJsonFromForm() {
+  manifestJsonText.value = JSON.stringify(formToManifestObject(), null, 2)
+}
+
+function applyManifestJsonToForm() {
+  const result = validateManifestJson(manifestJsonText.value)
+  if (!result.ok) return
+  applyManifestToForm(result.value)
+}
+
+function onManifestJsonPanelChange(keys) {
+  if (keys.includes('json')) {
+    syncManifestJsonFromForm()
+  }
+}
+
+function getManifestForSave() {
+  if (manifestJsonKeys.value.includes('json')) {
+    const result = validateManifestJson(manifestJsonText.value)
+    if (!result.ok) {
+      throw new Error(result.error)
+    }
+    return result.value
+  }
+  return formToManifestObject()
+}
+
+function loadManifestEditor(record) {
+  const form = manifestFromDetail(record)
+  manifestForm.trigger_keywords = form.trigger_keywords
+  manifestForm.tool_budget = { ...form.tool_budget }
+  manifestForm.execution_hints = form.execution_hints
+  manifestJsonText.value = JSON.stringify(formToManifestObject(), null, 2)
+  savedManifestSnapshot.value = manifestJsonText.value
+  manifestJsonKeys.value = []
+}
+
+function resetManifestEditor() {
+  manifestJsonKeys.value = []
+  manifestPanelKeys.value = ['manifest']
+}
+
+async function saveManifest() {
+  if (!detail.value?.skill_pack_id) return
+  let payload
+  try {
+    payload = getManifestForSave()
+  } catch (e) {
+    message.error(e.message || 'Manifest JSON 格式错误')
+    return
+  }
+  manifestSaving.value = true
+  try {
+    const updated = await skillApi.update(detail.value.skill_pack_id, { manifest: payload })
+    detail.value = updated
+    loadManifestEditor(updated)
+    message.success('Manifest 已保存')
+    fetchSkills()
+  } catch (e) {
+    message.error(e.message)
+  } finally {
+    manifestSaving.value = false
+  }
+}
 
 const importOpen = ref(false)
 const importing = ref(false)
@@ -417,6 +650,7 @@ async function openDetail(record) {
   detail.value = null
   try {
     detail.value = await skillApi.get(record.skill_pack_id)
+    loadManifestEditor(detail.value)
     selectDefaultFile(detail.value)
   } catch (e) {
     message.error(e.message)
@@ -674,6 +908,11 @@ onMounted(fetchSkills)
 
 .detail-loading { text-align: center; padding: 48px; }
 .detail-desc { margin-bottom: 20px; }
+.manifest-collapse { margin-bottom: 20px; }
+.manifest-summary { color: #666; font-size: 13px; margin-bottom: 8px; }
+.manifest-hint { color: #999; font-size: 12px; margin-bottom: 12px; }
+.manifest-form { margin-top: 8px; }
+.manifest-json-editor { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; }
 .detail-section { margin-top: 16px; }
 .section-label { font-weight: 600; color: #1a1714; margin-bottom: 8px; }
 .section-value { color: #444; }

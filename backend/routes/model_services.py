@@ -223,14 +223,37 @@ def delete_model_service(model_service_id: str, db: Session = Depends(get_db)):
     if not svc:
         raise HTTPException(status_code=404, detail="模型服务不存在")
 
-    from models import Agent
+    from models import Agent, AgentStatus, DataQueryAgent
+
     agent_count = db.query(Agent).filter(
         Agent.model_service_id == model_service_id,
-        Agent.status != "DELETED"
+        Agent.status != AgentStatus.DELETED,
     ).count()
+    deleted_agent_count = db.query(Agent).filter(
+        Agent.model_service_id == model_service_id,
+        Agent.status == AgentStatus.DELETED,
+    ).count()
+    dq_main = db.query(DataQueryAgent).filter(DataQueryAgent.model_service_id == model_service_id).count()
+    dq_planner = db.query(DataQueryAgent).filter(DataQueryAgent.planner_model_service_id == model_service_id).count()
+    dq_sql = db.query(DataQueryAgent).filter(DataQueryAgent.sql_model_service_id == model_service_id).count()
     if agent_count > 0:
         raise HTTPException(status_code=400, detail=f"有 {agent_count} 个 Agent 正在使用该模型服务，无法删除")
+    if dq_main + dq_planner + dq_sql > 0:
+        raise HTTPException(status_code=400, detail="有 DataQueryAgent 正在使用该模型服务，无法删除")
 
-    db.delete(svc)
-    db.commit()
+    if deleted_agent_count:
+        fallback = db.query(ModelService).filter(ModelService.model_service_id != model_service_id).first()
+        if not fallback:
+            raise HTTPException(status_code=400, detail="仍有已删除 Agent 占用该模型，且没有可替换的模型服务")
+        db.query(Agent).filter(
+            Agent.model_service_id == model_service_id,
+            Agent.status == AgentStatus.DELETED,
+        ).update({"model_service_id": fallback.model_service_id}, synchronize_session=False)
+
+    try:
+        db.delete(svc)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="删除失败：仍有数据引用该模型服务")
     return {"message": "模型服务已删除"}

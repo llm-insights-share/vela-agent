@@ -35,6 +35,7 @@ def init_db():
     from models import (
         Agent, AgentVersion, ModelProvider, ModelService, SkillPack, KnowledgeBase,
         AgentSchedule, AgentScheduleRun, InboxMessage,
+        McpServer, McpOAuthCredential, McpOAuthState,
         DataQueryAgent, DataQueryDatasourceBinding, DataQueryExecutionLog,
         DataTableDictionary, DataDictionaryItem, DataCodeMapping, DataQueryExample, DataTermMapping,
         DataQueryFeedback, DataQueryQualityStats,
@@ -59,6 +60,7 @@ def _migrate_db():
     new_columns = [
         ("max_iterations", "INTEGER DEFAULT 10"),
         ("step_timeout_seconds", "INTEGER DEFAULT 60"),
+        ("timeout_seconds", "INTEGER DEFAULT 180"),
         ("tool_retry_count", "INTEGER DEFAULT 2"),
         ("tool_retry_backoff", "VARCHAR(16) DEFAULT 'fixed'"),
         ("allow_repeat_tool_calls", "BOOLEAN DEFAULT 1"),
@@ -262,6 +264,26 @@ def _migrate_db():
         if "tag_defs" not in kb_cols:
             cursor.execute(
                 "ALTER TABLE knowledge_bases ADD COLUMN tag_defs TEXT DEFAULT '[]'"
+            )
+
+    cursor.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='tools'"
+    )
+    if cursor.fetchone():
+        cursor.execute("PRAGMA table_info(tools)")
+        tool_cols = {row[1] for row in cursor.fetchall()}
+        if "mcp_server_id" not in tool_cols:
+            cursor.execute("ALTER TABLE tools ADD COLUMN mcp_server_id VARCHAR")
+
+    cursor.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='dataquery_datasource_bindings'"
+    )
+    if cursor.fetchone():
+        cursor.execute("PRAGMA table_info(dataquery_datasource_bindings)")
+        ds_cols = {row[1] for row in cursor.fetchall()}
+        if "business_scope" not in ds_cols:
+            cursor.execute(
+                "ALTER TABLE dataquery_datasource_bindings ADD COLUMN business_scope TEXT DEFAULT ''"
             )
 
     conn.commit()

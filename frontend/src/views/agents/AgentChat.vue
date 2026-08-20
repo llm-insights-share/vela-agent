@@ -86,6 +86,11 @@
             <a-tag v-if="msg.executionMode && msg.executionMode !== 'direct'" color="blue" style="margin-left: 4px; font-size: 10px;">
               {{ executionModeOptions.find(o => o.value === msg.executionMode)?.label || msg.executionMode }}
             </a-tag>
+            <span v-if="msg.runMetrics" class="run-metrics-hint" style="margin-left: 6px; font-size: 10px; color: #888;">
+              搜索 {{ msg.runMetrics.web_search_calls || 0 }} 次
+              · {{ msg.runMetrics.elapsed_ms ? Math.round(msg.runMetrics.elapsed_ms / 1000) + 's' : '' }}
+              <template v-if="msg.runMetrics.forced_synthesis"> · 强制合成</template>
+            </span>
           </template>
         </div>
 
@@ -394,6 +399,7 @@
             style="width: 80px"
           />
           <span class="timeout-unit">秒</span>
+          <span class="timeout-hint">Skill/搜索任务建议 ≥180s</span>
         </div>
       </div>
 
@@ -546,114 +552,161 @@
           </template>
 
           <div class="debug-section">
-            <div class="debug-section-label">输入</div>
-            <div v-if="systemMessages(call.input?.messages).length" class="debug-messages">
-              <div
-                v-for="(msg, mi) in systemMessages(call.input?.messages)"
-                :key="'sys-' + mi"
-                :class="['debug-msg-block', 'debug-msg-system']"
-              >
-                <div class="debug-msg-role">{{ roleLabel(msg.role) }}</div>
-                <pre v-if="msg.content" class="debug-msg-content">{{ formatContent(msg.content) }}</pre>
-              </div>
+            <div
+              class="debug-section-head"
+              @click="toggleDebugSection(`${call.call_id}-input`)"
+            >
+              <CaretRightOutlined v-if="!isDebugSectionExpanded(`${call.call_id}-input`)" style="font-size: 10px;" />
+              <CaretDownOutlined v-else style="font-size: 10px;" />
+              <span class="debug-section-label">输入</span>
+              <span v-if="!isDebugSectionExpanded(`${call.call_id}-input`)" class="debug-section-summary">
+                · {{ inputSectionSummary(call) }}
+              </span>
             </div>
-            <div v-if="call.input?.tools?.length" class="debug-tools-block">
-              <div class="debug-sub-label">Tools 定义（{{ call.input.tools.length }}）</div>
-              <div class="debug-tool-cards">
+            <template v-if="isDebugSectionExpanded(`${call.call_id}-input`)">
+              <div v-if="systemMessages(call.input?.messages).length" class="debug-messages">
                 <div
-                  v-for="(tool, ti) in call.input.tools"
-                  :key="ti"
-                  class="debug-tool-card"
+                  v-for="(msg, mi) in systemMessages(call.input?.messages)"
+                  :key="'sys-' + mi"
+                  :class="['debug-msg-block', 'debug-msg-system']"
                 >
                   <div
-                    class="debug-tool-card-head"
-                    @click="toggleToolCard(`${call.call_id}-${ti}`)"
+                    class="debug-msg-block-head"
+                    @click="toggleDebugMsgCard(`${call.call_id}-sys-${mi}`)"
                   >
-                    <CaretRightOutlined v-if="!isToolCardExpanded(`${call.call_id}-${ti}`)" style="font-size: 10px;" />
+                    <CaretRightOutlined v-if="!isDebugMsgExpanded(`${call.call_id}-sys-${mi}`)" style="font-size: 10px;" />
                     <CaretDownOutlined v-else style="font-size: 10px;" />
-                    <span class="debug-tool-card-name">{{ toolFn(tool).name || 'unnamed' }}</span>
-                    <a-tag size="small">{{ tool.type || 'function' }}</a-tag>
+                    <span class="debug-msg-role">{{ roleLabel(msg.role) }}</span>
+                    <span v-if="!isDebugMsgExpanded(`${call.call_id}-sys-${mi}`)" class="debug-msg-preview">{{ msgPreview(msg) }}</span>
                   </div>
-                  <template v-if="isToolCardExpanded(`${call.call_id}-${ti}`)">
-                    <div v-if="toolFn(tool).description" class="debug-tool-card-desc">
-                      {{ toolFn(tool).description }}
-                    </div>
-                    <div v-if="toolParamEntries(tool).length" class="debug-tool-params">
-                      <div class="debug-sub-label">parameters</div>
-                      <div
-                        v-for="param in toolParamEntries(tool)"
-                        :key="param.name"
-                        class="debug-tool-param-row"
-                      >
-                        <code class="debug-tool-param-name">{{ param.name }}</code>
-                        <a-tag size="small">{{ param.type }}</a-tag>
-                        <a-tag v-if="param.required" color="orange" size="small">required</a-tag>
-                        <span v-if="param.description" class="debug-tool-param-desc">{{ param.description }}</span>
-                      </div>
-                    </div>
-                    <a-collapse v-else-if="toolFn(tool).parameters" ghost size="small">
-                      <a-collapse-panel key="params" header="parameters (JSON)">
-                        <pre class="json-block">{{ JSON.stringify(toolFn(tool).parameters, null, 2) }}</pre>
-                      </a-collapse-panel>
-                    </a-collapse>
+                  <template v-if="isDebugMsgExpanded(`${call.call_id}-sys-${mi}`)">
+                    <pre v-if="msg.content" class="debug-msg-content">{{ formatContent(msg.content) }}</pre>
                   </template>
                 </div>
               </div>
-            </div>
-            <div v-if="nonSystemMessages(call.input?.messages).length" class="debug-messages">
-              <div
-                v-for="(msg, mi) in nonSystemMessages(call.input?.messages)"
-                :key="'msg-' + mi"
-                :class="['debug-msg-block', `debug-msg-${msg.role || 'unknown'}`]"
-              >
-                <div class="debug-msg-role">{{ roleLabel(msg.role) }}</div>
-                <pre v-if="msg.content" class="debug-msg-content">{{ formatContent(msg.content) }}</pre>
-                <div v-if="msg.tool_calls?.length" class="debug-tool-calls">
-                  <div class="debug-sub-label">tool_calls</div>
-                  <pre class="json-block">{{ JSON.stringify(msg.tool_calls, null, 2) }}</pre>
-                </div>
-                <div v-if="msg.role === 'tool'" class="debug-tool-meta">
-                  <span v-if="msg.tool_call_id">tool_call_id: {{ msg.tool_call_id }}</span>
-                  <span v-if="msg.name"> · name: {{ msg.name }}</span>
+              <div v-if="call.input?.tools?.length" class="debug-tools-block">
+                <div class="debug-sub-label">Tools 定义（{{ call.input.tools.length }}）</div>
+                <div class="debug-tool-cards">
+                  <div
+                    v-for="(tool, ti) in call.input.tools"
+                    :key="ti"
+                    class="debug-tool-card"
+                  >
+                    <div
+                      class="debug-tool-card-head"
+                      @click="toggleToolCard(`${call.call_id}-${ti}`)"
+                    >
+                      <CaretRightOutlined v-if="!isToolCardExpanded(`${call.call_id}-${ti}`)" style="font-size: 10px;" />
+                      <CaretDownOutlined v-else style="font-size: 10px;" />
+                      <span class="debug-tool-card-name">{{ toolFn(tool).name || 'unnamed' }}</span>
+                      <a-tag size="small">{{ tool.type || 'function' }}</a-tag>
+                    </div>
+                    <template v-if="isToolCardExpanded(`${call.call_id}-${ti}`)">
+                      <div v-if="toolFn(tool).description" class="debug-tool-card-desc">
+                        {{ toolFn(tool).description }}
+                      </div>
+                      <div v-if="toolParamEntries(tool).length" class="debug-tool-params">
+                        <div class="debug-sub-label">parameters</div>
+                        <div
+                          v-for="param in toolParamEntries(tool)"
+                          :key="param.name"
+                          class="debug-tool-param-row"
+                        >
+                          <code class="debug-tool-param-name">{{ param.name }}</code>
+                          <a-tag size="small">{{ param.type }}</a-tag>
+                          <a-tag v-if="param.required" color="orange" size="small">required</a-tag>
+                          <span v-if="param.description" class="debug-tool-param-desc">{{ param.description }}</span>
+                        </div>
+                      </div>
+                      <a-collapse v-else-if="toolFn(tool).parameters" ghost size="small">
+                        <a-collapse-panel key="params" header="parameters (JSON)">
+                          <pre class="json-block">{{ JSON.stringify(toolFn(tool).parameters, null, 2) }}</pre>
+                        </a-collapse-panel>
+                      </a-collapse>
+                    </template>
+                  </div>
                 </div>
               </div>
-            </div>
-            <div class="debug-params">
-              <a-tag>max_tokens: {{ call.input?.max_tokens ?? '—' }}</a-tag>
-              <a-tag>temperature: {{ call.input?.temperature ?? '—' }}</a-tag>
-            </div>
+              <div v-if="nonSystemMessages(call.input?.messages).length" class="debug-messages">
+                <div
+                  v-for="(msg, mi) in nonSystemMessages(call.input?.messages)"
+                  :key="'msg-' + mi"
+                  :class="['debug-msg-block', `debug-msg-${msg.role || 'unknown'}`]"
+                >
+                  <div
+                    class="debug-msg-block-head"
+                    @click="toggleDebugMsgCard(`${call.call_id}-msg-${mi}`)"
+                  >
+                    <CaretRightOutlined v-if="!isDebugMsgExpanded(`${call.call_id}-msg-${mi}`)" style="font-size: 10px;" />
+                    <CaretDownOutlined v-else style="font-size: 10px;" />
+                    <span class="debug-msg-role">{{ roleLabel(msg.role) }}</span>
+                    <span v-if="!isDebugMsgExpanded(`${call.call_id}-msg-${mi}`)" class="debug-msg-preview">{{ msgPreview(msg) }}</span>
+                  </div>
+                  <template v-if="isDebugMsgExpanded(`${call.call_id}-msg-${mi}`)">
+                    <pre v-if="msg.content" class="debug-msg-content">{{ formatContent(msg.content) }}</pre>
+                    <div v-if="msg.tool_calls?.length" class="debug-tool-calls">
+                      <div class="debug-sub-label">tool_calls</div>
+                      <pre class="json-block">{{ JSON.stringify(msg.tool_calls, null, 2) }}</pre>
+                    </div>
+                    <div v-if="msg.role === 'tool'" class="debug-tool-meta">
+                      <span v-if="msg.tool_call_id">tool_call_id: {{ msg.tool_call_id }}</span>
+                      <span v-if="msg.name"> · name: {{ msg.name }}</span>
+                    </div>
+                  </template>
+                </div>
+              </div>
+              <div class="debug-params">
+                <a-tag>max_tokens: {{ call.input?.max_tokens ?? '—' }}</a-tag>
+                <a-tag>temperature: {{ call.input?.temperature ?? '—' }}</a-tag>
+              </div>
+            </template>
           </div>
 
           <div class="debug-section">
-            <div class="debug-section-label">输出</div>
-            <a-alert
-              v-if="call.output?.raw_error"
-              type="error"
-              show-icon
-              :message="call.output.raw_error"
-              style="margin-bottom: 8px;"
-            />
-            <div v-if="call.output?.reasoning_content" class="debug-reasoning">
-              <div class="debug-sub-label">推理内容</div>
-              <pre class="debug-msg-content">{{ formatContent(call.output.reasoning_content) }}</pre>
-            </div>
-            <pre v-if="call.output?.content" class="debug-msg-content">{{ formatContent(call.output.content) }}</pre>
-            <div v-if="call.output?.tool_calls?.length" class="debug-tool-calls">
-              <div class="debug-sub-label">tool_calls</div>
-              <pre class="json-block">{{ JSON.stringify(call.output.tool_calls, null, 2) }}</pre>
-            </div>
-            <div v-if="call.output?.usage && Object.keys(call.output.usage).length" class="debug-usage">
-              <a-tag v-for="(val, key) in call.output.usage" :key="key">{{ key }}: {{ val }}</a-tag>
-            </div>
             <div
-              v-if="!call.output?.raw_error && !call.output?.content && !call.output?.tool_calls?.length && !call.output?.reasoning_content"
-              class="debug-empty-inline"
+              class="debug-section-head"
+              @click="toggleDebugSection(`${call.call_id}-output`)"
             >
-              （无输出内容）
+              <CaretRightOutlined v-if="!isDebugSectionExpanded(`${call.call_id}-output`)" style="font-size: 10px;" />
+              <CaretDownOutlined v-else style="font-size: 10px;" />
+              <span class="debug-section-label">输出</span>
+              <span v-if="!isDebugSectionExpanded(`${call.call_id}-output`)" class="debug-section-summary">
+                · {{ outputSectionSummary(call) }}
+              </span>
             </div>
+            <template v-if="isDebugSectionExpanded(`${call.call_id}-output`)">
+              <a-alert
+                v-if="call.output?.raw_error"
+                type="error"
+                show-icon
+                :message="call.output.raw_error"
+                style="margin-bottom: 8px;"
+              />
+              <div v-if="call.output?.reasoning_content" class="debug-reasoning">
+                <div class="debug-sub-label">推理内容</div>
+                <pre class="debug-msg-content">{{ formatContent(call.output.reasoning_content) }}</pre>
+              </div>
+              <pre v-if="call.output?.content" class="debug-msg-content">{{ formatContent(call.output.content) }}</pre>
+              <div v-if="call.output?.tool_calls?.length" class="debug-tool-calls">
+                <div class="debug-sub-label">tool_calls</div>
+                <pre class="json-block">{{ JSON.stringify(call.output.tool_calls, null, 2) }}</pre>
+              </div>
+              <div v-if="call.output?.usage && Object.keys(call.output.usage).length" class="debug-usage">
+                <a-tag v-for="(val, key) in call.output.usage" :key="key">{{ key }}: {{ val }}</a-tag>
+              </div>
+              <div
+                v-if="!call.output?.raw_error && !call.output?.content && !call.output?.tool_calls?.length && !call.output?.reasoning_content"
+                class="debug-empty-inline"
+              >
+                （无输出内容）
+              </div>
+            </template>
           </div>
 
-          <div class="debug-call-time">{{ formatCallTime(call.created_at) }}</div>
+          <div class="debug-call-time">
+            <span v-if="formatCallTime(call.created_at)">{{ formatCallTime(call.created_at) }}</span>
+            <span v-if="call.duration_ms != null"> · 执行耗时 {{ formatDuration(call.duration_ms) }}</span>
+          </div>
         </a-card>
       </div>
     </a-drawer>
@@ -741,7 +794,7 @@ const activeSkillId = ref(null)
 const showSkillMenu = ref(false)
 const skillMenuIndex = ref(0)
 const slashQuery = ref('')
-const timeoutSeconds = ref(120)
+const timeoutSeconds = ref(180)
 const executionMode = ref('auto')
 const skipHistory = ref(false)
 const creatingSession = ref(false)
@@ -802,6 +855,8 @@ function toolParamEntries(tool) {
 }
 
 const expandedToolCards = ref(new Set())
+const expandedDebugSections = ref(new Set())
+const expandedDebugMsgCards = ref(new Set())
 
 function isToolCardExpanded(key) {
   return expandedToolCards.value.has(key)
@@ -812,6 +867,66 @@ function toggleToolCard(key) {
   if (next.has(key)) next.delete(key)
   else next.add(key)
   expandedToolCards.value = next
+}
+
+function isDebugSectionExpanded(key) {
+  return expandedDebugSections.value.has(key)
+}
+
+function toggleDebugSection(key) {
+  const next = new Set(expandedDebugSections.value)
+  if (next.has(key)) next.delete(key)
+  else next.add(key)
+  expandedDebugSections.value = next
+}
+
+function isDebugMsgExpanded(key) {
+  return expandedDebugMsgCards.value.has(key)
+}
+
+function toggleDebugMsgCard(key) {
+  const next = new Set(expandedDebugMsgCards.value)
+  if (next.has(key)) next.delete(key)
+  else next.add(key)
+  expandedDebugMsgCards.value = next
+}
+
+function contentPreview(content, maxLen = 80) {
+  const text = formatContent(content).replace(/\s+/g, ' ').trim()
+  if (!text) return '（无内容）'
+  return text.length > maxLen ? `${text.slice(0, maxLen)}…` : text
+}
+
+function msgPreview(msg) {
+  if (msg?.content) return contentPreview(msg.content)
+  if (msg?.tool_calls?.length) return `tool_calls (${msg.tool_calls.length})`
+  if (msg?.role === 'tool' && msg.tool_call_id) return `tool_call_id: ${msg.tool_call_id}`
+  return '（无内容）'
+}
+
+function inputSectionSummary(call) {
+  const msgCount = (call.input?.messages || []).length
+  const toolCount = (call.input?.tools || []).length
+  const parts = [`${msgCount} 条消息`]
+  if (toolCount) parts.push(`${toolCount} 个 Tools`)
+  return parts.join(' · ')
+}
+
+function outputSectionSummary(call) {
+  if (call.output?.raw_error) return '错误'
+  const tokens = tokenTotal(call)
+  if (tokens) return `${tokens} tokens`
+  if (call.output?.tool_calls?.length) return '有 tool_calls'
+  if (call.output?.content || call.output?.reasoning_content) return '有内容'
+  return '无输出'
+}
+
+function formatDuration(ms) {
+  if (ms == null) return ''
+  const n = Number(ms)
+  if (Number.isNaN(n)) return ''
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}s (${n}ms)`
+  return `${n}ms`
 }
 
 function formatContent(content) {
@@ -1208,6 +1323,7 @@ function normalizeMessage(msg, intermediateSteps) {
     executionTrace: msg.executionTrace || msg.execution_trace || [],
     executionMode: msg.executionMode || msg.execution_mode || '',
     activeSkill: msg.activeSkill || msg.active_skill || null,
+    runMetrics: msg.runMetrics || msg.run_metrics || null,
     files: msg.files || [],
     filesTruncated: msg.filesTruncated || msg.files_truncated || false,
     codeExecutions: msg.codeExecutions || msg.code_executions || [],
@@ -1345,6 +1461,9 @@ onMounted(async () => {
   try {
     const a = await agentApi.get(agentId)
     Object.assign(agent, a)
+    if (a.timeout_seconds) {
+      timeoutSeconds.value = a.timeout_seconds
+    }
 
     skills.value = (await skillApi.list({ page_size: 100 })).items || []
 
@@ -2631,13 +2750,50 @@ function renderMarkdown(text) {
 .debug-section {
   margin-bottom: 12px;
 }
+.debug-section-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+  margin-bottom: 8px;
+}
+.debug-section-head:hover .debug-section-label {
+  color: #1d4ed8;
+}
 .debug-section-label {
   font-weight: 600;
   font-size: 12px;
   color: #1a1714;
-  margin-bottom: 8px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
+}
+.debug-section-summary {
+  font-size: 11px;
+  color: #9e9590;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: normal;
+}
+.debug-msg-block-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+  margin-bottom: 4px;
+}
+.debug-msg-block-head:hover .debug-msg-role {
+  color: #1d4ed8;
+}
+.debug-msg-preview {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  color: #9e9590;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .debug-sub-label {
   font-size: 11px;
@@ -2720,8 +2876,8 @@ function renderMarkdown(text) {
   font-size: 10px;
   font-weight: 600;
   color: #9e9590;
-  margin-bottom: 4px;
   text-transform: uppercase;
+  flex-shrink: 0;
 }
 .debug-msg-content {
   margin: 0;

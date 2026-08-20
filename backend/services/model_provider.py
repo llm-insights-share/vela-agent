@@ -87,7 +87,14 @@ class ModelProviderService:
                 if response.status_code >= 400:
                     detail = response.text[:1000]
                     print(f"[ModelProviderService] chat error body: {detail}")
-                    response.raise_for_status()
+                    err_msg = detail
+                    try:
+                        err_obj = response.json().get("error", {})
+                        if isinstance(err_obj, dict) and err_obj.get("message"):
+                            err_msg = err_obj["message"]
+                    except Exception:
+                        pass
+                    raise ValueError(f"模型 API 错误 ({response.status_code}): {err_msg}") from None
                 data = response.json()
 
                 result = dict(data)

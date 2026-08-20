@@ -202,6 +202,17 @@ export const toolApi = {
   discoverMcp: (data) => api.post('/tools/mcp/discover', data, { timeout: 60000 }),
 }
 
+export const mcpServerApi = {
+  list: () => api.get('/mcp/servers'),
+  create: (data) => api.post('/mcp/servers', data),
+  get: (id) => api.get(`/mcp/servers/${id}`),
+  update: (id, data) => api.put(`/mcp/servers/${id}`, data),
+  delete: (id) => api.delete(`/mcp/servers/${id}`),
+  discover: (id) => api.post(`/mcp/servers/${id}/discover`, {}, { timeout: 60000 }),
+  sync: (id) => api.post(`/mcp/servers/${id}/sync`, {}, { timeout: 60000 }),
+  startOauth: (id, data) => api.post(`/mcp/servers/${id}/oauth/start`, data || {}),
+}
+
 export const configApi = {
   getToolConfig: () => api.get('/config/tools'),
   updateTavily: (data) => api.put('/config/tools/tavily', data),
@@ -333,7 +344,6 @@ export const screenpilotApi = {
   updateCredential: (id, data) => api.put(`/screenpilot/credentials/${id}`, data),
   deleteCredential: (id) => api.delete(`/screenpilot/credentials/${id}`),
   auditLogs: (params) => api.get('/screenpilot/audit-logs', { params }),
-  mcpTemplate: () => api.get('/screenpilot/mcp-template'),
   listSkills: (params) => api.get('/screenpilot/skills', { params }),
   getSkill: (id) => api.get(`/screenpilot/skills/${id}`),
   updateSkill: (id, data) => api.put(`/screenpilot/skills/${id}`, data),
