@@ -14,10 +14,54 @@ from services.screenpilot.skill_store import skill_store
 
 PARAM_PATTERN = re.compile(r"\{\{(\w+)\}\}")
 
+_CREDENTIAL_PARAM_KEYS = frozenset({
+    "password", "username", "otp", "token", "secret", "passwd", "user",
+})
+
 # 编译去重：业务步骤序列相似度 / 名称语义相似度
 _STEP_DUP_THRESHOLD = 0.75
 _SEMANTIC_DUP_THRESHOLD = 0.88
 _MIN_BUSINESS_STEPS = 1
+
+
+def format_step_note(
+    action: str,
+    target_label: str = "",
+    value: Optional[str] = None,
+) -> str:
+    """Generate a short Chinese step description for UI skill recording."""
+    act = (action or "").strip().lower()
+    label = (target_label or "").strip()
+    val = "" if value is None else str(value).strip()
+    quoted = f"「{label}」" if label else ""
+
+    if act == "click":
+        return f"点击{quoted}" if quoted else "点击目标元素"
+    if act in ("type", "fill"):
+        if quoted and val:
+            return f"在{quoted}输入「{val[:40]}」"
+        if quoted:
+            return f"在{quoted}输入内容"
+        if val:
+            return f"输入「{val[:40]}」"
+        return "输入文本"
+    if act == "select":
+        if quoted and val:
+            return f"在{quoted}选择「{val[:40]}」"
+        if quoted:
+            return f"在{quoted}选择选项"
+        return "选择选项"
+    if act == "navigate":
+        return f"导航至 {val}" if val else "导航到目标页面"
+    if act == "press":
+        return f"按下按键 {val}" if val else "按下按键"
+    if act == "scroll":
+        return f"滚动页面{(' ' + val) if val else ''}".strip()
+    if act == "wait":
+        return f"等待{(' ' + val) if val else ''}".strip() or "等待"
+    if quoted:
+        return f"执行 {act or '操作'}{quoted}"
+    return f"执行 {act or '操作'}"
 
 
 def append_trajectory_step(
@@ -35,6 +79,12 @@ def append_trajectory_step(
     meta = dict(row.meta or {})
     trajectory: List[Dict[str, Any]] = list(meta.get("trajectory") or [])
     step["step_order"] = len(trajectory) + 1
+    if not (step.get("note") or "").strip():
+        step["note"] = format_step_note(
+            step.get("action") or "",
+            step.get("target_label") or "",
+            step.get("value"),
+        )
     trajectory.append(step)
     meta["trajectory"] = trajectory
     row.meta = meta
@@ -67,21 +117,109 @@ def clear_trajectory(db: Session, screen_session_id: str) -> None:
     db.commit()
 
 
+def replace_trajectory(
+    db: Session,
+    screen_session_id: str,
+    steps: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Replace the full trajectory (e.g. after deleting/editing steps in recorder UI)."""
+    row = (
+        db.query(ScreenSession)
+        .filter(ScreenSession.screen_session_id == screen_session_id)
+        .first()
+    )
+    if not row:
+        return []
+    normalized: List[Dict[str, Any]] = []
+    for i, raw in enumerate(steps or []):
+        step = dict(raw)
+        step["step_order"] = i + 1
+        if not (step.get("note") or "").strip():
+            step["note"] = format_step_note(
+                step.get("action") or "",
+                step.get("target_label") or "",
+                step.get("value"),
+            )
+        normalized.append(step)
+    meta = dict(row.meta or {})
+    meta["trajectory"] = normalized
+    row.meta = meta
+    db.commit()
+    return normalized
+
+
 def infer_param_schema(steps: List[Dict[str, Any]]) -> Dict[str, Any]:
-    params: Dict[str, str] = {}
+    """Build JSON Schema for {{placeholders}}; include descriptions from labels/notes."""
+    properties: Dict[str, Dict[str, Any]] = {}
+    required: List[str] = []
     for step in steps:
-        val = step.get("value") or step.get("value_template") or ""
+        val = step.get("value_template") or step.get("value") or ""
         if not isinstance(val, str):
             continue
+        label = (step.get("target_label") or "").strip()
+        note = ""
+        meta = step.get("meta")
+        if isinstance(meta, dict):
+            note = (meta.get("note") or "").strip()
+        note = note or (step.get("note") or "").strip()
         for m in PARAM_PATTERN.finditer(val):
-            params[m.group(1)] = "string"
-    return {"type": "object", "properties": {k: {"type": v} for k, v in params.items()}}
+            key = m.group(1)
+            if key in properties:
+                continue
+            desc = note or (f"填写「{label}」" if label else key)
+            properties[key] = {"type": "string", "description": desc}
+            if key.lower() not in _CREDENTIAL_PARAM_KEYS:
+                required.append(key)
+    schema: Dict[str, Any] = {"type": "object", "properties": properties}
+    if required:
+        schema["required"] = required
+    return schema
+
+
+def normalize_param_key(raw: str) -> str:
+    """Sanitize a user-provided param name to \\w+ for {{placeholders}}."""
+    s = re.sub(r"[^\w]", "_", (raw or "").strip())
+    s = re.sub(r"_+", "_", s).strip("_")
+    if not s:
+        return ""
+    if s[0].isdigit():
+        s = "p_" + s
+    return s[:64]
+
+
+def suggest_param_key(label: str = "", action: str = "") -> str:
+    """Heuristic default param name from field label."""
+    lab = (label or "").strip()
+    low = lab.lower()
+    act = (action or "").strip().lower()
+    if any(k in lab for k in ("搜索", "检索", "关键词", "关键字")) or any(
+        k in low for k in ("search", "query", "keyword")
+    ):
+        return "query"
+    if "部门" in lab or "dept" in low or "department" in low:
+        return "dept"
+    if any(k in lab for k in ("姓名", "人名")) or low in ("name", "full name"):
+        return "name"
+    if any(k in lab for k in ("标题", "主题")) or "title" in low or "subject" in low:
+        return "title"
+    if "日期" in lab or "date" in low:
+        return "date"
+    if act in ("type", "fill", "select") and lab:
+        key = normalize_param_key(lab)
+        return key or "value"
+    return "value"
 
 
 def sanitize_trajectory_value(item: Dict[str, Any]) -> str:
-    """Avoid persisting raw credentials into ui_skill_steps."""
+    """Avoid persisting raw credentials; honor explicit param_key as placeholder."""
+    pk = normalize_param_key(str(item.get("param_key") or ""))
+    if pk:
+        return f"{{{{{pk}}}}}"
+    existing_tpl = item.get("value_template")
+    if isinstance(existing_tpl, str) and PARAM_PATTERN.search(existing_tpl):
+        return existing_tpl
     value = item.get("value") or ""
-    if item.get("action") != "type":
+    if item.get("action") not in ("type", "fill", "select"):
         return value if isinstance(value, str) else str(value or "")
     tgt = item.get("target") or {}
     label = (item.get("target_label") or "") + " " + str(tgt.get("label") or "")
@@ -103,6 +241,7 @@ def sanitize_trajectory_value(item: Dict[str, Any]) -> str:
     ):
         return "{{username}}"
     return value if isinstance(value, str) else str(value or "")
+
 
 
 _NOISE_LABELS = frozenset({
@@ -244,10 +383,13 @@ def find_duplicate_skill(
         ]
         old_sig = business_step_signature(old_dicts)
         step_sim = _signature_similarity(new_sig, old_sig)
+        # Empty business signatures (e.g. pure login) must not merge via name alone.
+        if not new_sig:
+            continue
         # High semantic alone is enough when both have little business signal;
         # otherwise require mild step overlap to avoid false merges.
         if score >= 0.95 or step_sim >= 0.4 or (
-            len(new_sig) <= 1 and len(old_sig) <= 1
+            len(new_sig) <= 1 and len(old_sig) <= 1 and step_sim >= 0.2
         ):
             return {
                 "skill": skill,
@@ -321,6 +463,9 @@ def compile_trajectory_to_skill(
     description: str,
     scope: str = "default",
     parametrize_values: bool = False,
+    require_business_steps: bool = True,
+    force_create: bool = False,
+    on_duplicate: str = "reuse",
 ) -> Dict[str, Any]:
     row = (
         db.query(ScreenSession)
@@ -337,21 +482,45 @@ def compile_trajectory_to_skill(
     compiled_steps = []
     for item in trajectory:
         value = sanitize_trajectory_value(item)
+        if (
+            parametrize_values
+            and (item.get("action") or "").lower() in ("type", "fill", "select")
+            and not PARAM_PATTERN.search(value or "")
+        ):
+            pk = normalize_param_key(str(item.get("param_key") or "")) or suggest_param_key(
+                item.get("target_label") or "",
+                item.get("action") or "",
+            )
+            if pk and pk.lower() not in _CREDENTIAL_PARAM_KEYS:
+                value = f"{{{{{pk}}}}}"
+        note = (item.get("note") or "").strip() or format_step_note(
+            item.get("action") or "",
+            item.get("target_label") or "",
+            value,
+        )
         compiled_steps.append(
             {
                 "system_id": row.system_id,
                 "action": item.get("action"),
                 "target_label": item.get("target_label") or "",
-                "value_template": value if not parametrize_values else value,
+                "value_template": value,
                 "fingerprints": item.get("fingerprints") or build_selector_fingerprint(
                     item.get("target") or {"label": item.get("target_label", ""), "role": item.get("role", "")}
                 ),
-                "meta": {"url": item.get("url", ""), "target_ref": item.get("target_ref")},
+                "meta": {
+                    "url": item.get("url", ""),
+                    "target_ref": item.get("target_ref"),
+                    "note": note,
+                    "param_key": normalize_param_key(str(item.get("param_key") or "")) or None,
+                    "example_value": item.get("value") if item.get("param_key") else None,
+                },
             }
         )
 
     biz_sig = business_step_signature(compiled_steps)
-    if len(biz_sig) < _MIN_BUSINESS_STEPS:
+    # Auto-compile only: skip pure login/noise trajectories.
+    # Explicit SkillRecorder save must allow login skills (username/password/登录).
+    if require_business_steps and len(biz_sig) < _MIN_BUSINESS_STEPS:
         return {
             "success": False,
             "error": "有效业务步骤不足（多为登录噪声），跳过生成技能",
@@ -359,17 +528,35 @@ def compile_trajectory_to_skill(
             "reason": "insufficient_business_steps",
         }
 
-    dup = find_duplicate_skill(
-        db,
-        system_id=row.system_id or "",
-        name=name,
-        description=description or name,
-        steps=compiled_steps,
-        scope=scope,
-    )
+    dup = None
+    if not force_create:
+        dup = find_duplicate_skill(
+            db,
+            system_id=row.system_id or "",
+            name=name,
+            description=description or name,
+            steps=compiled_steps,
+            scope=scope,
+        )
     if dup and dup.get("skill"):
         existing = dup["skill"]
         existing_steps = skill_store.get_steps(db, existing.skill_id)
+        if (on_duplicate or "reuse").lower() == "suggest":
+            return {
+                "success": False,
+                "duplicate_found": True,
+                "skill_id": existing.skill_id,
+                "name": existing.name,
+                "step_count": len(existing_steps),
+                "param_schema": existing.param_schema or {},
+                "duplicate_reason": dup.get("reason"),
+                "duplicate_score": dup.get("score"),
+                "error": (
+                    f"已存在相似技能「{existing.name}」。"
+                    "请选择复用该技能，或强制新建。"
+                ),
+                "message": f"已存在相似技能「{existing.name}」",
+            }
         return {
             "success": True,
             "skill_id": existing.skill_id,
@@ -482,6 +669,80 @@ def auto_compile_pending_trajectories(
     return results
 
 
+def extract_search_query_hint(text: str) -> str:
+    """
+    Pull a likely search keyword from a natural-language goal / user utterance.
+    Prefers quoted text, then「搜索 X」, then a lone Latin token.
+    """
+    text = (text or "").strip()
+    if not text:
+        return ""
+    m = re.search(r"[「\"'『]([^」\"'』]+)[」\"'』]", text)
+    if m and m.group(1).strip():
+        return m.group(1).strip()
+    m = re.search(r"搜索\s*([A-Za-z][A-Za-z0-9_\-\.+]{1,64})", text)
+    if m:
+        return m.group(1)
+    m = re.search(r"搜索\s*([^\s，。,；;：:]+?)(?:相关|论文|文档|的|$)", text)
+    if m:
+        cand = (m.group(1) or "").strip()
+        if cand and cand not in ("一下",):
+            return cand
+    latin = re.findall(r"[A-Za-z][A-Za-z0-9_\-\.+]{1,64}", text)
+    if len(latin) == 1:
+        return latin[0]
+    return ""
+
+
+def collect_template_keys(steps: Any) -> List[str]:
+    """Collect unique {{param}} names from skill steps (order preserved)."""
+    seen = set()
+    ordered: List[str] = []
+    for step in steps or []:
+        if hasattr(step, "value_template"):
+            tpl = step.value_template or ""
+        elif isinstance(step, dict):
+            tpl = step.get("value_template") or step.get("value") or ""
+        else:
+            tpl = ""
+        if not isinstance(tpl, str):
+            continue
+        for m in PARAM_PATTERN.finditer(tpl):
+            key = m.group(1)
+            if key not in seen:
+                seen.add(key)
+                ordered.append(key)
+    return ordered
+
+
+def fill_missing_skill_params(
+    params: Optional[Dict[str, Any]],
+    steps: Any,
+    *,
+    goal: str = "",
+) -> Dict[str, Any]:
+    """
+    Fill missing {{placeholders}} when the agent only passed goal / partial params.
+    Never invent credential fields (username/password/otp/...).
+    """
+    out = dict(params or {})
+    keys = collect_template_keys(steps)
+    if not keys:
+        return out
+
+    goal_val = str(out.get("goal") or goal or "").strip()
+    fill_hint = extract_search_query_hint(goal_val) or goal_val
+    if "query" in keys and not str(out.get("query") or "").strip() and fill_hint:
+        out["query"] = fill_hint
+
+    missing = [k for k in keys if not str(out.get(k) or "").strip()]
+    non_cred_missing = [k for k in missing if k.lower() not in _CREDENTIAL_PARAM_KEYS]
+    if fill_hint and len(non_cred_missing) == 1:
+        only = non_cred_missing[0]
+        if not str(out.get(only) or "").strip():
+            out[only] = fill_hint
+    return out
+
 
 def resolve_template(value_template: str, params: Dict[str, Any]) -> str:
     if not value_template:
@@ -492,3 +753,8 @@ def resolve_template(value_template: str, params: Dict[str, Any]) -> str:
         return str(params.get(key, m.group(0)))
 
     return PARAM_PATTERN.sub(repl, value_template)
+
+
+def unresolved_template_keys(value_template: str, params: Dict[str, Any]) -> List[str]:
+    resolved = resolve_template(value_template or "", params or {})
+    return [m.group(1) for m in PARAM_PATTERN.finditer(resolved)]

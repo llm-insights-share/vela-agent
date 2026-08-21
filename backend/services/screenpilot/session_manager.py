@@ -5,15 +5,21 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import platform
+import shutil
+import subprocess
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
+from urllib.request import urlopen
 
 logger = logging.getLogger(__name__)
 
 _playwright = None
 _local_browser = None
 _cdp_browsers: Dict[str, Any] = {}
+_cdp_launcher_procs: Dict[str, subprocess.Popen] = {}
 _lock = asyncio.Lock()
 _reaper_task: Optional[asyncio.Task] = None
 
@@ -54,6 +60,169 @@ def _cdp_url() -> str:
     return (os.getenv("SCREENPILOT_CDP_URL") or "").strip()
 
 
+def _auto_start_cdp_enabled() -> bool:
+    raw = (os.getenv("SCREENPILOT_AUTO_START_CDP") or "true").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def _cdp_port_from_endpoint(endpoint: str) -> int:
+    try:
+        parsed = urlparse(endpoint if "://" in endpoint else f"http://{endpoint}")
+        if parsed.port:
+            return int(parsed.port)
+    except Exception:
+        pass
+    return 9222
+
+
+def _cdp_user_data_dir(port: int) -> str:
+    env = (os.getenv("SCREENPILOT_CDP_USER_DATA_DIR") or "").strip()
+    if env:
+        path = env
+    else:
+        try:
+            from services.screenpilot.config import SCREENPILOT_DATA_DIR
+
+            path = os.path.join(SCREENPILOT_DATA_DIR, f"chrome-cdp-{port}")
+        except Exception:
+            path = os.path.join("/tmp", f"vela-chrome-cdp-{port}")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _find_chrome_executable() -> str:
+    env = (os.getenv("SCREENPILOT_CHROME_PATH") or "").strip()
+    if env and os.path.isfile(env):
+        return env
+
+    system = platform.system()
+    candidates: List[str] = []
+    if system == "Darwin":
+        candidates = [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        ]
+    elif system == "Windows":
+        pf = os.environ.get("PROGRAMFILES", r"C:\Program Files")
+        pf86 = os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")
+        local = os.environ.get("LOCALAPPDATA", "")
+        candidates = [
+            os.path.join(pf, "Google", "Chrome", "Application", "chrome.exe"),
+            os.path.join(pf86, "Google", "Chrome", "Application", "chrome.exe"),
+            os.path.join(local, "Google", "Chrome", "Application", "chrome.exe"),
+            os.path.join(pf, "Microsoft", "Edge", "Application", "msedge.exe"),
+            os.path.join(pf86, "Microsoft", "Edge", "Application", "msedge.exe"),
+        ]
+    else:
+        for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "microsoft-edge"):
+            found = shutil.which(name)
+            if found:
+                return found
+        candidates = [
+            "/usr/bin/google-chrome",
+            "/usr/bin/google-chrome-stable",
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser",
+        ]
+
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+    raise RuntimeError(
+        "未找到 Chrome/Edge 可执行文件。请安装 Google Chrome，或设置环境变量 SCREENPILOT_CHROME_PATH。"
+    )
+
+
+def _is_cdp_refused(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return any(
+        token in msg
+        for token in (
+            "econnrefused",
+            "connection refused",
+            "err_connection_refused",
+            "actively refused",
+            "connect call failed",
+            "could not connect",
+        )
+    )
+
+
+async def _cdp_http_ready(endpoint: str, timeout_s: float = 1.5) -> bool:
+    ep = (endpoint or "").rstrip("/")
+    url = f"{ep}/json/version"
+
+    def _probe() -> bool:
+        try:
+            with urlopen(url, timeout=timeout_s) as resp:
+                return int(getattr(resp, "status", 200) or 200) < 500
+        except Exception:
+            return False
+
+    return await asyncio.to_thread(_probe)
+
+
+async def _ensure_cdp_chrome_launched(endpoint: str) -> Dict[str, Any]:
+    """Start a dedicated Chrome/Edge with --remote-debugging-port if CDP is down."""
+    ep = (endpoint or "").strip() or DEFAULT_CDP_URL
+    if await _cdp_http_ready(ep):
+        return {"launched": False, "already_ready": True, "cdp_url": ep}
+
+    port = _cdp_port_from_endpoint(ep)
+    chrome = _find_chrome_executable()
+    user_data = _cdp_user_data_dir(port)
+    proc = _cdp_launcher_procs.get(ep)
+    if proc is not None and proc.poll() is None:
+        # Already started by us; wait for readiness.
+        pass
+    else:
+        args = [
+            chrome,
+            f"--remote-debugging-port={port}",
+            f"--user-data-dir={user_data}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-blink-features=AutomationControlled",
+            "about:blank",
+        ]
+        logger.info("ScreenPilot auto-starting CDP browser: port=%s bin=%s", port, chrome)
+        popen_kwargs: Dict[str, Any] = {
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+        }
+        if platform.system() != "Windows":
+            popen_kwargs["start_new_session"] = True
+        else:
+            popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        proc = subprocess.Popen(args, **popen_kwargs)
+        _cdp_launcher_procs[ep] = proc
+
+    deadline = time.monotonic() + float(os.getenv("SCREENPILOT_CDP_START_TIMEOUT", "20") or "20")
+    while time.monotonic() < deadline:
+        if await _cdp_http_ready(ep, timeout_s=1.0):
+            return {
+                "launched": True,
+                "already_ready": False,
+                "cdp_url": ep,
+                "pid": getattr(proc, "pid", None),
+                "user_data_dir": user_data,
+                "chrome_path": chrome,
+            }
+        if proc.poll() is not None:
+            raise RuntimeError(
+                f"自动启动的浏览器已退出（exit={proc.returncode}）。"
+                f"请检查是否可执行：{chrome}，或端口 {port} 是否被占用。"
+            )
+        await asyncio.sleep(0.4)
+
+    raise RuntimeError(
+        f"已尝试自动启动浏览器，但 CDP 仍不可达（{ep}）。"
+        f"请手动执行：\"{chrome}\" --remote-debugging-port={port} --user-data-dir=\"{user_data}\""
+    )
+
+
 @dataclass
 class LiveSession:
     screen_session_id: str
@@ -87,6 +256,16 @@ async def _ensure_playwright():
 
         _playwright = await async_playwright().start()
     return _playwright
+
+
+def _is_playwright_transport_closed(exc: BaseException) -> bool:
+    msg = str(exc) or ""
+    return (
+        "WriteUnixTransport" in msg
+        or "handler is closed" in msg
+        or "Connection closed" in msg
+        or "Target page, context or browser has been closed" in msg
+    )
 
 
 async def _reset_local_browser_unlocked() -> None:
@@ -138,6 +317,15 @@ def _session_alive(sess: LiveSession) -> bool:
         return False
 
 
+async def _launch_chromium():
+    pw = await _ensure_playwright()
+    headless = os.getenv("SCREENPILOT_HEADLESS", "true").lower() in ("1", "true", "yes")
+    return await pw.chromium.launch(
+        headless=headless,
+        args=["--disable-blink-features=AutomationControlled"],
+    )
+
+
 async def _ensure_local_browser():
     global _local_browser
     if _local_browser is not None:
@@ -148,12 +336,17 @@ async def _ensure_local_browser():
             pass
         await _reset_local_browser_unlocked()
 
-    pw = await _ensure_playwright()
-    headless = os.getenv("SCREENPILOT_HEADLESS", "true").lower() in ("1", "true", "yes")
-    _local_browser = await pw.chromium.launch(
-        headless=headless,
-        args=["--disable-blink-features=AutomationControlled"],
-    )
+    try:
+        _local_browser = await _launch_chromium()
+    except Exception as e:
+        if not _is_playwright_transport_closed(e):
+            raise
+        logger.warning(
+            "Playwright driver transport closed; full reset and retry launch: %s",
+            str(e)[:200],
+        )
+        await _reset_all_unlocked()
+        _local_browser = await _launch_chromium()
     return _local_browser
 
 
@@ -171,7 +364,15 @@ async def _ensure_cdp_browser(endpoint: str):
 
     pw = await _ensure_playwright()
     logger.info("ScreenPilot attaching Chromium via CDP: %s", ep)
-    browser = await pw.chromium.connect_over_cdp(ep)
+    try:
+        browser = await pw.chromium.connect_over_cdp(ep)
+    except Exception as e:
+        if not _is_playwright_transport_closed(e):
+            raise
+        logger.warning("CDP connect hit closed Playwright transport; resetting: %s", str(e)[:200])
+        await _reset_all_unlocked()
+        pw = await _ensure_playwright()
+        browser = await pw.chromium.connect_over_cdp(ep)
     _cdp_browsers[ep] = browser
     return browser
 
@@ -212,15 +413,43 @@ async def probe_cdp(endpoint: str = "") -> Dict[str, Any]:
             except Exception:
                 pass
     except Exception as e:
+        hint = (
+            "请先用远程调试端口启动 Chrome/Edge，例如：\n"
+            '/Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome '
+            f'--remote-debugging-port=9222 --user-data-dir="/tmp/chrome-cdp"'
+        )
+        if _auto_start_cdp_enabled() and _is_cdp_refused(e):
+            try:
+                auto_info = await _ensure_cdp_chrome_launched(ep)
+                browser = await _playwright.chromium.connect_over_cdp(ep)
+                try:
+                    return {
+                        "connected": True,
+                        "cdp_url": ep,
+                        "auto_started": True,
+                        "browser_version": getattr(browser, "version", "") or "",
+                        "user_data_dir": auto_info.get("user_data_dir"),
+                        "contexts": len(list(browser.contexts or [])),
+                        "pages": sum(len(ctx.pages or []) for ctx in (browser.contexts or [])),
+                    }
+                finally:
+                    try:
+                        await browser.close()
+                    except Exception:
+                        pass
+            except Exception as e2:
+                return {
+                    "connected": False,
+                    "cdp_url": ep,
+                    "error": str(e2)[:300],
+                    "hint": hint,
+                    "auto_start_attempted": True,
+                }
         return {
             "connected": False,
             "cdp_url": ep,
             "error": str(e)[:300],
-            "hint": (
-                "请先用远程调试端口启动 Chrome/Edge，例如：\n"
-                '/Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome '
-                f'--remote-debugging-port=9222 --user-data-dir="/tmp/chrome-cdp"'
-            ),
+            "hint": hint,
         }
 
 
@@ -306,10 +535,23 @@ async def create_live_session(
             try:
                 browser = await _ensure_cdp_browser(endpoint)
             except Exception as e:
-                raise RuntimeError(
-                    f"无法连接本地浏览器 CDP ({endpoint}): {e}. "
-                    "请先以 --remote-debugging-port 启动 Chrome/Edge 并保持已登录状态。"
-                ) from e
+                if _auto_start_cdp_enabled() and _is_cdp_refused(e):
+                    try:
+                        await _ensure_cdp_chrome_launched(endpoint)
+                        browser = await _ensure_cdp_browser(endpoint)
+                    except Exception as e2:
+                        raise RuntimeError(
+                            f"无法连接本地浏览器 CDP ({endpoint}): {e2}. "
+                            "已尝试自动启动 Chrome/Edge 仍失败。"
+                            "可设置 SCREENPILOT_CHROME_PATH，或手动以 "
+                            "--remote-debugging-port 启动浏览器。"
+                        ) from e2
+                else:
+                    raise RuntimeError(
+                        f"无法连接本地浏览器 CDP ({endpoint}): {e}. "
+                        "请先以 --remote-debugging-port 启动 Chrome/Edge 并保持已登录状态。"
+                        "（也可开启自动启动：SCREENPILOT_AUTO_START_CDP=true）"
+                    ) from e
             contexts = list(browser.contexts or [])
             if not contexts:
                 raise RuntimeError(
@@ -343,8 +585,12 @@ async def create_live_session(
             ctx_kwargs["storage_state"] = storage_state
         try:
             context = await browser.new_context(**ctx_kwargs)
-        except Exception:
-            await _reset_local_browser_unlocked()
+        except Exception as e:
+            # Browser object may be stale; reset driver if transport died.
+            if _is_playwright_transport_closed(e):
+                await _reset_all_unlocked()
+            else:
+                await _reset_local_browser_unlocked()
             browser = await _ensure_local_browser()
             context = await browser.new_context(**ctx_kwargs)
         page = await context.new_page()

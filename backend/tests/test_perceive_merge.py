@@ -1,7 +1,13 @@
 """Unit tests for SoM perception merge / rank / risk_rules / effect helpers."""
+import io
+
+from PIL import Image
+
 from services.screenpilot.layers.govern import _target_state_changed
 from services.screenpilot.layers.perceive import (
+    _som_image_scale,
     box_iou,
+    build_som,
     detect_risk_block,
     merge_elements,
     prepare_som_elements,
@@ -22,11 +28,51 @@ def _el(role, label, x, y, w=20, h=20, source="dom", checked=None):
     return item
 
 
+def _png(w: int, h: int) -> bytes:
+    buf = io.BytesIO()
+    Image.new("RGB", (w, h), color=(240, 240, 240)).save(buf, format="PNG")
+    return buf.getvalue()
+
+
 def test_box_iou_overlap():
     a = {"x": 0, "y": 0, "width": 100, "height": 100}
     b = {"x": 50, "y": 50, "width": 100, "height": 100}
     assert 0.1 < box_iou(a, b) < 0.5
     assert box_iou(a, a) == 1.0
+
+
+def test_som_image_scale_dpr2():
+    sx, sy = _som_image_scale(2560, 1600, (1280, 800))
+    assert sx == 2.0 and sy == 2.0
+
+
+def test_som_image_scale_near_identity():
+    sx, sy = _som_image_scale(1280, 800, (1280, 800))
+    assert sx == 1.0 and sy == 1.0
+
+
+def test_build_som_scales_boxes_to_image_pixels():
+    shot = _png(200, 100)
+    els = [_el("button", "登录", 10, 20, w=40, h=15, source="dom")]
+    som_png, out = build_som(shot, {}, extra_elements=els, viewport_size=(100, 50))
+    assert som_png
+    assert len(out) == 1
+    box = out[0]["box"]
+    assert box["x"] == 20 and box["y"] == 40
+    assert box["width"] == 80 and box["height"] == 30
+    css = out[0]["box_css"]
+    assert css["x"] == 10 and css["y"] == 20
+    assert css["width"] == 40 and css["height"] == 15
+    assert out[0]["box_scale"]["x"] == 2.0
+
+
+def test_build_som_identity_when_viewport_matches():
+    shot = _png(100, 50)
+    els = [_el("button", "登录", 10, 20, w=40, h=15, source="dom")]
+    _, out = build_som(shot, {}, extra_elements=els, viewport_size=(100, 50))
+    assert out[0]["box"]["x"] == 10
+    assert out[0]["box_css"]["x"] == 10
+    assert "box_scale" not in out[0]
 
 
 def test_merge_prefers_checkbox_over_generic():
@@ -107,6 +153,10 @@ def test_merge_keeps_adjacent_button_and_textbox():
 
 if __name__ == "__main__":
     test_box_iou_overlap()
+    test_som_image_scale_dpr2()
+    test_som_image_scale_near_identity()
+    test_build_som_scales_boxes_to_image_pixels()
+    test_build_som_identity_when_viewport_matches()
     test_merge_prefers_checkbox_over_generic()
     test_merge_keeps_distinct_elements()
     test_rank_dialog_and_agreement_first()

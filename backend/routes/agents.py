@@ -312,6 +312,17 @@ def _agent_to_dict(agent: Agent, db: Session) -> dict:
         ModelService.model_service_id == agent.model_service_id
     ).first()
     model_name = model_svc.display_name if model_svc else ""
+    provider_id = ""
+    provider_name = ""
+    provider_code = ""
+    if model_svc and model_svc.provider_id:
+        provider = db.query(ModelProvider).filter(
+            ModelProvider.provider_id == model_svc.provider_id
+        ).first()
+        if provider:
+            provider_id = provider.provider_id or ""
+            provider_name = provider.display_name or ""
+            provider_code = provider.provider_code or ""
 
     current_version = None
     if agent.current_version_id:
@@ -361,6 +372,9 @@ def _agent_to_dict(agent: Agent, db: Session) -> dict:
         "description": agent.description or "",
         "model_service_id": agent.model_service_id or "",
         "model_name": model_name,
+        "provider_id": provider_id,
+        "provider_name": provider_name,
+        "provider_code": provider_code,
         "system_prompt": agent.system_prompt or "",
         "dept_id": agent.dept_id or "",
         "autonomy_level": agent.autonomy_level or "L2",

@@ -10,6 +10,18 @@ from services.screenpilot.layers.govern import (
 from services.screenpilot.layers.ground import find_element_by_ref
 
 
+async def clear_and_type(page, value: Optional[str] = None) -> None:
+    """Replace input contents (incl. browser autofill) then type.
+
+    Uses ControlOrMeta+A so macOS gets Cmd+A and Win/Linux get Ctrl+A,
+    then Backspace as a fallback for stubborn prefills before typing.
+    Caller must focus the target (e.g. click) first.
+    """
+    await page.keyboard.press("ControlOrMeta+A")
+    await page.keyboard.press("Backspace")
+    await page.keyboard.type(str(value or ""))
+
+
 async def _page_readiness(page) -> Dict[str, Any]:
     try:
         return await page.evaluate(
@@ -74,55 +86,9 @@ async def navigate(page, url: str, allowed_domains: List[str]) -> Dict[str, Any]
     ok, reason = check_navigation_allowed(url, allowed_domains)
     if not ok:
         return {"success": False, "error": reason}
-    # #region agent log
-    _t0 = time.time()
-    # #endregion
     await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-    # #region agent log
-    try:
-        import json as _json
-        _ready = await _page_readiness(page)
-        with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-66b153.log", "a") as _f:
-            _f.write(_json.dumps({
-                "sessionId": "66b153", "runId": "post-fix", "hypothesisId": "H1",
-                "location": "act.py:navigate:after_goto",
-                "message": "goto returned (wait_until=domcontentloaded)",
-                "data": {
-                    "url": (url or "")[:160],
-                    "final_url": (page.url or "")[:160],
-                    "elapsed_ms": int((time.time() - _t0) * 1000),
-                    "ready": _ready,
-                },
-                "timestamp": int(time.time() * 1000),
-            }, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
-    # #endregion
 
     settle = await wait_for_page_settle(page, timeout_ms=12000)
-    # #region agent log
-    try:
-        import json as _json
-        with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-66b153.log", "a") as _f:
-            _f.write(_json.dumps({
-                "sessionId": "66b153", "runId": "post-fix", "hypothesisId": "H1",
-                "location": "act.py:navigate:after_settle",
-                "message": "page settle finished before observe",
-                "data": {
-                    "url": (page.url or "")[:160],
-                    "settle": {
-                        "load": settle.get("load"),
-                        "networkidle": settle.get("networkidle"),
-                        "content": settle.get("content"),
-                        "ready": settle.get("ready"),
-                    },
-                    "elapsed_ms": int((time.time() - _t0) * 1000),
-                },
-                "timestamp": int(time.time() * 1000),
-            }, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
-    # #endregion
 
     final_url = page.url
     # Re-check after redirects to prevent allowlist escape.
@@ -183,7 +149,7 @@ async def _click_by_value(page, value: str) -> Dict[str, Any]:
 async def _click_associated_checkbox(page, el: Dict[str, Any]) -> Dict[str, Any]:
     """Toggle native/custom checkbox via label association (handles opacity:0 inputs)."""
     label = (el.get("label") or "").strip()[:80]
-    box = el.get("box") or {}
+    box = el.get("box_css") or el.get("box") or {}
     try:
         ok = await page.evaluate(
             """({label, x, y}) => {
@@ -226,6 +192,11 @@ async def _click_associated_checkbox(page, el: Dict[str, Any]) -> Dict[str, Any]
         return {"success": False, "error": "no associated checkbox"}
     except Exception as e:
         return {"success": False, "error": str(e)[:200]}
+
+
+def _action_box(el: Dict[str, Any]) -> Dict[str, Any]:
+    """Prefer CSS-pixel box for Playwright mouse / elementFromPoint."""
+    return el.get("box_css") or el.get("box") or {}
 
 
 async def execute_action(
@@ -314,7 +285,7 @@ async def execute_action(
                     "error": f"未找到元素引用 {target_ref}",
                 }
 
-            box = el["box"]
+            box = _action_box(el)
             cx = box["x"] + box["width"] / 2
             cy = box["y"] + box["height"] / 2
             click_mode = None
@@ -343,8 +314,7 @@ async def execute_action(
                     click_mode = "coordinate"
             elif action == "type":
                 await page.mouse.click(cx, cy)
-                await page.keyboard.press("Control+A")
-                await page.keyboard.type(str(value or ""))
+                await clear_and_type(page, value)
             else:
                 await page.mouse.click(cx, cy)
                 await page.keyboard.type(str(value or ""))

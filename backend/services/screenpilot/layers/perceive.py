@@ -247,7 +247,13 @@ _DOM_COLLECT_JS = """
     }
     // Also keep checkbox-like custom widgets with aria-checked.
     const isCheck = n.hasAttribute('aria-checked') || (n.getAttribute('role') || '') === 'checkbox';
-    if (near || isCheck) {
+    // Error/interstitial pages often have zero inputs; still keep short clickable leaves.
+    const stCursor = (getComputedStyle(n).cursor || '');
+    const standaloneClickable = formControls.length === 0 && (
+      stCursor === 'pointer' || typeof n.onclick === 'function' || tag === 'a' || tag === 'button'
+      || (n.getAttribute('role') || '') === 'button' || (n.getAttribute('role') || '') === 'link'
+    );
+    if (near || isCheck || standaloneClickable) {
       seenEl.add(n);
       nodes.push(n);
     }
@@ -407,36 +413,37 @@ def extract_a11y_elements(a11y_tree: Dict[str, Any]) -> List[Dict[str, Any]]:
     return out
 
 
-async def capture_page_state(page) -> Tuple[bytes, Dict[str, Any], str]:
-    """截图 + 无障碍树，返回 (png_bytes, a11y_tree, url)。"""
-    url = page.url
-    # #region agent log
+async def page_css_viewport_size(page) -> Tuple[float, float]:
+    """CSS viewport size for aligning SoM boxes with screenshots."""
+    vp = getattr(page, "viewport_size", None) or None
+    if isinstance(vp, dict) and vp.get("width") and vp.get("height"):
+        return float(vp["width"]), float(vp["height"])
     try:
-        import json as _json, time as _time
-        _ready = {}
-        try:
-            _ready = await page.evaluate(
-                """() => ({
-                  readyState: document.readyState,
-                  title: (document.title || '').slice(0, 80),
-                  imgsIncomplete: [...document.images].filter(i => !i.complete).length,
-                  bodyTextLen: ((document.body && document.body.innerText) || '').length
-                })"""
-            )
-        except Exception as _e:
-            _ready = {"eval_error": str(_e)[:120]}
-        with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-66b153.log", "a") as _f:
-            _f.write(_json.dumps({
-                "sessionId": "66b153", "runId": "nav-timing", "hypothesisId": "H3",
-                "location": "perceive.py:capture_page_state:before_shot",
-                "message": "screenshot without waiting for networkidle",
-                "data": {"url": (url or "")[:160], "ready": _ready},
-                "timestamp": int(_time.time() * 1000),
-            }, ensure_ascii=False) + "\n")
+        size = await page.evaluate(
+            "() => ({ w: window.innerWidth || 0, h: window.innerHeight || 0 })"
+        )
+        if isinstance(size, dict):
+            w = float(size.get("w") or 0)
+            h = float(size.get("h") or 0)
+            if w > 0 and h > 0:
+                return w, h
     except Exception:
         pass
-    # #endregion
-    screenshot = await page.screenshot(type="png", full_page=False)
+    return 0.0, 0.0
+
+
+async def capture_page_state(page) -> Tuple[bytes, Dict[str, Any], str]:
+    """截图 + 无障碍树，返回 (png_bytes, a11y_tree, url)。
+
+    使用 scale='css'，使截图像素与 getBoundingClientRect / a11y box（CSS 像素）对齐，
+    避免 Retina/DPR 下 SoM 框整体偏左上。
+    """
+    url = page.url
+    try:
+        screenshot = await page.screenshot(type="png", full_page=False, scale="css")
+    except TypeError:
+        # Older Playwright without scale= — caller/build_som will rescale via viewport.
+        screenshot = await page.screenshot(type="png", full_page=False)
     try:
         # interesting_only=False keeps custom widgets that screen readers may still expose.
         tree = await page.accessibility.snapshot(interesting_only=False)
@@ -723,12 +730,41 @@ def detect_login_wall(body_text: str) -> bool:
     return any(h in low for h in LOGIN_WALL_HINTS)
 
 
+def _som_image_scale(
+    img_w: int,
+    img_h: int,
+    viewport_size: Optional[Tuple[float, float]],
+) -> Tuple[float, float]:
+    """Map CSS-pixel boxes onto screenshot pixels when sizes diverge (e.g. DPR)."""
+    if not viewport_size:
+        return 1.0, 1.0
+    vw, vh = float(viewport_size[0] or 0), float(viewport_size[1] or 0)
+    if vw <= 0 or vh <= 0 or img_w <= 0 or img_h <= 0:
+        return 1.0, 1.0
+    sx = float(img_w) / vw
+    sy = float(img_h) / vh
+    # Ignore tiny float noise; treat near-1 as identity.
+    if abs(sx - 1.0) < 0.05 and abs(sy - 1.0) < 0.05:
+        return 1.0, 1.0
+    # Guard against pathological ratios (wrong viewport).
+    if sx < 0.4 or sx > 4.0 or sy < 0.4 or sy > 4.0:
+        return 1.0, 1.0
+    return sx, sy
+
+
 def build_som(
     screenshot_png: bytes,
     a11y_tree: Dict[str, Any],
     extra_elements: Optional[List[Dict[str, Any]]] = None,
+    viewport_size: Optional[Tuple[float, float]] = None,
 ) -> Tuple[bytes, List[Dict[str, Any]]]:
-    """SoM 标注：返回 (标注图 png, elements 列表)。"""
+    """SoM 标注：返回 (标注图 png, elements 列表)。
+
+    Element boxes from DOM/a11y are CSS pixels. Screenshots may still be device
+    pixels if scale='css' is unavailable — pass viewport_size so we scale boxes
+    onto the image. Returned ``box`` is in image pixels (for UI overlay/click);
+    ``box_css`` keeps CSS pixels for Playwright mouse / elementFromPoint.
+    """
     raw_elements: List[Dict[str, Any]] = []
     _walk_a11y(a11y_tree, raw_elements)
     if extra_elements:
@@ -736,6 +772,8 @@ def build_som(
 
     img = Image.open(io.BytesIO(screenshot_png)).convert("RGBA")
     draw = ImageDraw.Draw(img)
+    img_w, img_h = img.size
+    sx, sy = _som_image_scale(img_w, img_h, viewport_size)
     try:
         font = ImageFont.load_default()
     except Exception:
@@ -743,23 +781,54 @@ def build_som(
 
     elements: List[Dict[str, Any]] = []
     for idx, el in enumerate(raw_elements, start=1):
-        box = el["box"]
-        x, y, w, h = box["x"], box["y"], box["width"], box["height"]
+        box = el.get("box") or {}
+        try:
+            x = float(box.get("x", 0) or 0)
+            y = float(box.get("y", 0) or 0)
+            w = float(box.get("width", 0) or 0)
+            h = float(box.get("height", 0) or 0)
+        except (TypeError, ValueError):
+            continue
         if w <= 0 or h <= 0:
             continue
+        # Image-space geometry for drawing / frontend hit-test.
+        ix, iy, iw, ih = x * sx, y * sy, w * sx, h * sy
+        # Clamp element box to image bounds for drawing.
+        x0 = max(0, min(int(ix), img_w - 1))
+        y0 = max(0, min(int(iy), img_h - 1))
+        x1 = max(x0 + 1, min(int(ix + iw), img_w))
+        y1 = max(y0 + 1, min(int(iy + ih), img_h))
         ref = f"[{idx}]"
         color = (0, 196, 255, 200)
-        draw.rectangle([x, y, x + w, y + h], outline=color, width=2)
-        tag = ref
-        draw.rectangle([x, max(0, y - 14), x + 28, y], fill=(245, 200, 66, 230))
-        draw.text((x + 2, max(0, y - 12)), tag, fill=(0, 0, 0), font=font)
+        try:
+            draw.rectangle([x0, y0, x1, y1], outline=color, width=2)
+            # Tag above the box when possible; otherwise place inside top edge.
+            tag_h = 14
+            if y0 >= tag_h:
+                ty0, ty1 = y0 - tag_h, y0
+            else:
+                ty0, ty1 = y0, min(y0 + tag_h, img_h)
+            if ty1 <= ty0:
+                ty1 = ty0 + 1
+            tx0 = x0
+            tx1 = min(x0 + 28, img_w)
+            if tx1 <= tx0:
+                tx1 = tx0 + 1
+            draw.rectangle([tx0, ty0, tx1, ty1], fill=(245, 200, 66, 230))
+            draw.text((tx0 + 2, ty0 + 1), ref, fill=(0, 0, 0), font=font)
+        except Exception:
+            # Skip drawing for malformed boxes; still expose the element for selection.
+            pass
         item = {
             "ref": ref,
-            "role": el["role"],
-            "label": el["label"],
-            "box": box,
+            "role": el.get("role", ""),
+            "label": el.get("label", ""),
+            "box": {"x": ix, "y": iy, "width": iw, "height": ih},
+            "box_css": {"x": x, "y": y, "width": w, "height": h},
             "path": el.get("path", ""),
         }
+        if sx != 1.0 or sy != 1.0:
+            item["box_scale"] = {"x": sx, "y": sy}
         if "checked" in el and el["checked"] is not None:
             item["checked"] = el["checked"]
         if el.get("source"):

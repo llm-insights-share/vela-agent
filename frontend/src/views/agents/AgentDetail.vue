@@ -28,6 +28,7 @@
               <a-descriptions-item label="部门">{{ agent.dept_id }}</a-descriptions-item>
               <a-descriptions-item label="并发上限">{{ agent.max_concurrent_sessions }}</a-descriptions-item>
               <a-descriptions-item label="Token 预算">{{ agent.token_budget }}</a-descriptions-item>
+              <a-descriptions-item label="供应商">{{ agent.provider_name || '-' }}</a-descriptions-item>
               <a-descriptions-item label="模型">{{ agent.model_name }}</a-descriptions-item>
             </a-descriptions>
           </a-card>
@@ -70,13 +71,26 @@
       </a-row>
 
       <a-card title="版本历史" style="margin-top: 16px">
-        <a-table :columns="versionColumns" :data-source="versions" row-key="version_id" :pagination="false" size="small">
+        <a-table
+          :columns="versionColumns"
+          :data-source="versions"
+          row-key="version_id"
+          :pagination="{ pageSize: 10 }"
+          size="small"
+        >
           <template #bodyCell="{ column, record }">
+            <template v-if="column.key === 'created_at'">
+              {{ formatDateTime(record.created_at) }}
+            </template>
             <template v-if="column.key === 'status'">
-              <a-tag :color="record.status === 'PUBLISHED' ? 'green' : 'default'">{{ record.status }}</a-tag>
+              <a-tag :color="record.status === 'PUBLISHED' ? 'green' : (record.status === 'DEPRECATED' ? 'orange' : 'default')">{{ record.status }}</a-tag>
             </template>
             <template v-if="column.key === 'action'">
-              <a-button v-if="record.status === 'PUBLISHED' && record.version_id !== agent.current_version_id" size="small" @click="handleRollback(record.version_id)">回滚到此版本</a-button>
+              <a-button
+                v-if="record.version_id !== agent.current_version_id && ['PUBLISHED', 'DEPRECATED'].includes(record.status)"
+                size="small"
+                @click="handleRollback(record.version_id)"
+              >回滚到此版本</a-button>
             </template>
           </template>
         </a-table>
@@ -123,6 +137,7 @@ const versionColumns = [
   { title: '版本号', dataIndex: 'version' },
   { title: '变更类型', dataIndex: 'change_type', width: 100 },
   { title: '变更说明', dataIndex: 'change_summary' },
+  { title: '创建时间', key: 'created_at', dataIndex: 'created_at', width: 180 },
   { title: '状态', key: 'status', width: 100 },
   { title: '操作', key: 'action', width: 120 },
 ]
@@ -134,6 +149,13 @@ function statusColor(s) {
 function statusLabel(s) {
   const m = { DRAFT: '草稿', PUBLISHED: '已发布', DEPRECATED: '已下架', DELETED: '已删除' }
   return m[s] || s
+}
+function formatDateTime(value) {
+  if (!value) return '-'
+  const d = new Date(value)
+  if (Number.isNaN(d.getTime())) return String(value)
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
 }
 
 async function fetchAgent() {

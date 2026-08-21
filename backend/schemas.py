@@ -196,6 +196,7 @@ class HITLReview(BaseModel):
     reviewer: str = Field(default="", max_length=128)
     comment: str = Field(default="", max_length=2048)
     otp_code: Optional[str] = Field(default=None, max_length=32)
+    param_values: Optional[Dict[str, Any]] = None
 
 
 class ToolBindingItem(BaseModel):
@@ -215,6 +216,9 @@ class AgentResponse(BaseModel):
     description: str = ""
     model_service_id: str = ""
     model_name: Optional[str] = None
+    provider_id: str = ""
+    provider_name: str = ""
+    provider_code: str = ""
     system_prompt: str = ""
     dept_id: str = ""
     autonomy_level: str = "L2"

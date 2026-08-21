@@ -245,6 +245,9 @@ class AgentService:
         if not agent:
             return None
 
+        auto_publish_on_update = agent.status in (AgentStatus.PUBLISHED, AgentStatus.DEPRECATED)
+        previous_version_id = agent.current_version_id
+
         update_fields = data.model_dump(exclude_unset=True, exclude={"skill_pack_ids", "knowledge_base_ids", "tool_ids", "tool_bindings", "change_summary"})
         change_summary = data.change_summary or "配置修改"
 
@@ -272,7 +275,7 @@ class AgentService:
             change_type = ChangeType.PATCH
             new_ver = f"{parts[0]}.{parts[1]}.{int(parts[2]) + 1}"
 
-        if agent.status == AgentStatus.DRAFT:
+        if not auto_publish_on_update and agent.status == AgentStatus.DRAFT:
             new_ver += "-draft"
 
         snapshot = {
@@ -306,10 +309,21 @@ class AgentService:
             change_type=change_type,
             change_summary=change_summary,
             snapshot=snapshot,
-            status=VersionStatus.DRAFT,
+            status=VersionStatus.PUBLISHED if auto_publish_on_update else VersionStatus.DRAFT,
         )
         db.add(version)
         db.flush()
+
+        if auto_publish_on_update:
+            if previous_version_id and previous_version_id != version.version_id:
+                prev = db.query(AgentVersion).filter(
+                    AgentVersion.version_id == previous_version_id
+                ).first()
+                if prev:
+                    prev.status = VersionStatus.DEPRECATED
+            version.version = version.version.replace("-draft", "")
+            agent.status = AgentStatus.PUBLISHED
+
         agent.current_version_id = version.version_id
 
         if data.skill_pack_ids is not None:
@@ -907,6 +921,18 @@ class AgentService:
                                 "flow_kind": "otp_wait",
                                 "prompt": approval.tool_args.get("prompt") or "请输入短信验证码",
                             }
+                        if not preview_payload and approval.tool_name == "cu_skill_params":
+                            preview_payload = {
+                                "flow_kind": "skill_params",
+                                "prompt": approval.tool_args.get("prompt") or "请补充技能参数",
+                                "missing_params": approval.tool_args.get("missing_params") or [],
+                                "param_schema": approval.tool_args.get("param_schema") or {},
+                                "filled_params": {
+                                    k: v
+                                    for k, v in (approval.tool_args.get("params") or {}).items()
+                                    if str(k).lower() not in ("password", "passwd", "token", "secret", "otp")
+                                },
+                            }
                 except Exception:
                     pass
                 if he.tool_name == "cu_login_otp" or preview_payload.get("flow_kind") == "otp_wait":
@@ -915,6 +941,19 @@ class AgentService:
                         f"⏸️ 登录需要验证码：{prompt}\n"
                         f"审批工单 ID: `{he.approval_id}`\n\n"
                         "请在对话下方输入验证码并提交。"
+                    )
+                elif (
+                    he.tool_name == "cu_skill_params"
+                    or preview_payload.get("flow_kind") == "skill_params"
+                ):
+                    missing = preview_payload.get("missing_params") or []
+                    prompt = preview_payload.get("prompt") or (
+                        f"请补充技能参数：{', '.join(missing)}" if missing else "请补充技能参数"
+                    )
+                    hitl_content = (
+                        f"⏸️ {prompt}\n"
+                        f"审批工单 ID: `{he.approval_id}`\n\n"
+                        "请在对话下方填写缺失参数并提交。"
                     )
                 else:
                     hitl_content = (
@@ -934,6 +973,8 @@ class AgentService:
                     "preview_payload": preview_payload,
                     "pending_otp": he.tool_name == "cu_login_otp"
                     or preview_payload.get("flow_kind") == "otp_wait",
+                    "pending_skill_params": he.tool_name == "cu_skill_params"
+                    or preview_payload.get("flow_kind") == "skill_params",
                     "session_status": "HITL_WAIT",
                 }
                 if rewrite_meta:
@@ -1067,6 +1108,8 @@ class AgentLoop:
         # SGL-IMP-03: 死循环检测历史
         self._tool_call_history: List[str] = []
         self._screenpilot_session_ids: set = set()
+        self._sp_used_skill_tools = False
+        self._sp_skill_gate_done = False
         self._web_search_calls = 0
         self._tool_rounds = 0
         self._skill_synthesis_nudge = False
@@ -1254,6 +1297,22 @@ class AgentLoop:
                     )
             except Exception:
                 pass
+            has_skill_tools = any(
+                (getattr(t, "name", "") or "") in (
+                    "cu_search_skills", "cu_replay_skill", "cu_run_task",
+                    "ui_search_skills", "ui_replay_skill",
+                )
+                for t in (self.available_tools or [])
+            )
+            if has_skill_tools:
+                system_prompt += (
+                    "\n\n【驭屏 UI 技能优先】执行浏览器/驭屏任务时：\n"
+                    "1. 必须先 cu_search_skills(query=用户任务) 或直接 cu_run_task(system_id, goal=用户任务)；\n"
+                    "2. 若检索命中 ACTIVE 技能，必须 cu_navigate 拿到 screen_session_id 后调用 "
+                    "cu_replay_skill(skill_id, screen_session_id)，按技能库步骤执行；\n"
+                    "3. 禁止在未检索技能库的情况下直接逐步 cu_act 完成可通过技能重放的任务；"
+                    "仅当检索无命中或 cu_replay_skill 返回 needs_replan 时，才允许 cu_observe/cu_act 临时操作。\n"
+                )
         has_code_exec = any(
             (getattr(t, "name", "") or "") == "execute_code"
             for t in (self.available_tools or [])
@@ -1876,6 +1935,195 @@ class AgentLoop:
             return payload["approval_id"]
         return None
 
+    async def _screenpilot_skill_first_gate(
+        self, tool_name: str, args: Optional[Dict[str, Any]] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Prefer UI skill library over free-form cu_act when a high-score skill exists."""
+        if not tool_name.startswith(("cu_", "ui_")):
+            return None
+        if tool_name in (
+            "cu_search_skills", "ui_search_skills",
+            "cu_replay_skill", "ui_replay_skill",
+            "cu_run_task", "cu_compile_skill",
+        ):
+            self._sp_used_skill_tools = True
+            return None
+        if tool_name not in ("cu_navigate", "cu_act", "ui_navigate", "ui_act"):
+            return None
+        if self._sp_used_skill_tools or self._sp_skill_gate_done:
+            return None
+        has_skill_tools = any(
+            (getattr(t, "name", "") or "") in (
+                "cu_search_skills", "cu_replay_skill", "cu_run_task",
+                "ui_search_skills", "ui_replay_skill",
+            )
+            for t in (self.available_tools or [])
+        )
+        if not has_skill_tools:
+            return None
+
+        query = (self.original_user_message or self._content_to_str(self.user_message) or "").strip()
+        if not query:
+            self._sp_skill_gate_done = True
+            return None
+        threshold = 0.55
+        try:
+            from services.screenpilot.service import search_skills
+
+            res = await search_skills(self.db, query=query, scope="default", top_k=5)
+            items = list(res.get("items") or [])
+        except Exception as e:
+            self._sp_skill_gate_done = True
+            self.thinking_log.append(f"  [UI技能门控] 检索失败，放行逐步操作: {e}")
+            return None
+
+        # Prefer skills belonging to the navigate target system when provided.
+        system_hint = ((args or {}).get("system_id") or "").strip()
+        if system_hint and items:
+            try:
+                from services.screenpilot.service import _get_system
+
+                sys_row = _get_system(self.db, system_hint)
+                sid = (sys_row.system_id if sys_row else "") or ""
+                sname = ((sys_row.name if sys_row else "") or "").lower()
+                filtered = []
+                for it in items:
+                    if sid and it.get("system_id") == sid:
+                        filtered.append(it)
+                    elif sname and sname in ((it.get("name") or "") + (it.get("description") or "")).lower():
+                        filtered.append(it)
+                    elif system_hint.lower() in ((it.get("name") or "") + (it.get("description") or "")).lower():
+                        filtered.append(it)
+                if filtered:
+                    items = filtered
+            except Exception:
+                pass
+
+        top = items[0] if items else None
+        score = float((top or {}).get("score") or 0)
+        # Reject semantically high but lexically unrelated hits (e.g. 亚信 for arxiv query).
+        aligned = True
+        if top:
+            from services.screenpilot.skill_store import skill_store
+
+            boost = skill_store._lexical_boost(
+                query, top.get("name") or "", top.get("description") or ""
+            )
+            aligned = boost > 0 or score >= 0.75
+        if not top or score < threshold or not aligned:
+            self._sp_skill_gate_done = True
+            self.thinking_log.append(
+                f"  [UI技能门控] 无合适技能(top={score:.3f}, aligned={aligned})，允许 {tool_name}"
+            )
+            return None
+
+        name = top.get("name") or top.get("skill_id")
+        skill_id = top.get("skill_id")
+        system_id = top.get("system_id") or ""
+        self.thinking_log.append(
+            f"  [UI技能门控] 命中「{name}」score={score:.3f}，拦截 {tool_name}，要求 cu_run_task/cu_replay_skill"
+        )
+        return {
+            "success": False,
+            "error": (
+                f"UI 技能库已命中「{name}」(skill_id={skill_id}, score={score:.3f})。"
+                "请勿直接逐步 cu_act。请改用："
+                f"cu_run_task(system_id=\"{system_id or system_hint or '对应驭屏系统'}\", goal=用户原任务, "
+                f"params 填入技能占位符如 {{{{query}}}})，"
+                f"或先 cu_search_skills，再 cu_navigate + cu_replay_skill(skill_id=\"{skill_id}\", screen_session_id=..., params=...)。"
+            ),
+            "suggested_skill": {
+                "skill_id": skill_id,
+                "name": name,
+                "score": score,
+                "system_id": system_id,
+            },
+        }
+
+    def _inject_screenpilot_skill_params(
+        self, tool_name: str, args: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Fill params.query/goal from the user utterance when the LLM omits them."""
+        if tool_name not in (
+            "cu_replay_skill", "ui_replay_skill", "cu_run_task",
+        ):
+            return args
+        from services.screenpilot.trajectory import extract_search_query_hint
+
+        user = (
+            self.original_user_message
+            or self._content_to_str(self.user_message)
+            or ""
+        ).strip()
+        params = (
+            dict(args.get("params") or {})
+            if isinstance(args.get("params"), dict)
+            else {}
+        )
+        if tool_name == "cu_run_task":
+            goal = (args.get("goal") or "").strip() or user
+            if goal:
+                args["goal"] = goal
+                params.setdefault("goal", goal)
+            if not str(params.get("query") or "").strip():
+                hint = extract_search_query_hint(goal) or extract_search_query_hint(user) or goal
+                if hint:
+                    params["query"] = hint
+        else:
+            if user and not str(params.get("goal") or "").strip():
+                params["goal"] = user
+            if not str(params.get("query") or "").strip():
+                hint = (
+                    extract_search_query_hint(str(params.get("goal") or ""))
+                    or extract_search_query_hint(user)
+                    or user
+                )
+                if hint:
+                    params["query"] = hint
+        if user:
+            params.setdefault("_user_text", user)
+        args["params"] = params
+        return args
+
+    async def _enrich_screenpilot_skill_params(
+        self, tool_name: str, args: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Async multi-field extract using skill param_schema + LLM."""
+        args = self._inject_screenpilot_skill_params(tool_name, args)
+        if tool_name not in ("cu_replay_skill", "ui_replay_skill", "cu_run_task"):
+            return args
+        params = dict(args.get("params") or {}) if isinstance(args.get("params"), dict) else {}
+        skill_id = (args.get("skill_id") or params.get("skill_id") or "").strip()
+        user = str(params.get("_user_text") or params.get("goal") or args.get("goal") or "").strip()
+        schema = None
+        step_hints = None
+        try:
+            from services.screenpilot.skill_store import skill_store
+            from services.screenpilot.param_extract import extract_skill_params
+
+            skill = skill_store.get_skill(self.db, skill_id) if skill_id else None
+            if skill and isinstance(skill.param_schema, dict):
+                schema = skill.param_schema
+                steps = skill_store.get_steps(self.db, skill.skill_id) or []
+                step_hints = [
+                    f"{s.action}:{(s.target_label or '')}={(s.value_template or '')}"
+                    for s in steps[:20]
+                ]
+            if schema and user:
+                extracted = await extract_skill_params(
+                    self.db,
+                    user_text=user,
+                    param_schema=schema,
+                    existing=params,
+                    step_hints=step_hints,
+                    use_llm=True,
+                )
+                params.update(extracted.get("values") or {})
+                args["params"] = params
+        except Exception:
+            pass
+        return args
+
     def _track_screenpilot_session(self, tool_result: Any) -> None:
         """Collect screen_session_id from cu_* results and backfill vela_session_id."""
         raw = tool_result
@@ -1918,6 +2166,11 @@ class AgentLoop:
                 args["vela_session_id"] = self.session.session_id
             if not args.get("agent_id"):
                 args["agent_id"] = getattr(self.agent, "agent_id", "") or ""
+            args = await self._enrich_screenpilot_skill_params(tool_name, args)
+            redirect = await self._screenpilot_skill_first_gate(tool_name, args)
+            if redirect is not None:
+                self._memory_record_tool(tool.name, args, redirect)
+                return redirect
 
         # SGL-CFG-06: HITL 拦截 - 工具调用前检查 require_approval
         tool_id = getattr(tool, "tool_id", None) or tool.name

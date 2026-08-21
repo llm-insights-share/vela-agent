@@ -13,10 +13,12 @@ def find_element_by_ref(elements: List[Dict[str, Any]], target_ref: str) -> Opti
 
 def build_selector_fingerprint(element: Dict[str, Any]) -> Dict[str, Any]:
     """为技能重放预留的多候选指纹（P1 扩展）。"""
+    # Prefer CSS-space geometry for replay / elementFromPoint.
+    box = element.get("box_css") or element.get("box")
     return {
         "ref": element.get("ref"),
         "role": element.get("role"),
         "label": element.get("label"),
-        "box": element.get("box"),
+        "box": box,
         "path": element.get("path"),
     }

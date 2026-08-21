@@ -144,7 +144,10 @@ async def run_task(
     高级任务执行：Observe → Plan(技能检索) → Act(重放/导航) → Verify。
     不会在本层自由 cu_act（避免绕过 HITL）；失败时返回 needs_agent + plan_hints。
     """
-    params = params or {}
+    params = dict(params or {})
+    if (goal or "").strip():
+        # So replay_skill can fill {{query}} / single non-credential placeholders from goal.
+        params.setdefault("goal", goal.strip())
     steps_trace: List[Dict[str, Any]] = []
     sid = screen_session_id
     skill_candidates: List[Dict[str, Any]] = []

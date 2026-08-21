@@ -126,6 +126,53 @@ def approve_action(
             "tool_result": tool_result_str,
         }
 
+    # ScreenPilot 技能缺参追问 HITL
+    if approval.tool_name == "cu_skill_params" or tool_args.get("flow_kind") == "skill_params":
+        param_values = payload.param_values if isinstance(payload.param_values, dict) else {}
+        if not param_values and (payload.comment or "").strip():
+            # allow comment as JSON fallback
+            try:
+                import json as _json
+                parsed = _json.loads(payload.comment)
+                if isinstance(parsed, dict):
+                    param_values = parsed
+            except Exception:
+                pass
+        missing = list(tool_args.get("missing_params") or [])
+        still = [k for k in missing if not str(param_values.get(k) or "").strip()]
+        if still:
+            raise HTTPException(status_code=400, detail=f"请填写参数: {', '.join(still)}")
+
+        tool_result_str = ""
+        if session:
+            from services.screenpilot.service import resume_skill_after_params_approval
+            tool_result_str = __import__("asyncio").run(
+                resume_skill_after_params_approval(db, approval, param_values)
+            )
+            messages = session.messages or []
+            preview = tool_args.get("preview_payload") or {}
+            messages.append({
+                "role": "system",
+                "content": (
+                    f"[HITL 技能参数已提交] 已合并参数 {list(param_values.keys())}，"
+                    f"重放结果如下：\n{tool_result_str}"
+                ),
+                "meta": {"approved": True, "approval_id": approval_id, "preview_payload": preview},
+            })
+            session.messages = messages
+            session.pending_context = {}
+        db.commit()
+        if session and (session.caller_type or "").upper() == "SCHEDULE":
+            from services.schedule.runner import sync_schedule_run_from_session
+            sync_schedule_run_from_session(db, session.session_id)
+        return {
+            "success": True,
+            "message": "技能参数已提交",
+            "tool_name": approval.tool_name,
+            "kind": "screenpilot_skill_params",
+            "tool_result": tool_result_str,
+        }
+
     # ScreenPilot: cu_*（兼容历史 ui_*）延迟动作审批通过后执行
     tool_args = approval.tool_args or {}
     if approval.tool_name.startswith(("cu_", "ui_")) and tool_args.get("deferred"):

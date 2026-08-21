@@ -145,7 +145,7 @@
         <a-form-item label="复用本地浏览器会话（CDP）">
           <a-switch v-model:checked="form.reuse_local_browser" />
           <div style="margin-top: 6px; font-size: 12px; color: #888;">
-            开启后附着本机已登录的 Chrome/Edge，继承 Cookie，可绕过登录墙；关闭则启动独立无头浏览器。
+            开启后附着本机 Chrome/Edge（CDP）。若 9222 未启动，系统会自动拉起独立调试浏览器窗口；请在该窗口完成登录后继续录制。
           </div>
         </a-form-item>
         <template v-if="form.reuse_local_browser">
@@ -153,8 +153,8 @@
             type="info"
             show-icon
             style="margin-bottom: 12px"
-            message="请先以远程调试端口启动浏览器并手动登录目标系统"
-            description="macOS 示例：/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222 --user-data-dir=/tmp/chrome-cdp"
+            message="CDP 不可达时会自动启动本机 Chrome/Edge"
+            description="使用独立 user-data-dir（不占用你日常 Chrome 配置）。也可手动启动：/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222 --user-data-dir=/tmp/chrome-cdp"
           />
           <a-form-item label="CDP 地址">
             <a-input

@@ -171,11 +171,67 @@ class SkillStore:
         self._id_maps[scope] = []
         for s in skills:
             self.index_skill(s.skill_id, f"{s.name}\n{s.description}", scope)
+        logger.info(
+            "FAISS rebuilt scope=%s skills=%s ntotal=%s",
+            scope,
+            len(skills),
+            self._indexes[scope].ntotal,
+        )
+
+    def _sync_index_with_db(self, db: Session, scope: str) -> None:
+        """Rebuild when ACTIVE skill set drifts from on-disk FAISS map."""
+        scope = scope or "default"
+        index = self._ensure_index(scope)
+        active_ids = [
+            row.skill_id
+            for row in db.query(UiSkill)
+            .filter(UiSkill.scope == scope, UiSkill.status == "ACTIVE")
+            .all()
+        ]
+        id_map = list(self._id_maps.get(scope, []))
+        if index.ntotal == 0 or set(id_map) != set(active_ids):
+            logger.warning(
+                "FAISS out of sync scope=%s index_ids=%s db_active=%s — rebuilding",
+                scope,
+                len(id_map),
+                len(active_ids),
+            )
+            self.rebuild_scope_from_db(db, scope)
+
+    @staticmethod
+    def _lexical_boost(query: str, name: str, description: str = "") -> float:
+        """Boost skills whose name/key tokens appear in the query (fix semantic drift)."""
+        import re
+
+        q = (query or "").lower()
+        if not q:
+            return 0.0
+        name = name or ""
+        desc = description or ""
+        bonus = 0.0
+        if name and name.lower() in q:
+            bonus += 0.25
+        for tok in re.findall(r"[a-zA-Z][a-zA-Z0-9_-]{2,}", name):
+            if tok.lower() in q:
+                bonus += 0.2
+        # Chinese 2-grams from skill name
+        for i in range(len(name) - 1):
+            gram = name[i : i + 2]
+            if all("\u4e00" <= c <= "\u9fff" for c in gram) and gram in query:
+                bonus += 0.08
+        # Strong domain tokens shared by query and skill text
+        blob = f"{name} {desc}".lower()
+        for tok in ("arxiv", "亚信", "通讯录", "论文"):
+            if tok in q and tok in blob:
+                bonus += 0.12
+        return min(bonus, 0.45)
 
     def search(
         self, query: str, scope: str = "default", top_k: int = 5, db: Optional[Session] = None
     ) -> List[Tuple[str, float]]:
         scope = scope or "default"
+        if db is not None:
+            self._sync_index_with_db(db, scope)
         index = self._ensure_index(scope)
         if index.ntotal == 0 and db is not None:
             self.rebuild_scope_from_db(db, scope)
@@ -184,13 +240,30 @@ class SkillStore:
         if index.ntotal == 0 or not query.strip():
             return []
         emb = self._embed(query)
-        k = min(top_k, index.ntotal)
+        k = min(max(top_k * 3, top_k), index.ntotal)
         scores, indices = index.search(emb, k)
-        results = []
+        scored: List[Tuple[str, float]] = []
         for score, idx in zip(scores[0], indices[0]):
             if idx < 0 or idx >= len(id_map):
                 continue
-            results.append((id_map[idx], float(score)))
+            sid = id_map[idx]
+            adj = float(score)
+            if db is not None:
+                skill = self.get_skill(db, sid)
+                if skill:
+                    adj += self._lexical_boost(query, skill.name or "", skill.description or "")
+            scored.append((sid, adj))
+        scored.sort(key=lambda x: -x[1])
+        # Dedupe and truncate
+        seen = set()
+        results: List[Tuple[str, float]] = []
+        for sid, score in scored:
+            if sid in seen:
+                continue
+            seen.add(sid)
+            results.append((sid, score))
+            if len(results) >= top_k:
+                break
         return results
 
     def create_skill(

@@ -62,7 +62,7 @@ async def snapshot_target_state(page, el: Optional[Dict[str, Any]]) -> Optional[
     """Capture target widget state for post-action effect checks."""
     if not el or not page:
         return None
-    box = el.get("box") or {}
+    box = el.get("box_css") or el.get("box") or {}
     cx = float(box.get("x", 0)) + float(box.get("width", 0)) / 2
     cy = float(box.get("y", 0)) + float(box.get("height", 0)) / 2
     label = (el.get("label") or "")[:120]

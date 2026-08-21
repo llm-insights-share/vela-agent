@@ -111,6 +111,11 @@ const routes = [
     component: () => import('../views/screenpilot/SkillList.vue'),
   },
   {
+    path: '/screenpilot/skills/record',
+    name: 'ScreenPilotSkillRecorder',
+    component: () => import('../views/screenpilot/SkillRecorder.vue'),
+  },
+  {
     path: '/screenpilot/shop',
     redirect: '/screenpilot/skills',
   },

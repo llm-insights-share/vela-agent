@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from services.screenpilot.layers.act import clear_and_type, wait_for_page_settle
 from services.screenpilot.layers.govern import verify_action
 
 
@@ -58,8 +59,6 @@ async def execute_by_fingerprints(
             if not value:
                 return {"success": False, "error": "navigate 需要 URL"}
             await page.goto(value, wait_until="domcontentloaded", timeout=60000)
-            from services.screenpilot.layers.act import wait_for_page_settle
-
             await wait_for_page_settle(page, timeout_ms=12000)
         elif action == "wait":
             import asyncio
@@ -73,10 +72,11 @@ async def execute_by_fingerprints(
             cy = bb["y"] + bb["height"] / 2
             if action == "click":
                 await page.mouse.click(cx, cy)
+            elif action == "type":
+                await page.mouse.click(cx, cy)
+                await clear_and_type(page, value)
             else:
                 await page.mouse.click(cx, cy)
-                if action == "type":
-                    await page.keyboard.press("Control+A")
                 await page.keyboard.type(str(value or ""))
         else:
             return {"success": False, "error": f"重放不支持动作: {action}"}

@@ -26,9 +26,22 @@
         <a-form-item label="描述" name="description">
           <a-textarea v-model:value="form.description" placeholder="Agent 描述" :rows="2" />
         </a-form-item>
+        <a-form-item label="供应商" :rules="[{ required: true, message: '请选择供应商' }]">
+          <a-select v-model:value="selectedProviderId" placeholder="选择供应商" show-search option-filter-prop="label" @change="onProviderChange">
+            <a-select-option v-for="p in providers" :key="p.provider_id" :value="p.provider_id" :label="p.display_name">
+              {{ p.display_name }}
+            </a-select-option>
+          </a-select>
+        </a-form-item>
         <a-form-item label="模型服务" name="model_service_id" :rules="[{ required: true, message: '请选择模型服务' }]">
-          <a-select v-model:value="form.model_service_id" placeholder="选择模型服务" show-search option-filter-prop="label">
-            <a-select-option v-for="s in services" :key="s.model_service_id" :value="s.model_service_id" :label="s.display_name">
+          <a-select
+            v-model:value="form.model_service_id"
+            placeholder="选择模型服务"
+            show-search
+            option-filter-prop="label"
+            :disabled="!selectedProviderId"
+          >
+            <a-select-option v-for="s in filteredServices" :key="s.model_service_id" :value="s.model_service_id" :label="s.display_name">
               {{ s.display_name }} ({{ s.model_name }})
             </a-select-option>
           </a-select>
@@ -149,16 +162,18 @@
 <script setup>
 import { reactive, ref, computed, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { agentApi, serviceApi, skillApi, knowledgeApi, toolApi } from '../../api'
+import { agentApi, providerApi, serviceApi, skillApi, knowledgeApi, toolApi } from '../../api'
 import { message } from 'ant-design-vue'
 
 const router = useRouter()
 const route = useRoute()
 const submitting = ref(false)
+const providers = ref([])
 const services = ref([])
 const skills = ref([])
 const knowledgeBases = ref([])
 const toolList = ref([])
+const selectedProviderId = ref('')
 
 const groupedTools = computed(() => {
   const groups = new Map()
@@ -178,6 +193,10 @@ const groupedTools = computed(() => {
   }
   if (others.length) result.push({ label: groups.size ? '其他工具' : '全部工具', items: others })
   return result
+})
+const filteredServices = computed(() => {
+  if (!selectedProviderId.value) return []
+  return services.value.filter((s) => s.provider_id === selectedProviderId.value)
 })
 
 const isEdit = computed(() => !!route.params.id)
@@ -235,21 +254,52 @@ function onToolSelectionChange() {
   syncToolBindingsFromForm()
 }
 
+async function loadModelServices(providerId) {
+  if (!providerId) {
+    services.value = []
+    return
+  }
+  const res = await serviceApi.list({ provider_id: providerId, page_size: 100 })
+  services.value = res.items || []
+}
+
+async function onProviderChange() {
+  form.model_service_id = ''
+  await loadModelServices(selectedProviderId.value)
+}
+
+function ensureCurrentModelService(agent) {
+  if (!agent?.model_service_id) return false
+  const exists = services.value.some((s) => s.model_service_id === agent.model_service_id)
+  if (!exists) {
+    services.value.unshift({
+      model_service_id: agent.model_service_id,
+      display_name: agent.model_name || agent.model_service_id,
+      model_name: agent.model_name || '',
+      provider_id: selectedProviderId.value || agent.provider_id || '',
+    })
+  }
+  return exists
+}
+
 onMounted(async () => {
   try {
-    const [svc, sk, kb, tl] = await Promise.all([
-      serviceApi.list({ page_size: 100 }),
+    const [pv, sk, kb, tl] = await Promise.all([
+      providerApi.list({ page_size: 100 }),
       skillApi.list({ page_size: 100 }),
       knowledgeApi.list({ page_size: 100 }),
       toolApi.list({ page_size: 100 }),
     ])
-    services.value = svc.items
+    providers.value = pv.items || []
     skills.value = sk.items
     knowledgeBases.value = kb.items
     toolList.value = tl.items
 
     if (isEdit.value) {
       const agent = await agentApi.get(agentId.value)
+      selectedProviderId.value = agent.provider_id || ''
+      await loadModelServices(selectedProviderId.value)
+      ensureCurrentModelService(agent)
       Object.assign(form, {
         name: agent.name,
         description: agent.description,
@@ -286,6 +336,8 @@ onMounted(async () => {
           require_approval: !!(b && b.require_approval),
         }
       })
+    } else {
+      services.value = []
     }
   } catch (e) {
     message.error(e.message)

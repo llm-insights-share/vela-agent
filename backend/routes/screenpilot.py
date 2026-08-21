@@ -371,6 +371,7 @@ class SkillCompileRequest(BaseModel):
     name: str
     description: str = ""
     scope: str = "default"
+    force_create: bool = False
 
 
 class SkillSearchRequest(BaseModel):
@@ -385,6 +386,41 @@ class SkillReplayRequest(BaseModel):
     params: dict = Field(default_factory=dict)
     vela_session_id: str = ""
     agent_id: str = ""
+
+
+class SkillRunRequest(BaseModel):
+    system_id: str
+    goal: str = ""
+    screen_session_id: Optional[str] = None
+    skill_id: Optional[str] = None
+    params: dict = Field(default_factory=dict)
+    scope: str = "default"
+    vela_session_id: str = ""
+    agent_id: str = ""
+
+
+class SessionNavigateRequest(BaseModel):
+    system_id: str
+    url: str = ""
+    screen_session_id: Optional[str] = None
+    auto_login: bool = True
+    vela_session_id: str = ""
+    agent_id: str = ""
+
+
+class SessionActRequest(BaseModel):
+    action: str
+    target_ref: Optional[str] = None
+    value: Optional[str] = None
+    note: Optional[str] = None
+    param_key: Optional[str] = None
+    vela_session_id: str = ""
+    agent_id: str = ""
+    force_execute: bool = False
+
+
+class TrajectoryReplaceRequest(BaseModel):
+    steps: List[dict] = Field(default_factory=list)
 
 
 @router.get("/skills")
@@ -553,6 +589,7 @@ async def compile_skill_api(body: SkillCompileRequest, db: Session = Depends(get
         name=body.name,
         description=body.description,
         scope=body.scope,
+        force_create=body.force_create,
     )
 
 
@@ -577,6 +614,161 @@ async def replay_skill_api(body: SkillReplayRequest, db: Session = Depends(get_d
         vela_session_id=body.vela_session_id,
         agent_id=body.agent_id,
     )
+
+
+@router.post("/skills/run")
+async def run_skill_api(body: SkillRunRequest, db: Session = Depends(get_db)):
+    """按自然语言描述检索并执行 UI 技能（封装 run_task）。"""
+    _require_enabled()
+    from services.screenpilot.run_task import run_task
+
+    return await run_task(
+        db,
+        system_id=body.system_id,
+        goal=body.goal or "",
+        screen_session_id=body.screen_session_id,
+        skill_id=body.skill_id,
+        params=body.params,
+        vela_session_id=body.vela_session_id,
+        agent_id=body.agent_id,
+        scope=body.scope or "default",
+    )
+
+
+# --- 录制会话 API（SoM 引导录制） ---
+
+
+@router.post("/sessions/navigate")
+async def navigate_session_api(body: SessionNavigateRequest, db: Session = Depends(get_db)):
+    _require_enabled()
+    from services.screenpilot.service import navigate_ui
+
+    return await navigate_ui(
+        db,
+        system_id=body.system_id,
+        url=body.url or "",
+        screen_session_id=body.screen_session_id,
+        vela_session_id=body.vela_session_id,
+        agent_id=body.agent_id,
+        auto_login=body.auto_login,
+    )
+
+
+@router.post("/sessions/{screen_session_id}/observe")
+async def observe_session_api(screen_session_id: str, db: Session = Depends(get_db)):
+    _require_enabled()
+    from services.screenpilot.service import observe_session
+
+    return await observe_session(db, screen_session_id)
+
+
+@router.post("/sessions/{screen_session_id}/act")
+async def act_session_api(
+    screen_session_id: str,
+    body: SessionActRequest,
+    db: Session = Depends(get_db),
+):
+    _require_enabled()
+    from services.screenpilot.service import act_ui
+
+    return await act_ui(
+        db,
+        screen_session_id=screen_session_id,
+        action=body.action,
+        target_ref=body.target_ref,
+        value=body.value,
+        note=body.note,
+        param_key=body.param_key,
+        vela_session_id=body.vela_session_id,
+        agent_id=body.agent_id,
+        force_execute=body.force_execute,
+    )
+
+
+@router.get("/sessions/{screen_session_id}/trajectory")
+def get_trajectory_api(screen_session_id: str, db: Session = Depends(get_db)):
+    _require_enabled()
+    from models import ScreenSession
+    from services.screenpilot.trajectory import get_trajectory
+
+    row = (
+        db.query(ScreenSession)
+        .filter(ScreenSession.screen_session_id == screen_session_id)
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    steps = get_trajectory(db, screen_session_id)
+    return {
+        "success": True,
+        "screen_session_id": screen_session_id,
+        "system_id": row.system_id,
+        "steps": steps,
+        "step_count": len(steps),
+    }
+
+
+@router.put("/sessions/{screen_session_id}/trajectory")
+def replace_trajectory_api(
+    screen_session_id: str,
+    body: TrajectoryReplaceRequest,
+    db: Session = Depends(get_db),
+):
+    _require_enabled()
+    from models import ScreenSession
+    from services.screenpilot.trajectory import replace_trajectory
+
+    row = (
+        db.query(ScreenSession)
+        .filter(ScreenSession.screen_session_id == screen_session_id)
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    steps = replace_trajectory(db, screen_session_id, body.steps or [])
+    return {
+        "success": True,
+        "screen_session_id": screen_session_id,
+        "steps": steps,
+        "step_count": len(steps),
+    }
+
+
+@router.delete("/sessions/{screen_session_id}/trajectory")
+def clear_trajectory_api(screen_session_id: str, db: Session = Depends(get_db)):
+    _require_enabled()
+    from models import ScreenSession
+    from services.screenpilot.trajectory import clear_trajectory
+
+    row = (
+        db.query(ScreenSession)
+        .filter(ScreenSession.screen_session_id == screen_session_id)
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    clear_trajectory(db, screen_session_id)
+    return {"success": True, "screen_session_id": screen_session_id, "steps": [], "step_count": 0}
+
+
+@router.delete("/sessions/{screen_session_id}")
+async def close_session_api(screen_session_id: str, db: Session = Depends(get_db)):
+    _require_enabled()
+    from models import ScreenSession
+    from services.screenpilot.session_manager import close_live_session
+
+    row = (
+        db.query(ScreenSession)
+        .filter(ScreenSession.screen_session_id == screen_session_id)
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    await close_live_session(screen_session_id)
+    row.status = "CLOSED"
+    row.updated_at = now_utc()
+    db.commit()
+    return {"success": True, "screen_session_id": screen_session_id, "status": "CLOSED"}
 
 
 # --- P2: 技能商店 API ---
@@ -760,26 +952,6 @@ def approve_screenpilot(
     if not row:
         raise HTTPException(status_code=404, detail="审批工单不存在")
 
-    # #region agent log
-    try:
-        import json as _json, time as _time
-        with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-66b153.log", "a") as _f:
-            _f.write(_json.dumps({
-                "sessionId": "66b153", "runId": "hitl-fix", "hypothesisId": "H1",
-                "location": "routes/screenpilot.py:approve_screenpilot",
-                "message": "approve inbox request",
-                "data": {
-                    "approval_id": approval_id,
-                    "tool_name": row.tool_name,
-                    "session_id": (row.session_id or "")[:40],
-                    "has_otp": bool((body.otp_code or "").strip() or (body.comment or "").strip()),
-                },
-                "timestamp": int(_time.time() * 1000),
-            }, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
-    # #endregion
-
     review = HITLReview(
         approved=True,
         reviewer=body.reviewer or "vela_approver",
@@ -803,25 +975,6 @@ def reject_screenpilot(
     row = db.query(HITLApproval).filter(HITLApproval.approval_id == approval_id).first()
     if not row:
         raise HTTPException(status_code=404, detail="审批工单不存在")
-
-    # #region agent log
-    try:
-        import json as _json, time as _time
-        with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-66b153.log", "a") as _f:
-            _f.write(_json.dumps({
-                "sessionId": "66b153", "runId": "hitl-fix", "hypothesisId": "H1",
-                "location": "routes/screenpilot.py:reject_screenpilot",
-                "message": "reject inbox request",
-                "data": {
-                    "approval_id": approval_id,
-                    "tool_name": row.tool_name,
-                    "session_id": (row.session_id or "")[:40],
-                },
-                "timestamp": int(_time.time() * 1000),
-            }, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
-    # #endregion
 
     review = HITLReview(
         approved=False,

@@ -25,6 +25,7 @@ from services.screenpilot.layers.perceive import (
     detect_login_wall,
     detect_risk_block,
     extract_a11y_elements,
+    page_css_viewport_size,
     prepare_som_elements,
 )
 from services.screenpilot.layers.replay import enrich_fingerprints_from_page, execute_by_fingerprints
@@ -229,7 +230,11 @@ async def observe_session(db: Session, screen_session_id: str) -> Dict[str, Any]
         a11y_els, dom_els, dialogs, max_elements=DEFAULT_MAX_ELEMENTS
     )
     som_source = som_meta.get("som_source") or "empty"
-    som_img, elements = build_som(shot, {}, extra_elements=ranked)
+    viewport = await page_css_viewport_size(live.page)
+    vp_arg = viewport if viewport[0] > 0 and viewport[1] > 0 else None
+    som_img, elements = build_som(
+        shot, {}, extra_elements=ranked, viewport_size=vp_arg
+    )
     live.elements = elements
     live.last_screenshot = shot
     live.last_som_image = som_img
@@ -301,6 +306,27 @@ async def observe_session(db: Session, screen_session_id: str) -> Dict[str, Any]
             "请先完成登录，或设置 auto_login=true 并配置登录宏。"
         )
         result["login_required"] = True
+    else:
+        # Soft detect when system risk_rules is empty but URL already shows a block page.
+        low_url = (url or "").lower()
+        if "website-login/error" in low_url or "error_code=" in low_url:
+            code = "RISK_URL"
+            try:
+                from urllib.parse import urlparse, parse_qs
+                qs = parse_qs(urlparse(url).query)
+                code = (qs.get("error_code") or qs.get("errorCode") or [code])[0]
+            except Exception:
+                pass
+            result["risk_blocked"] = True
+            result["error_code"] = str(code)
+            result["warning"] = (
+                f"当前落在安全/登录错误页（error_code={code}），可交互元素可能为空。"
+                "小红书等站点请在驭屏系统中开启「复用本地浏览器」，并配置 risk_rules。"
+            )
+            result["recovery_hint"] = (
+                "开启 reuse_local_browser（CDP）继承本机已登录会话；"
+                "或关闭代理/VPN 后重试；并在系统配置中粘贴 risk_rules 示例。"
+            )
 
     # Structural SMS/login form hint (no site-specific vocabulary).
     textboxes = [
@@ -394,24 +420,6 @@ async def observe_session(db: Session, screen_session_id: str) -> Dict[str, Any]
         result["recovery_hint"] = (
             "cu_act action=wait value=2000 → cu_observe；若仍无元素则导航到系统登录 URL"
         )
-        # #region agent log
-        try:
-            import json as _json, time as _time
-            with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-66b153.log", "a") as _f:
-                _f.write(_json.dumps({
-                    "sessionId": "66b153", "runId": "vision-guard", "hypothesisId": "H3",
-                    "location": "service.py:observe_session:page_not_ready",
-                    "message": "suppress suggest_vision on empty shell",
-                    "data": {
-                        "url": (url or "")[:160],
-                        "element_count": len(elements),
-                        "ready": ready_probe,
-                    },
-                    "timestamp": int(_time.time() * 1000),
-                }, ensure_ascii=False) + "\n")
-        except Exception:
-            pass
-        # #endregion
     elif sparse or canvas_count > 0:
         result["suggest_vision"] = True
         result["vision_hint"] = (
@@ -471,11 +479,6 @@ async def navigate_ui(
     agent_id: str = "",
     auto_login: bool = True,
 ) -> Dict[str, Any]:
-    # #region agent log
-    import time as _time
-    _nav_t0 = _time.time()
-    _phases: Dict[str, int] = {}
-    # #endregion
     system = _get_system(db, system_id)
     if not system:
         return _system_lookup_error(db, system_id)
@@ -496,9 +499,6 @@ async def navigate_ui(
         if not ok_nav:
             return {"success": False, "error": reason_nav, "url": target_url}
 
-    # #region agent log
-    _t_open = _time.time()
-    # #endregion
     try:
         live = await _open_live_browser_session(
             db,
@@ -510,11 +510,9 @@ async def navigate_ui(
         return {
             "success": False,
             "error": str(e),
+            "screen_session_id": row.screen_session_id,
             "reuse_local_browser": bool(getattr(system, "reuse_local_browser", False)),
         }
-    # #region agent log
-    _phases["open_browser_ms"] = int((_time.time() - _t_open) * 1000)
-    # #endregion
 
     if (system.exec_mode or "browser") == "desktop":
         obs = await observe_session(db, row.screen_session_id)
@@ -582,45 +580,13 @@ async def navigate_ui(
                     await save_storage_state(db, resolved_id, live.context)
 
     if target_url:
-        # #region agent log
-        _t_goto = _time.time()
-        # #endregion
         nav = await execute_action(
             live.page, "navigate", [], value=target_url, allowed_domains=allowed
         )
-        # #region agent log
-        _phases["final_goto_ms"] = int((_time.time() - _t_goto) * 1000)
-        # #endregion
         if not nav.get("success"):
             return nav
 
-    # #region agent log
-    _t_obs = _time.time()
-    # #endregion
     obs = await observe_session(db, row.screen_session_id)
-    # #region agent log
-    try:
-        import json as _json
-        _phases["final_observe_ms"] = int((_time.time() - _t_obs) * 1000)
-        _phases["total_ms"] = int((_time.time() - _nav_t0) * 1000)
-        with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-66b153.log", "a") as _f:
-            _f.write(_json.dumps({
-                "sessionId": "66b153", "runId": "nav-timing", "hypothesisId": "H2",
-                "location": "service.py:navigate_ui:exit",
-                "message": "navigate_ui phase timings",
-                "data": {
-                    "system_id": resolved_id[:12],
-                    "target_url": (target_url or "")[:160],
-                    "auto_login": auto_login,
-                    "phases_ms": _phases,
-                    "element_count": len(obs.get("elements") or []),
-                    "login_required": bool(obs.get("login_required")),
-                },
-                "timestamp": int(_time.time() * 1000),
-            }, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
-    # #endregion
     obs["screen_session_id"] = row.screen_session_id
     obs["system_id"] = resolved_id
     obs["system_name"] = system.name
@@ -725,6 +691,99 @@ def create_hitl_for_login_otp(
     db.commit()
     db.refresh(approval)
     return approval
+
+
+def create_hitl_for_skill_params(
+    db: Session,
+    *,
+    screen_session_id: str,
+    vela_session_id: str,
+    agent_id: str,
+    skill_id: str,
+    missing_params: List[str],
+    param_schema: Optional[Dict[str, Any]] = None,
+    params: Optional[Dict[str, Any]] = None,
+    resume_tool: str = "cu_replay_skill",
+    prompt: str = "",
+) -> HITLApproval:
+    """技能重放缺参：结构化追问表单。"""
+    from models import Session as AgentSession
+
+    safe_params = {
+        k: v
+        for k, v in (params or {}).items()
+        if str(k).lower() not in ("password", "passwd", "token", "secret", "otp")
+    }
+    preview = {
+        "flow_kind": "skill_params",
+        "prompt": prompt
+        or f"请补充技能参数：{', '.join(missing_params)}",
+        "missing_params": list(missing_params or []),
+        "param_schema": param_schema or {},
+        "filled_params": safe_params,
+        "skill_id": skill_id,
+    }
+    tool_args = {
+        "flow_kind": "skill_params",
+        "screen_session_id": screen_session_id,
+        "skill_id": skill_id,
+        "params": dict(params or {}),
+        "missing_params": list(missing_params or []),
+        "param_schema": param_schema or {},
+        "resume_tool": resume_tool or "cu_replay_skill",
+        "preview_payload": preview,
+        "prompt": preview["prompt"],
+    }
+    approval = HITLApproval(
+        approval_id=gen_uuid(),
+        session_id=vela_session_id,
+        agent_id=agent_id,
+        tool_name="cu_skill_params",
+        tool_args=tool_args,
+        status="PENDING",
+        created_at=now_utc(),
+    )
+    db.add(approval)
+
+    sess = db.query(AgentSession).filter(
+        AgentSession.session_id == vela_session_id
+    ).first()
+    if sess:
+        sess.status = SessionStatus.HITL_WAIT
+
+    db.commit()
+    db.refresh(approval)
+    return approval
+
+
+async def resume_skill_after_params_approval(
+    db: Session,
+    approval: HITLApproval,
+    param_values: Dict[str, Any],
+) -> str:
+    """HITL 补参后继续技能重放。"""
+    tool_args = approval.tool_args or {}
+    skill_id = tool_args.get("skill_id") or ""
+    screen_session_id = tool_args.get("screen_session_id") or ""
+    if not skill_id or not screen_session_id:
+        return "缺少 skill_id 或 screen_session_id"
+    merged = dict(tool_args.get("params") or {})
+    for k, v in (param_values or {}).items():
+        if v is None:
+            continue
+        s = str(v).strip()
+        if s:
+            merged[k] = s
+    result = await replay_skill(
+        db,
+        skill_id=skill_id,
+        screen_session_id=screen_session_id,
+        params=merged,
+        vela_session_id=approval.session_id or "",
+        agent_id=approval.agent_id or "",
+        force_execute=False,
+    )
+    return json.dumps(result, ensure_ascii=False)
 
 
 async def resume_login_after_otp_approval(
@@ -892,6 +951,8 @@ async def act_ui(
     action: str,
     target_ref: Optional[str] = None,
     value: Optional[str] = None,
+    note: Optional[str] = None,
+    param_key: Optional[str] = None,
     vela_session_id: str = "",
     agent_id: str = "",
     force_execute: bool = False,
@@ -1026,6 +1087,7 @@ async def act_ui(
                 "action": action,
                 "target_ref": target_ref,
                 "value": value,
+                "note": (note or "").strip() or None,
             },
             preview_payload=preview,
             risk_tier=risk_tier,
@@ -1101,6 +1163,8 @@ async def act_ui(
             "target_ref": target_ref,
             "target_label": target_label,
             "value": value,
+            "note": (note or "").strip() or None,
+            "param_key": (param_key or "").strip() or None,
             "url": live.page.url if live.page else "",
             "role": (target_el or {}).get("role", ""),
             "target": target_el,
@@ -1207,8 +1271,89 @@ async def replay_skill(
     cred_map = load_credential_map(db, skill.system_id) if skill.system_id else {}
     incoming = dict(params or {})
     from services.screenpilot.layers.credential import merge_params_with_credentials
+    from services.screenpilot.trajectory import fill_missing_skill_params, unresolved_template_keys
 
     params = merge_params_with_credentials(cred_map, incoming)
+    # Multi-param extract from goal / user utterance before resolve
+    try:
+        from services.screenpilot.param_extract import extract_skill_params
+
+        schema = skill.param_schema if isinstance(getattr(skill, "param_schema", None), dict) else None
+        if not schema:
+            from services.screenpilot.trajectory import infer_param_schema
+
+            schema = infer_param_schema(
+                [
+                    {
+                        "value_template": s.value_template,
+                        "target_label": s.target_label,
+                        "meta": s.meta,
+                    }
+                    for s in steps
+                ]
+            )
+        user_text = str(incoming.get("goal") or incoming.get("_user_text") or "")
+        if user_text or schema:
+            extracted = await extract_skill_params(
+                db,
+                user_text=user_text,
+                param_schema=schema,
+                existing=params,
+                step_hints=[
+                    f"{s.action}:{(s.target_label or '')}={(s.value_template or '')}"
+                    for s in steps[:20]
+                ],
+                use_llm=True,
+            )
+            params.update(extracted.get("values") or {})
+    except Exception:
+        pass
+
+    params = fill_missing_skill_params(
+        params,
+        steps,
+        goal=str(incoming.get("goal") or ""),
+    )
+    missing_keys: list = []
+    for _st in steps:
+        _tpl = _st.value_template or ""
+        if _tpl:
+            missing_keys.extend(unresolved_template_keys(_tpl, params))
+    if missing_keys:
+        uniq = sorted(set(missing_keys))
+        schema = skill.param_schema if isinstance(getattr(skill, "param_schema", None), dict) else {}
+        if (vela_session_id or "").strip():
+            approval = create_hitl_for_skill_params(
+                db,
+                screen_session_id=screen_session_id,
+                vela_session_id=vela_session_id,
+                agent_id=agent_id,
+                skill_id=skill_id,
+                missing_params=uniq,
+                param_schema=schema,
+                params=params,
+                resume_tool="cu_replay_skill",
+                prompt=f"技能「{skill.name}」缺少参数，请补充：{', '.join(uniq)}",
+            )
+            return {
+                "success": True,
+                "hitl_pending": True,
+                "approval_id": approval.approval_id,
+                "needs_params": True,
+                "missing_params": uniq,
+                "preview_payload": (approval.tool_args or {}).get("preview_payload") or {},
+                "message": f"技能参数不全，等待补充：{', '.join(uniq)}",
+            }
+        return {
+            "success": False,
+            "error": (
+                f"技能重放缺少参数: {', '.join(uniq)}。"
+                f"请在 params 中传入，例如 params={{\"{uniq[0]}\": \"...\"}}。"
+            ),
+            "missing_params": uniq,
+            "needs_params": True,
+            "param_schema": schema,
+        }
     results = []
 
     for step in steps:
@@ -1312,6 +1457,7 @@ async def compile_skill(
     name: str,
     description: str = "",
     scope: str = "default",
+    force_create: bool = False,
 ) -> Dict[str, Any]:
     return compile_trajectory_to_skill(
         db,
@@ -1319,6 +1465,9 @@ async def compile_skill(
         name=name,
         description=description,
         scope=scope,
+        require_business_steps=False,
+        force_create=force_create,
+        on_duplicate="suggest",
     )
 
 
@@ -1370,6 +1519,7 @@ async def execute_deferred_ui_act(db: Session, approval: HITLApproval) -> str:
         action=args.get("action", "click"),
         target_ref=args.get("target_ref"),
         value=args.get("value"),
+        note=args.get("note"),
         vela_session_id=approval.session_id,
         agent_id=approval.agent_id,
         force_execute=True,
@@ -1533,25 +1683,6 @@ async def vision_query(
         ready_probe = settle_info.get("ready") or await _page_readiness(live.page)
         text_len = int(ready_probe.get("bodyTextLen") or 0)
         interactive_n = int(ready_probe.get("interactive") or 0)
-        # #region agent log
-        try:
-            import json as _json, time as _time
-            with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-66b153.log", "a") as _f:
-                _f.write(_json.dumps({
-                    "sessionId": "66b153", "runId": "vision-guard", "hypothesisId": "H1",
-                    "location": "service.py:vision_query:precheck",
-                    "message": "vision readiness precheck",
-                    "data": {
-                        "url": (live.page.url or "")[:160],
-                        "settle_content": bool(settle_info.get("content")),
-                        "ready": ready_probe,
-                        "question": q[:80],
-                    },
-                    "timestamp": int(_time.time() * 1000),
-                }, ensure_ascii=False) + "\n")
-        except Exception:
-            pass
-        # #endregion
         if text_len < 20 and interactive_n < 3:
             return {
                 "success": False,

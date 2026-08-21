@@ -216,6 +216,8 @@
           <a-alert
             :message="msg.pendingOtp || msg.previewPayload?.flow_kind === 'otp_wait'
               ? (msg.previewPayload?.prompt || '请输入短信验证码')
+              : (msg.pendingSkillParams || msg.previewPayload?.flow_kind === 'skill_params')
+                ? (msg.previewPayload?.prompt || '请补充技能参数')
               : msg.pendingWorkflow ? '工作流 HITL 等待审批'
               : msg.pendingDelivery ? '多 Agent 交付物等待审批'
               : `工具 [${msg.pendingToolName}] 等待审批`"
@@ -249,6 +251,36 @@
             <a-button size="small" :loading="msg.approving" @click="rejectHitl(msg)">
               取消
             </a-button>
+          </div>
+          <div
+            v-else-if="msg.pendingSkillParams || msg.previewPayload?.flow_kind === 'skill_params'"
+            class="hitl-skill-params-form"
+          >
+            <div
+              v-for="key in (msg.previewPayload?.missing_params || [])"
+              :key="key"
+              class="hitl-param-row"
+            >
+              <div class="hitl-param-label">
+                {{ key }}
+                <span v-if="msg.previewPayload?.param_schema?.properties?.[key]?.description" class="hitl-param-desc">
+                  — {{ msg.previewPayload.param_schema.properties[key].description }}
+                </span>
+              </div>
+              <a-input
+                v-model:value="msg.skillParamValues[key]"
+                :placeholder="`请输入 ${key}`"
+                allow-clear
+              />
+            </div>
+            <a-space style="margin-top: 8px;">
+              <a-button type="primary" size="small" :loading="msg.approving" @click="submitSkillParamsHitl(msg)">
+                提交参数并继续
+              </a-button>
+              <a-button size="small" :loading="msg.approving" @click="rejectHitl(msg)">
+                取消
+              </a-button>
+            </a-space>
           </div>
           <a-space v-else>
             <a-button type="primary" size="small" :loading="msg.approving" @click="approveHitl(msg)">
@@ -399,7 +431,6 @@
             style="width: 80px"
           />
           <span class="timeout-unit">秒</span>
-          <span class="timeout-hint">Skill/搜索任务建议 ≥180s</span>
         </div>
       </div>
 
@@ -1334,7 +1365,16 @@ function normalizeMessage(msg, intermediateSteps) {
     previewPayload: msg.previewPayload || msg.preview_payload || null,
     pendingOtp: msg.pendingOtp || msg.pending_otp
       || (msg.previewPayload || msg.preview_payload || {})?.flow_kind === 'otp_wait',
+    pendingSkillParams: msg.pendingSkillParams || msg.pending_skill_params
+      || (msg.previewPayload || msg.preview_payload || {})?.flow_kind === 'skill_params',
     otpCode: msg.otpCode || '',
+    skillParamValues: msg.skillParamValues || (() => {
+      const missing = (msg.previewPayload || msg.preview_payload || {})?.missing_params || []
+      const filled = (msg.previewPayload || msg.preview_payload || {})?.filled_params || {}
+      const init = {}
+      missing.forEach((k) => { init[k] = filled[k] || '' })
+      return init
+    })(),
     approvalStatus: msg.approvalStatus || null,
     approvalFinalResult: msg.approvalFinalResult || '',
   }
@@ -1519,11 +1559,24 @@ async function switchSession(s) {
   }
 }
 
+/** Backend stores UTC; naive ISO strings must be treated as UTC for local relative time. */
+function parseServerTime(t) {
+  if (!t) return null
+  if (t instanceof Date) return t
+  const s = String(t).trim()
+  if (!s) return null
+  if (/[zZ]$|[+-]\d{2}:?\d{2}$/.test(s)) return new Date(s)
+  const normalized = s.includes('T') ? s : s.replace(' ', 'T')
+  return new Date(`${normalized}Z`)
+}
+
 function formatTime(t) {
   if (!t) return ''
-  const d = new Date(t)
+  const d = parseServerTime(t)
+  if (!d || Number.isNaN(d.getTime())) return ''
   const now = new Date()
   const diff = now - d
+  if (diff < 0) return '刚刚'
   if (diff < 60000) return '刚刚'
   if (diff < 3600000) return `${Math.floor(diff / 60000)} 分钟前`
   if (diff < 86400000) return `${Math.floor(diff / 3600000)} 小时前`
@@ -1867,6 +1920,31 @@ async function submitOtpHitl(msg) {
     })
     msg.approvalStatus = 'approved'
     message.success(res.message || '验证码已提交')
+  } catch (e) {
+    message.error('提交失败: ' + e.message)
+  } finally {
+    msg.approving = false
+  }
+}
+
+async function submitSkillParamsHitl(msg) {
+  const missing = msg.previewPayload?.missing_params || []
+  const values = { ...(msg.skillParamValues || {}) }
+  const still = missing.filter((k) => !(String(values[k] || '').trim()))
+  if (still.length) {
+    message.warning(`请填写：${still.join(', ')}`)
+    return
+  }
+  msg.approving = true
+  try {
+    const res = await hitlApi.approve(sessionId.value, msg.pendingApprovalId, {
+      approved: true,
+      reviewer: 'current_user',
+      comment: '',
+      param_values: values,
+    })
+    msg.approvalStatus = 'approved'
+    message.success(res.message || '参数已提交，技能继续执行')
   } catch (e) {
     message.error('提交失败: ' + e.message)
   } finally {
@@ -2219,6 +2297,25 @@ function renderMarkdown(text) {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+.hitl-skill-params-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.hitl-param-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.hitl-param-label {
+  font-size: 12px;
+  color: #595959;
+  font-weight: 500;
+}
+.hitl-param-desc {
+  font-weight: 400;
+  color: #8c8c8c;
 }
 .chat-hitl-result {
   margin-top: 10px;
