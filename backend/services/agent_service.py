@@ -488,15 +488,11 @@ class AgentService:
         session_status = result.get("session_status")
         success = result.get("success", True)
         content = result.get("content", "")
+        pending_ctx = dict(session.pending_context or {})
+        hitl_resume = bool((pending_ctx.get("background_job") or {}).get("hitl_resume"))
+        last_role = (messages[-1].get("role") if messages else None)
 
-        if messages and messages[-1].get("role") == "user" and content:
-            messages.append({"role": "assistant", "content": content})
-        elif content and not messages:
-            messages.append({"role": "assistant", "content": content})
-
-        for msg in reversed(messages):
-            if msg.get("role") != "assistant":
-                continue
+        def _apply_assistant_fields(msg: Dict[str, Any]) -> None:
             if content:
                 msg["content"] = content
             if result.get("thinking"):
@@ -525,7 +521,40 @@ class AgentService:
                 msg["previewPayload"] = result["preview_payload"]
             if result.get("pending_otp"):
                 msg["pendingOtp"] = True
-            break
+            if result.get("pending_skill_params"):
+                msg["pendingSkillParams"] = True
+
+        # HITL 续跑 / 上一条是 system 进度：追加新 assistant，避免覆盖审批与进度消息。
+        append_new = bool(content) and (
+            hitl_resume
+            or last_role == "system"
+            or (
+                last_role == "assistant"
+                and bool(
+                    (messages[-1] or {}).get("pendingApprovalId")
+                    or (messages[-1] or {}).get("approvalStatus")
+                )
+            )
+        )
+
+        if append_new:
+            new_msg: Dict[str, Any] = {"role": "assistant", "content": content}
+            _apply_assistant_fields(new_msg)
+            messages.append(new_msg)
+        elif messages and last_role == "user" and content:
+            new_msg = {"role": "assistant", "content": content}
+            _apply_assistant_fields(new_msg)
+            messages.append(new_msg)
+        elif content and not messages:
+            new_msg = {"role": "assistant", "content": content}
+            _apply_assistant_fields(new_msg)
+            messages.append(new_msg)
+        else:
+            for msg in reversed(messages):
+                if msg.get("role") != "assistant":
+                    continue
+                _apply_assistant_fields(msg)
+                break
 
         session.messages = messages
         flag_modified(session, "messages")
@@ -539,9 +568,8 @@ class AgentService:
         else:
             session.status = SessionStatus.ACTIVE
 
-        pending = dict(session.pending_context or {})
-        pending.pop("background_job", None)
-        session.pending_context = pending
+        pending_ctx.pop("background_job", None)
+        session.pending_context = pending_ctx
         session.last_active_at = now_utc()
         db.commit()
 
@@ -854,6 +882,13 @@ class AgentService:
             mode = execution_mode or "auto"
             if mode == "auto":
                 mode = _analyze_execution_mode(message, has_tools, has_kb, has_skills)
+                has_cu_tools = any(
+                    (getattr(t, "name", "") or "").startswith(("cu_", "ui_"))
+                    for t in available_tools
+                )
+                # ScreenPilot tasks must use ReAct so cu_* tools are actually invoked.
+                if mode == "direct" and has_cu_tools and _looks_like_screenpilot_task(message):
+                    mode = "react"
                 # OTP codes typed into chat must keep tools so agent can fill & submit.
                 if (
                     has_tools
@@ -1113,6 +1148,8 @@ class AgentLoop:
         self._web_search_calls = 0
         self._tool_rounds = 0
         self._skill_synthesis_nudge = False
+        self._screenpilot_synthesis_nudge = False
+        self._last_ui_skill_result: Optional[Dict[str, Any]] = None
         self._run_started_at = time.monotonic()
 
         # SGL-CFG-06: 加载工具→require_approval 映射
@@ -1540,23 +1577,52 @@ class AgentLoop:
         if not content:
             return None
 
+        def _normalize(data: Any) -> Optional[Dict[str, Any]]:
+            if not isinstance(data, dict):
+                return None
+            if "function" in data and isinstance(data.get("function"), dict):
+                data = data["function"]
+            name = data.get("tool_name") or data.get("tool") or data.get("name")
+            if not name or not isinstance(name, str):
+                return None
+            args = data.get("arguments")
+            if args is None:
+                args = data.get("params")
+            if args is None:
+                args = data.get("parameters")
+            if args is None:
+                args = {}
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except json.JSONDecodeError:
+                    args = {"_raw": args}
+            if not isinstance(args, dict):
+                args = {"value": args}
+            return {"tool_name": name.strip(), "arguments": args}
+
         json_match = re.search(r'```json\s*\n?(.*?)\n?```', content, re.DOTALL)
         if json_match:
             try:
                 data = json.loads(json_match.group(1))
-                if isinstance(data, dict) and "tool_name" in data:
-                    return data
-                if isinstance(data, dict) and "function" in data:
-                    return data["function"]
+                normalized = _normalize(data)
+                if normalized:
+                    return normalized
             except json.JSONDecodeError:
                 pass
 
-        json_match = re.search(r'\{[^{}]*"tool_name"\s*:\s*"[^"]+"[^{}]*\}', content, re.DOTALL)
+        # Prefer fenced/full-object parse; fallback for flat tool_name payloads.
+        json_match = re.search(
+            r'\{[^{}]*"(?:tool_name|tool)"\s*:\s*"[^"]+"[^{}]*\}',
+            content,
+            re.DOTALL,
+        )
         if json_match:
             try:
                 data = json.loads(json_match.group(0))
-                if "tool_name" in data:
-                    return data
+                normalized = _normalize(data)
+                if normalized:
+                    return normalized
             except json.JSONDecodeError:
                 pass
 
@@ -2227,10 +2293,32 @@ class AgentLoop:
                 )
                 sp_approval = self._check_screenpilot_hitl_pending(tool, result)
                 if sp_approval:
+                    hitl_tool = tool.name
+                    try:
+                        payload = json.loads(result.get("result") or "")
+                        if (
+                            payload.get("needs_params")
+                            or (payload.get("preview_payload") or {}).get("flow_kind")
+                            == "skill_params"
+                        ):
+                            hitl_tool = "cu_skill_params"
+                        else:
+                            from models import HITLApproval
+
+                            row = (
+                                self.db.query(HITLApproval)
+                                .filter(HITLApproval.approval_id == sp_approval)
+                                .first()
+                            )
+                            if row and (row.tool_name or "").strip():
+                                hitl_tool = row.tool_name
+                    except Exception:
+                        pass
                     self.thinking_log.append(
-                        f"  ScreenPilot 工具 [{tool.name}] 触发 GOV HITL (approval_id={sp_approval})"
+                        f"  ScreenPilot 工具 [{tool.name}] 触发 GOV HITL "
+                        f"(approval_id={sp_approval}, hitl_tool={hitl_tool})"
                     )
-                    raise HITLPendingError(sp_approval, tool.name)
+                    raise HITLPendingError(sp_approval, hitl_tool)
                 if result.get("success"):
                     finalized = await self._finalize_tool_success(tool, args, result)
                     if tool_name.startswith(("cu_", "ui_")):
@@ -2238,7 +2326,11 @@ class AgentLoop:
                     self._memory_record_tool(tool.name, args, finalized)
                     return finalized
 
-                last_error = result.get("error") or result.get("result") or "工具执行失败"
+                last_error = (
+                    result.get("error")
+                    or result.get("result")
+                    or f"工具执行失败 (keys={list(result.keys()) if isinstance(result, dict) else type(result).__name__})"
+                )
                 self.thinking_log.append(
                     f"  工具 [{tool.name}] 第 {attempt + 1} 次返回失败: {str(last_error)[:200]}"
                 )
@@ -2262,6 +2354,10 @@ class AgentLoop:
                 fail_result = {"success": False, "error": last_error}
                 self._memory_record_tool(tool.name, args, fail_result)
                 return fail_result
+            except HITLPendingError:
+                raise
+            except AgentLoopError:
+                raise
             except Exception as e:
                 last_error = str(e)
                 self.thinking_log.append(f"  工具 [{tool.name}] 第 {attempt + 1} 次执行异常: {last_error[:200]}")
@@ -2616,6 +2712,117 @@ class AgentLoop:
         self._extract_and_save_files_from_content(assistant_content)
         return self._build_result(assistant_content, reasoning_for_thinking, "react")
 
+    def _parse_tool_payload(self, tool_result_str: str) -> Dict[str, Any]:
+        try:
+            data = json.loads(tool_result_str or "")
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _compose_ui_skill_result_summary(self, payload: Optional[Dict[str, Any]] = None) -> str:
+        data = payload or self._last_ui_skill_result or {}
+        name = data.get("skill_name") or data.get("skill_id") or "UI技能"
+        replayed = data.get("replayed_steps")
+        results = data.get("results") or []
+        lines = [
+            f"## 执行结果说明",
+            f"- UI 技能：**{name}**",
+            f"- 重放步骤数：{replayed if replayed is not None else len(results)}",
+            f"- 技能是否标记完成：{'是' if data.get('skill_completed') else '否'}",
+        ]
+        if data.get("final_url"):
+            lines.append(f"- 结束页面：{(data.get('final_url') or '')[:160]}")
+        applied = data.get("applied_params") or {}
+        if isinstance(applied, dict) and applied:
+            safe = {k: str(v)[:80] for k, v in list(applied.items())[:8]}
+            lines.append(f"- 已应用参数：{safe}")
+        if results:
+            lines.append("- 步骤明细：")
+            for r in results[:20]:
+                order = r.get("step_order", "?")
+                action = r.get("action", "")
+                tier = r.get("risk_tier", "")
+                typed = r.get("typed_value_preview")
+                extra = f" typed={typed!r}" if typed else ""
+                lines.append(
+                    f"  - 步骤 {order}: {action}"
+                    + (f" ({tier})" if tier else "")
+                    + extra
+                )
+        if data.get("success") is False:
+            lines.append(f"- 错误：{data.get('error') or '未知错误'}")
+        else:
+            lines.append(
+                "- 状态：技能步骤已跑完。请根据结束页面与参数核对是否真正达成「发布/暂存」目标；"
+                "不要把步骤跑完等同于已公开发布。"
+            )
+        return "\n".join(lines)
+
+    async def _force_screenpilot_synthesis(
+        self,
+        messages: List[Dict[str, Any]],
+        new_messages: List[Dict[str, Any]],
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        self.thinking_log.append("[ScreenPilot] UI 技能执行结束，强制生成正式结果说明")
+        self._run_metrics["forced_screenpilot_synthesis"] = True
+        data = payload or {}
+        facts = []
+        if data.get("final_url"):
+            facts.append(f"结束 URL：{(data.get('final_url') or '')[:200]}")
+        if data.get("applied_params"):
+            facts.append(f"已应用参数：{data.get('applied_params')}")
+        last_steps = []
+        for r in (data.get("results") or [])[-3:]:
+            last_steps.append(
+                f"step{r.get('step_order')}:{r.get('action')}"
+                f"/locate={r.get('locate_method')}"
+                f"/typed={r.get('typed_value_preview')!r}"
+            )
+        if last_steps:
+            facts.append("末步：" + "；".join(last_steps))
+        fact_block = "\n".join(f"- {x}" for x in facts) if facts else "- （无额外结构化事实）"
+        synth_msg = {
+            "role": "user",
+            "content": (
+                "【系统】驭屏 UI 技能重放已结束。请用简洁中文给出正式「执行结果说明」。\n"
+                "必须严格依据下列事实，禁止编造「已公开发布/已进笔记详情」等结论：\n"
+                f"{fact_block}\n"
+                "说明要求：完成了哪些步骤、当前页面实际状态、用户原目标是否达成；"
+                "若技能末步是「暂存离开」，只能说暂存/草稿相关结论，不能说已发布；"
+                "若结束 URL 仍是搜索页/探索页而非创作者编辑页，应明确目标可能未达成。"
+                "不要再调用任何工具。"
+            ),
+        }
+        messages.append(synth_msg)
+        new_messages.append(synth_msg)
+        messages = self._truncate_context(messages)
+        completion = await self._call_llm(messages, tools=None)
+        choices = completion.get("choices", [])
+        if not choices:
+            fallback = self._compose_ui_skill_result_summary(payload)
+            new_messages.append({"role": "assistant", "content": fallback})
+            history = self._build_history_with_user(new_messages)
+            self._persist_session(history)
+            return self._build_result(fallback, "\n".join(self.thinking_log), "react")
+        msg = choices[0].get("message", {})
+        raw_content = self._content_to_str(msg.get("content", ""))
+        reasoning_content = (
+            completion.get("reasoning_content", "")
+            or msg.get("reasoning_content", "")
+            or msg.get("thinking", "")
+        )
+        assistant_content, reasoning_for_thinking = self._resolve_assistant_output(
+            raw_content, reasoning_content, completion
+        )
+        if not (assistant_content or "").strip():
+            assistant_content = self._compose_ui_skill_result_summary(payload)
+        new_messages.append({"role": "assistant", "content": assistant_content})
+        history = self._build_history_with_user(new_messages)
+        self._persist_session(history)
+        self._extract_and_save_files_from_content(assistant_content)
+        return self._build_result(assistant_content, reasoning_for_thinking, "react")
+
     async def _run_react(self) -> Dict[str, Any]:
         self._abort_mode = "react"
         openai_tools = self._build_tool_defs(self.available_tools)
@@ -2721,6 +2928,15 @@ class AgentLoop:
                                     tool_result_str = self._tool_result_to_str(exec_result.get("result", ""))
                                 else:
                                     tool_result_str = f"工具执行错误: {exec_result.get('error', '')}"
+                                if func_name in ("cu_replay_skill", "ui_replay_skill") and exec_result.get("success"):
+                                    payload = self._parse_tool_payload(
+                                        self._tool_result_to_str(exec_result.get("result", ""))
+                                    )
+                                    if payload.get("success") and (
+                                        payload.get("skill_completed")
+                                        or int(payload.get("replayed_steps") or 0) > 0
+                                    ):
+                                        self._last_ui_skill_result = payload
                                 self._extract_files_from_result(tool_result_str)
                                 tool_result_str = self._compact_tool_result_for_llm(func_name, tool_result_str)
                             self.thinking_log.append(f"  工具 [{func_name}] 结果: {tool_result_str[:200]}")
@@ -2738,6 +2954,14 @@ class AgentLoop:
 
                 messages = self._truncate_context(messages)
                 self._tool_rounds += 1
+                if (
+                    self._last_ui_skill_result
+                    and not self._screenpilot_synthesis_nudge
+                ):
+                    self._screenpilot_synthesis_nudge = True
+                    return await self._force_screenpilot_synthesis(
+                        messages, new_messages, self._last_ui_skill_result
+                    )
                 if (
                     self.active_skill_name
                     and not self._skill_synthesis_nudge
@@ -2767,13 +2991,22 @@ class AgentLoop:
 
             return self._build_result(assistant_content, reasoning_for_thinking, "react")
 
+        # Max iterations / empty model break: always append a clean assistant reply
+        # (no tool_calls) so the chat UI shows a formal result, not only thinking.
+        summary = self._compose_ui_skill_result_summary() if self._last_ui_skill_result else (
+            "任务执行超时，已达到最大迭代次数。请尝试简化问题或增加超时时间。"
+        )
+        if self._last_ui_skill_result:
+            summary = (
+                self._compose_ui_skill_result_summary()
+                + "\n\n（已达最大迭代次数，以上为基于 UI 技能执行结果的说明。）"
+            )
+        new_messages.append({"role": "assistant", "content": summary})
         history = self._build_history_with_user(new_messages)
-        if not new_messages:
-            history.append({"role": "assistant", "content": "已达到最大迭代次数，任务未完成。"})
         self._persist_session(history)
 
         return self._build_result(
-            "任务执行超时，已达到最大迭代次数。请尝试简化问题或增加超时时间。",
+            summary,
             "\n".join(self.thinking_log),
             "react",
         )
@@ -3470,6 +3703,34 @@ def _session_has_screenpilot_context(session) -> bool:
     return any(m.lower() in blob for m in markers)
 
 
+def _looks_like_screenpilot_task(message: str) -> bool:
+    """Heuristic: user asks for browser/UI automation via ScreenPilot."""
+    text = (message or "").strip().lower()
+    if not text:
+        return False
+    markers = (
+        "驭屏",
+        "屏幕操作",
+        "浏览器",
+        "ui技能",
+        "ui 技能",
+        "screenpilot",
+        "cu_",
+        "小红书",
+        "发布",
+        "发帖",
+        "帖文",
+        "登录",
+        "点击",
+        "填写",
+        "导航",
+        "截图",
+        "打开网站",
+        "网页",
+    )
+    return any(m.lower() in text for m in markers)
+
+
 def _analyze_execution_mode(message: str, has_tools: bool, has_kb: bool, has_skills: bool) -> str:
     multi_step_keywords = [
         "先", "然后", "接着", "最后", "步骤", "第一步", "第二步",
@@ -3482,7 +3743,9 @@ def _analyze_execution_mode(message: str, has_tools: bool, has_kb: bool, has_ski
     ]
     action_keywords = [
         "查询", "搜索", "获取", "调用", "执行", "计算", "生成",
+        "发布", "打开", "登录", "填写", "点击", "导航", "操作", "重放",
         "search", "get", "fetch", "call", "execute", "calculate",
+        "publish", "open", "login", "click", "navigate",
     ]
 
     msg_lower = message.lower()

@@ -111,6 +111,17 @@ class TestMultiParamSchemaAndExtract:
         assert out.get("query") == "harness"
         assert out.get("dept") == "研发"
 
+    def test_rule_extraction_title_text_chinese(self):
+        from services.screenpilot.param_extract import apply_rule_extraction
+
+        text = (
+            '使用驭屏系统，发布小红书帖文。'
+            '标题：“我的测试贴”，正文：“这是一个使用agent发布的测试贴文”'
+        )
+        out = apply_rule_extraction(text, ["title", "text"], {})
+        assert out.get("title") == "我的测试贴"
+        assert out.get("text") == "这是一个使用agent发布的测试贴文"
+
     @pytest.mark.asyncio
     async def test_extract_without_llm_reports_missing(self):
         from services.screenpilot.param_extract import extract_skill_params
@@ -316,8 +327,9 @@ class TestReplayNeedsParamsHitl:
         self.db.commit()
 
         with patch(
-            "services.screenpilot.service.get_live_session",
-            return_value=type("L", (), {"page": object(), "elements": []})(),
+            "services.screenpilot.service._ensure_replay_live_session",
+            new_callable=AsyncMock,
+            return_value=type("L", (), {"page": object(), "elements": [], "exec_mode": "browser"})(),
         ), patch(
             "services.screenpilot.param_extract.extract_skill_params",
             new_callable=AsyncMock,
@@ -335,6 +347,164 @@ class TestReplayNeedsParamsHitl:
         assert res.get("needs_params") is True
         assert set(res.get("missing_params") or []) == {"query", "dept"}
         assert res.get("preview_payload", {}).get("flow_kind") == "skill_params"
+
+
+class TestReplaySkillSkipsStepHitl:
+    """T2/T3 labeled steps must auto-run during skill replay (no step HITL)."""
+
+    def setup_method(self):
+        init_db()
+        self.db = SessionLocal()
+
+    def teardown_method(self):
+        try:
+            self.db.rollback()
+            self.db.close()
+        except Exception:
+            pass
+
+    @pytest.mark.asyncio
+    async def test_t2_step_runs_without_hitl_when_force_execute_false(self):
+        from models import (
+            Agent,
+            AgentStatus,
+            AgentType,
+            ModelProvider,
+            ModelService,
+            ProviderStatus,
+            Session as AgentSession,
+        )
+        from services.screenpilot.service import replay_skill
+        from services.screenpilot.skill_store import skill_store
+
+        provider = ModelProvider(
+            provider_code=f"p_{gen_uuid()[:6]}",
+            display_name="p",
+            base_url="https://example.com",
+            api_key="x",
+            status=ProviderStatus.ACTIVE,
+        )
+        self.db.add(provider)
+        self.db.flush()
+        model = ModelService(
+            provider_id=provider.provider_id,
+            model_name="m",
+            display_name="m",
+            status="ACTIVE",
+        )
+        self.db.add(model)
+        self.db.flush()
+        agent = Agent(
+            agent_id=gen_uuid(),
+            name=f"a_{gen_uuid()[:6]}",
+            model_service_id=model.model_service_id,
+            status=AgentStatus.PUBLISHED,
+            agent_type=AgentType.SINGLE,
+            system_prompt="x",
+        )
+        self.db.add(agent)
+        self.db.flush()
+        vela = AgentSession(
+            session_id=gen_uuid(),
+            agent_id=agent.agent_id,
+            status="ACTIVE",
+            messages=[],
+        )
+        self.db.add(vela)
+        system = ScreenSystem(
+            system_id=gen_uuid(),
+            name=f"sys_{gen_uuid()[:8]}",
+            entry_url="https://example.com",
+            allowed_domains=["example.com"],
+            status="ACTIVE",
+            created_at=now_utc(),
+            updated_at=now_utc(),
+        )
+        self.db.add(system)
+        self.db.flush()
+        screen = ScreenSession(
+            screen_session_id=gen_uuid(),
+            system_id=system.system_id,
+            status="ACTIVE",
+            meta={},
+            created_at=now_utc(),
+            updated_at=now_utc(),
+        )
+        self.db.add(screen)
+        self.db.flush()
+        skill = skill_store.create_skill(
+            self.db,
+            name=f"sk_{gen_uuid()[:8]}",
+            description="d",
+            system_id=system.system_id,
+            steps=[
+                {
+                    "action": "click",
+                    "target_label": "写长文",
+                    "value_template": "",
+                    "fingerprints": {"css": "button.write"},
+                    "meta": {},
+                },
+                {
+                    "action": "click",
+                    "target_label": "暂存离开",
+                    "value_template": "",
+                    "fingerprints": {"css": "button.save"},
+                    "meta": {},
+                },
+            ],
+            scope="default",
+            param_schema={"type": "object", "properties": {}, "required": []},
+        )
+        self.db.commit()
+
+        live = type(
+            "L",
+            (),
+            {
+                "page": object(),
+                "elements": [],
+                "exec_mode": "browser",
+                "context": None,
+            },
+        )()
+        exec_ok = {
+            "success": True,
+            "locate_method": "css",
+            "verification": {"ok": True},
+        }
+
+        with patch(
+            "services.screenpilot.service._ensure_replay_live_session",
+            new_callable=AsyncMock,
+            return_value=live,
+        ), patch(
+            "services.screenpilot.service.execute_by_fingerprints",
+            new_callable=AsyncMock,
+            return_value=exec_ok,
+        ), patch(
+            "services.screenpilot.service.observe_session",
+            new_callable=AsyncMock,
+            return_value={"success": True, "url": "https://example.com"},
+        ), patch(
+            "services.screenpilot.service.write_audit",
+            return_value=None,
+        ):
+            res = await replay_skill(
+                self.db,
+                skill_id=skill.skill_id,
+                screen_session_id=screen.screen_session_id,
+                params={},
+                vela_session_id=vela.session_id,
+                agent_id=agent.agent_id,
+                force_execute=False,
+            )
+
+        assert res.get("hitl_pending") is not True
+        assert res.get("success") is True
+        assert res.get("replayed_steps") == 2
+        tiers = [r.get("risk_tier") for r in (res.get("results") or [])]
+        assert "T2" in tiers
 
 
 class TestTrajectoryNoteAndCompile:

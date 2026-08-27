@@ -44,6 +44,15 @@
           <img :src="previewImage" alt="SoM 预览" />
         </div>
 
+        <a-alert
+          v-if="isSkillParamsApproval(selected)"
+          type="info"
+          show-icon
+          style="margin-top: 16px"
+          message="技能缺参请在 Agent 会话中填写"
+          description="此类工单应在对话页补全参数并继续，不在驭屏审批收件箱批准。可拒绝本单后回到会话处理。"
+        />
+
         <template v-if="selected.status === 'PENDING'">
           <a-divider />
           <a-form layout="vertical">
@@ -65,7 +74,12 @@
               <a-textarea v-model:value="comment" :rows="3" placeholder="审批意见（可选）" />
             </a-form-item>
             <a-space>
-              <a-button type="primary" :loading="acting" @click="doApprove">批准</a-button>
+              <a-button
+                type="primary"
+                :loading="acting"
+                :disabled="isSkillParamsApproval(selected)"
+                @click="doApprove"
+              >批准</a-button>
               <a-button danger :loading="acting" @click="doReject">拒绝</a-button>
             </a-space>
           </a-form>
@@ -121,6 +135,15 @@ function isOtpApproval(record) {
   )
 }
 
+function isSkillParamsApproval(record) {
+  if (!record) return false
+  return (
+    record.tool_name === 'cu_skill_params' ||
+    record.flow_kind === 'skill_params' ||
+    record.preview_payload?.flow_kind === 'skill_params'
+  )
+}
+
 function customRow(record) {
   return {
     onClick: () => openDetail(record),
@@ -151,6 +174,10 @@ function openDetail(record) {
 
 async function doApprove() {
   if (!selected.value) return
+  if (isSkillParamsApproval(selected.value)) {
+    message.warning('技能缺参请在 Agent 会话页填写，勿在此批准')
+    return
+  }
   if (isOtpApproval(selected.value) && !otpCode.value.trim()) {
     message.warning('请输入验证码后再批准')
     return

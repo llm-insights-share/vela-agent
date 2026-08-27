@@ -3,7 +3,9 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 from typing import Any, Dict, List, Optional
+import asyncio
 import os
+import traceback
 from database import get_db, SessionLocal
 from models import Session as SessionModel, SessionStatus, gen_uuid, now_utc
 from schemas import (
@@ -27,7 +29,6 @@ router = APIRouter(prefix="/api/v1/sessions", tags=["sessions"])
 
 
 def _run_memory_process(session_id: str):
-    import asyncio
     from services.memory.processor import process_session_background
     try:
         asyncio.run(process_session_background(session_id))
@@ -35,77 +36,74 @@ def _run_memory_process(session_id: str):
         print(f"[sessions.close] 记忆处理失败: {e}")
 
 
-def _run_session_chat_background(session_id: str, request_data: Dict[str, Any]):
-    import asyncio
-    import traceback
+async def _run_session_chat_background(session_id: str, request_data: Dict[str, Any]):
+    """Run agent chat on the uvicorn event loop (not asyncio.run).
 
-    async def _execute():
-        db = SessionLocal()
+    ScreenPilot Playwright is bound to the loop that started it. Using
+    asyncio.run() in BackgroundTasks closes that loop when HITL pauses,
+    so later approve gets WriteUnixTransport closed / 500.
+    """
+    db = SessionLocal()
+    try:
+        session = db.query(SessionModel).filter(
+            SessionModel.session_id == session_id
+        ).first()
+        if not session:
+            return
+
+        result = await agent_service.chat_with_agent(
+            db=db,
+            agent_id=session.agent_id,
+            session_id=session_id,
+            message=request_data["message"],
+            skill_pack_id=request_data.get("skill_pack_id"),
+            timeout_seconds=request_data.get("timeout_seconds"),
+            execution_mode=request_data.get("execution_mode", "auto"),
+            skip_history=request_data.get("skip_history", False),
+            attachment_ids=request_data.get("attachment_ids") or [],
+            persist_user_message=False,
+        )
+        db.refresh(session)
+        pending = dict(session.pending_context or {})
+        job_key = str((pending.get("background_job") or {}).get("started_at") or "")
+        agent_service.finalize_background_chat(db, session, result)
+        db.refresh(session)
+        from services.inbox import notify_async_session
+        notify_async_session(
+            db,
+            session,
+            job_key=job_key,
+            aborted=bool(result.get("aborted")),
+        )
+    except Exception as e:
+        traceback.print_exc()
         try:
             session = db.query(SessionModel).filter(
                 SessionModel.session_id == session_id
             ).first()
-            if not session:
-                return
-
-            result = await agent_service.chat_with_agent(
-                db=db,
-                agent_id=session.agent_id,
-                session_id=session_id,
-                message=request_data["message"],
-                skill_pack_id=request_data.get("skill_pack_id"),
-                timeout_seconds=request_data.get("timeout_seconds"),
-                execution_mode=request_data.get("execution_mode", "auto"),
-                skip_history=request_data.get("skip_history", False),
-                attachment_ids=request_data.get("attachment_ids") or [],
-                persist_user_message=False,
-            )
-            db.refresh(session)
-            pending = dict(session.pending_context or {})
-            job_key = str((pending.get("background_job") or {}).get("started_at") or "")
-            agent_service.finalize_background_chat(db, session, result)
-            db.refresh(session)
-            from services.inbox import notify_async_session
-            notify_async_session(
-                db,
-                session,
-                job_key=job_key,
-                aborted=bool(result.get("aborted")),
-            )
-        except Exception as e:
+            if session:
+                messages = list(session.messages or [])
+                messages.append({
+                    "role": "assistant",
+                    "content": f"❌ 任务执行失败：{e}",
+                })
+                session.messages = messages
+                flag_modified(session, "messages")
+                session.status = SessionStatus.ERROR
+                pending = dict(session.pending_context or {})
+                job = dict(pending.get("background_job") or {})
+                job_key = str(job.get("started_at") or "")
+                job["error"] = str(e)
+                pending["background_job"] = job
+                session.pending_context = pending
+                session.last_active_at = now_utc()
+                db.commit()
+                from services.inbox import notify_async_session
+                notify_async_session(db, session, job_key=job_key)
+        except Exception:
             traceback.print_exc()
-            try:
-                session = db.query(SessionModel).filter(
-                    SessionModel.session_id == session_id
-                ).first()
-                if session:
-                    messages = list(session.messages or [])
-                    messages.append({
-                        "role": "assistant",
-                        "content": f"❌ 任务执行失败：{e}",
-                    })
-                    session.messages = messages
-                    flag_modified(session, "messages")
-                    session.status = SessionStatus.ERROR
-                    pending = dict(session.pending_context or {})
-                    job = dict(pending.get("background_job") or {})
-                    job_key = str(job.get("started_at") or "")
-                    job["error"] = str(e)
-                    pending["background_job"] = job
-                    session.pending_context = pending
-                    session.last_active_at = now_utc()
-                    db.commit()
-                    from services.inbox import notify_async_session
-                    notify_async_session(db, session, job_key=job_key)
-            except Exception:
-                traceback.print_exc()
-        finally:
-            db.close()
-
-    try:
-        asyncio.run(_execute())
-    except Exception as e:
-        print(f"[sessions.chat_async] 后台任务失败: {e}")
+    finally:
+        db.close()
 
 
 @router.get("", response_model=PaginatedResponse)
@@ -328,10 +326,9 @@ async def chat(session_id: str, data: SessionChatRequest, db: Session = Depends(
 
 
 @router.post("/{session_id}/chat/async", response_model=SessionChatAsyncResponse, status_code=202)
-def chat_async(
+async def chat_async(
     session_id: str,
     data: SessionChatRequest,
-    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
     session = db.query(SessionModel).filter(
@@ -370,7 +367,11 @@ def chat_async(
         "execution_mode": data.execution_mode,
         "skip_history": data.skip_history,
     }
-    background_tasks.add_task(_run_session_chat_background, session_id, request_data)
+    # Keep Playwright / ScreenPilot on the same loop as HITL approve.
+    asyncio.create_task(
+        _run_session_chat_background(session_id, request_data),
+        name=f"session-chat-{session_id}",
+    )
 
     return SessionChatAsyncResponse(
         accepted=True,

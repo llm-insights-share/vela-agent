@@ -68,7 +68,7 @@ _DOM_COLLECT_JS = """
     'input', 'textarea', 'button', 'a', 'select', 'label',
     '[role=button]', '[role=link]', '[role=textbox]',
     '[role=searchbox]', '[role=combobox]', '[role=checkbox]',
-    '[role=radio]', '[role=switch]', '[aria-checked]',
+    '[role=radio]', '[role=switch]', '[role=tab]', '[aria-checked]',
     '[contenteditable=true]'
   ];
 
@@ -185,9 +185,17 @@ _DOM_COLLECT_JS = """
     if (tag === 'select') return 'combobox';
     if (tag === 'input' || tag === 'textarea' || el.isContentEditable) return 'textbox';
     if (el.hasAttribute('aria-checked')) return 'checkbox';
-    // Structural pseudo-button: short-text leaf near / in-row with a form control.
+    // Structural pseudo-button: short-text leaf near form control, or pointer/tab.
     const t = shortText(el);
     if (t && t.length >= 1 && t.length <= 16) {
+      const stCursor = (getComputedStyle(el).cursor || '');
+      if (
+        stCursor === 'pointer'
+        || typeof el.onclick === 'function'
+        || (el.getAttribute('role') || '') === 'tab'
+      ) {
+        return 'button';
+      }
       const inputs = document.querySelectorAll('input, textarea, button, [role=textbox]');
       for (const inp of inputs) {
         if (inp === el) continue;
@@ -247,11 +255,12 @@ _DOM_COLLECT_JS = """
     }
     // Also keep checkbox-like custom widgets with aria-checked.
     const isCheck = n.hasAttribute('aria-checked') || (n.getAttribute('role') || '') === 'checkbox';
-    // Error/interstitial pages often have zero inputs; still keep short clickable leaves.
+    // Short clickable leaves (tabs/nav chips) even when the page has form controls.
     const stCursor = (getComputedStyle(n).cursor || '');
-    const standaloneClickable = formControls.length === 0 && (
+    const standaloneClickable = (
       stCursor === 'pointer' || typeof n.onclick === 'function' || tag === 'a' || tag === 'button'
       || (n.getAttribute('role') || '') === 'button' || (n.getAttribute('role') || '') === 'link'
+      || (n.getAttribute('role') || '') === 'tab'
     );
     if (near || isCheck || standaloneClickable) {
       seenEl.add(n);

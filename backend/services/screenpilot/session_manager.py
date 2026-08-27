@@ -238,9 +238,97 @@ class LiveSession:
     last_screenshot: bytes = b""
     last_som_image: bytes = b""
     last_activity_at: float = field(default_factory=time.monotonic)
+    # Page ids present when the session bound its working page (CDP may share context).
+    baseline_page_ids: set = field(default_factory=set)
+    owned_page_ids: set = field(default_factory=set)
 
 
 _sessions: Dict[str, LiveSession] = {}
+
+
+def _page_url_safe(page: Any) -> str:
+    try:
+        return page.url or ""
+    except Exception:
+        return ""
+
+
+async def adopt_spawned_pages(live: LiveSession) -> Dict[str, Any]:
+    """If click/open spawned a child tab, switch live.page to the newest owned one.
+
+    Prefers pages whose opener chain leads to the session page; for CDP sessions
+    also adopts pages that appeared after session bind (not in baseline).
+    """
+    info: Dict[str, Any] = {"switched": False, "from_url": "", "to_url": "", "reason": ""}
+    if getattr(live, "exec_mode", "browser") != "browser" or not live.page:
+        return info
+    ctx = live.context or getattr(live.page, "context", None)
+    if not ctx:
+        return info
+    info["from_url"] = _page_url_safe(live.page)
+    try:
+        pages = [p for p in list(ctx.pages) if not p.is_closed()]
+    except Exception as e:
+        info["reason"] = f"list_pages_failed:{e}"
+        return info
+
+    owned = set(getattr(live, "owned_page_ids", None) or set())
+    owned.add(id(live.page))
+    baseline = set(getattr(live, "baseline_page_ids", None) or set())
+
+    opener_hits: List[Any] = []
+    baseline_hits: List[Any] = []
+    for p in pages:
+        pid = id(p)
+        if pid in owned:
+            continue
+        url = _page_url_safe(p)
+        opener = None
+        try:
+            opener = await p.opener()
+        except Exception:
+            opener = None
+        hit_opener = False
+        cur = opener
+        seen: set = set()
+        while cur is not None and id(cur) not in seen:
+            seen.add(id(cur))
+            if id(cur) in owned:
+                hit_opener = True
+                break
+            try:
+                cur = await cur.opener()
+            except Exception:
+                break
+        if hit_opener:
+            opener_hits.append(p)
+            continue
+        if baseline and pid not in baseline and url not in ("", "about:blank"):
+            baseline_hits.append(p)
+
+    candidates = opener_hits or baseline_hits
+    if not candidates:
+        info["reason"] = "no_spawned_page"
+        info["page_count"] = len(pages)
+        return info
+
+    real = [p for p in candidates if _page_url_safe(p) not in ("", "about:blank")]
+    chosen = (real or candidates)[-1]
+    if chosen is live.page:
+        info["reason"] = "already_on_spawned"
+        return info
+
+    live.page = chosen
+    owned.add(id(chosen))
+    live.owned_page_ids = owned
+    info["switched"] = True
+    info["to_url"] = _page_url_safe(chosen)
+    info["reason"] = "opener" if chosen in opener_hits else "baseline_new"
+    try:
+        await chosen.wait_for_load_state("domcontentloaded", timeout=8000)
+    except Exception:
+        pass
+    return info
 
 
 def touch_session(screen_session_id: str) -> None:
@@ -315,6 +403,68 @@ def _session_alive(sess: LiveSession) -> bool:
         return bool(sess.page and not sess.page.is_closed())
     except Exception:
         return False
+
+
+async def probe_live_session(sess: Optional[LiveSession]) -> bool:
+    """True if the live page can still accept Playwright commands."""
+    if not sess or sess.exec_mode == "desktop":
+        return bool(sess)
+    if not sess.page:
+        return False
+    try:
+        if sess.page.is_closed():
+            return False
+        await sess.page.evaluate("() => true")
+        return True
+    except Exception as e:
+        if _is_playwright_transport_closed(e):
+            return False
+        # Other transient evaluate errors: treat as usable if page not closed.
+        try:
+            return not sess.page.is_closed()
+        except Exception:
+            return False
+
+
+async def discard_zombie_live_session(screen_session_id: str) -> None:
+    """Drop in-memory live session without closing remote CDP tabs.
+
+    Used when the Playwright driver transport died (e.g. after asyncio.run
+    closed a temporary loop) but Chrome/CDP may still be running.
+    """
+    async with _lock:
+        sess = _sessions.pop(screen_session_id, None)
+        if not sess:
+            await _reset_all_unlocked()
+            return
+        if sess.attach_mode == "cdp" or sess.owned_page_only:
+            # Leave remote tabs open; only reset dead local driver refs.
+            await _reset_all_unlocked()
+            return
+        try:
+            await _close_session_resources(sess)
+        except Exception:
+            pass
+        await _reset_all_unlocked()
+
+
+async def _pick_cdp_page(context: Any, preferred_url: str = "") -> Any:
+    try:
+        pages = [p for p in list(context.pages or []) if not p.is_closed()]
+    except Exception:
+        pages = []
+    pref = (preferred_url or "").strip()
+    if pref and pages:
+        for p in pages:
+            url = _page_url_safe(p)
+            if url and (url == pref or pref in url or url in pref):
+                return p
+    real = [p for p in pages if _page_url_safe(p) not in ("", "about:blank")]
+    if real:
+        return real[-1]
+    if pages:
+        return pages[-1]
+    return await context.new_page()
 
 
 async def _launch_chromium():
@@ -506,6 +656,8 @@ async def create_live_session(
     storage_state: Optional[Dict[str, Any]] = None,
     reuse_local_browser: bool = False,
     cdp_url: str = "",
+    prefer_existing_page: bool = False,
+    preferred_url: str = "",
 ) -> LiveSession:
     async with _lock:
         existing = _sessions.get(screen_session_id)
@@ -514,7 +666,16 @@ async def create_live_session(
             return existing
         if existing:
             _sessions.pop(screen_session_id, None)
-            await _close_session_resources(existing)
+            # CDP revive: do not close remote tabs; drop dead driver instead.
+            if prefer_existing_page and (
+                existing.attach_mode == "cdp" or existing.owned_page_only
+            ):
+                try:
+                    await _reset_all_unlocked()
+                except Exception:
+                    pass
+            else:
+                await _close_session_resources(existing)
 
         mode = (exec_mode or "browser").lower()
         if mode == "desktop":
@@ -560,7 +721,15 @@ async def create_live_session(
                 )
             # Reuse default profile context — do NOT new_context() (isolated, no cookies).
             context = contexts[0]
-            page = await context.new_page()
+            if prefer_existing_page:
+                page = await _pick_cdp_page(context, preferred_url=preferred_url)
+            else:
+                page = await context.new_page()
+            baseline_ids = set()
+            try:
+                baseline_ids = {id(p) for p in list(context.pages)}
+            except Exception:
+                baseline_ids = {id(page)}
             sess = LiveSession(
                 screen_session_id=screen_session_id,
                 system_id=system_id,
@@ -570,6 +739,8 @@ async def create_live_session(
                 attach_mode="cdp",
                 owned_page_only=True,
                 cdp_endpoint=endpoint,
+                baseline_page_ids=baseline_ids,
+                owned_page_ids={id(page)},
             )
             _sessions[screen_session_id] = sess
             await _ensure_reaper_unlocked()
@@ -594,6 +765,11 @@ async def create_live_session(
             browser = await _ensure_local_browser()
             context = await browser.new_context(**ctx_kwargs)
         page = await context.new_page()
+        baseline_ids = set()
+        try:
+            baseline_ids = {id(p) for p in list(context.pages)}
+        except Exception:
+            baseline_ids = {id(page)}
         sess = LiveSession(
             screen_session_id=screen_session_id,
             system_id=system_id,
@@ -602,6 +778,8 @@ async def create_live_session(
             exec_mode="browser",
             attach_mode="launch",
             owned_page_only=False,
+            baseline_page_ids=baseline_ids,
+            owned_page_ids={id(page)},
         )
         _sessions[screen_session_id] = sess
         await _ensure_reaper_unlocked()

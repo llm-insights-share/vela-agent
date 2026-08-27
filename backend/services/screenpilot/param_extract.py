@@ -54,6 +54,47 @@ def apply_rule_extraction(
     if not text or not keys:
         return out
 
+    # Param key -> natural-language labels commonly used in user instructions.
+    key_aliases: Dict[str, List[str]] = {
+        "title": ["title", "标题", "题目", "贴文标题"],
+        "text": ["text", "正文", "内容", "正文内容", "帖文", "贴文", "body", "content"],
+        "content": ["content", "正文", "内容", "text", "body", "帖文", "贴文"],
+        "body": ["body", "正文", "内容", "text", "content"],
+        "query": ["query", "关键词", "搜索词", "搜索"],
+        "name": ["name", "名称", "姓名"],
+    }
+
+    def _aliases_for(key: str) -> List[str]:
+        low = key.lower()
+        aliases = list(key_aliases.get(low) or [])
+        if key not in aliases:
+            aliases.insert(0, key)
+        # Also try bare key for unknown params.
+        if low not in key_aliases and low not in aliases:
+            aliases.append(key)
+        # Dedupe preserve order
+        seen = set()
+        ordered: List[str] = []
+        for a in aliases:
+            if a and a not in seen:
+                seen.add(a)
+                ordered.append(a)
+        return ordered
+
+    def _extract_labeled(labels: List[str]) -> Optional[str]:
+        for lab in labels:
+            # 标题：“xxx” / 标题: xxx / title=xxx
+            pat = (
+                rf"(?:{re.escape(lab)})\s*[:=：]\s*"
+                rf"[「\"'“]?([^」\"'”\n，,；;]+)"
+            )
+            m = re.search(pat, text, re.IGNORECASE)
+            if m:
+                val = m.group(1).strip().strip("「」\"'“” ")
+                if val:
+                    return val
+        return None
+
     hint = extract_search_query_hint(text)
     for key in keys:
         if key.lower() in _CREDENTIAL_PARAM_KEYS:
@@ -63,14 +104,18 @@ def apply_rule_extraction(
         if key == "query" and hint:
             out[key] = hint
             continue
-        # key:value / key=value / 「key」xxx
+        labeled = _extract_labeled(_aliases_for(key))
+        if labeled:
+            out[key] = labeled
+            continue
+        # key:value / 参数 key ：value (ASCII key only)
         m = re.search(
             rf"(?:{re.escape(key)}|参数\s*{re.escape(key)})\s*[:=：]\s*([^\s,，;；]+)",
             text,
             re.IGNORECASE,
         )
         if m:
-            out[key] = m.group(1).strip().strip("「」\"'")
+            out[key] = m.group(1).strip().strip("「」\"'“”")
             continue
         if hint and len([k for k in keys if k.lower() not in _CREDENTIAL_PARAM_KEYS]) == 1:
             out[key] = hint

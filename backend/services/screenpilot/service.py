@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import json
 from typing import Any, Dict, List, Optional
@@ -29,7 +30,13 @@ from services.screenpilot.layers.perceive import (
     prepare_som_elements,
 )
 from services.screenpilot.layers.replay import enrich_fingerprints_from_page, execute_by_fingerprints
-from services.screenpilot.session_manager import create_live_session, get_live_session
+from services.screenpilot.session_manager import (
+    adopt_spawned_pages,
+    create_live_session,
+    discard_zombie_live_session,
+    get_live_session,
+    probe_live_session,
+)
 from services.screenpilot.skill_store import skill_store
 from services.screenpilot.trajectory import (
     append_trajectory_step,
@@ -145,6 +152,8 @@ async def _open_live_browser_session(
     screen_session_id: str,
     system_id: str,
     system: Optional[ScreenSystem] = None,
+    prefer_existing_page: bool = False,
+    preferred_url: str = "",
 ) -> Any:
     """获取或创建浏览器 LiveSession；本地模式可恢复 cookie，CDP 复用则继承本机登录态。"""
     sys = system or _get_system(db, system_id)
@@ -161,6 +170,37 @@ async def _open_live_browser_session(
         storage_state=storage_state,
         reuse_local_browser=reuse,
         cdp_url=cdp_url,
+        prefer_existing_page=prefer_existing_page,
+        preferred_url=preferred_url,
+    )
+
+
+async def _ensure_replay_live_session(
+    db: Session,
+    *,
+    screen_session_id: str,
+    system: Optional[ScreenSystem],
+) -> Any:
+    """Return a usable LiveSession; revive CDP after dead Playwright transport."""
+    live = get_live_session(screen_session_id)
+    if live and await probe_live_session(live):
+        return live
+
+    row = db.query(ScreenSession).filter(
+        ScreenSession.screen_session_id == screen_session_id
+    ).first()
+    if not row:
+        return None
+
+    if live:
+        await discard_zombie_live_session(screen_session_id)
+    return await _open_live_browser_session(
+        db,
+        screen_session_id=screen_session_id,
+        system_id=row.system_id,
+        system=system or _get_system(db, row.system_id),
+        prefer_existing_page=True,
+        preferred_url=row.current_url or "",
     )
 
 
@@ -223,6 +263,7 @@ async def observe_session(db: Session, screen_session_id: str) -> Dict[str, Any]
             "elements": elements,
         }
 
+    await adopt_spawned_pages(live)
     shot, tree, url = await capture_page_state(live.page)
     a11y_els = extract_a11y_elements(tree)
     dom_els, dialogs = await collect_dom_elements(live.page, limit=max(DEFAULT_MAX_ELEMENTS * 2, 200))
@@ -610,9 +651,18 @@ def create_hitl_for_ui_action(
 ) -> HITLApproval:
     from models import Session as AgentSession
 
+    sid = (vela_session_id or "").strip()
+    if not sid:
+        raise ValueError(
+            "HITL 需要有效的 vela_session_id；无 Agent 会话时应使用 force_execute 跳过审批门"
+        )
+    sess = db.query(AgentSession).filter(AgentSession.session_id == sid).first()
+    if not sess:
+        raise ValueError(f"HITL 关联的会话不存在: {sid}")
+
     approval = HITLApproval(
         approval_id=gen_uuid(),
-        session_id=vela_session_id,
+        session_id=sid,
         agent_id=agent_id,
         tool_name=tool_name,
         tool_args={
@@ -627,11 +677,7 @@ def create_hitl_for_ui_action(
     )
     db.add(approval)
 
-    sess = db.query(AgentSession).filter(
-        AgentSession.session_id == vela_session_id
-    ).first()
-    if sess:
-        sess.status = SessionStatus.HITL_WAIT
+    sess.status = SessionStatus.HITL_WAIT
 
     db.commit()
     db.refresh(approval)
@@ -957,25 +1003,16 @@ async def act_ui(
     agent_id: str = "",
     force_execute: bool = False,
 ) -> Dict[str, Any]:
-    live = get_live_session(screen_session_id)
-    if not live:
-        row = db.query(ScreenSession).filter(
-            ScreenSession.screen_session_id == screen_session_id
-        ).first()
-        if not row:
-            return {"success": False, "error": f"浏览器会话不存在: {screen_session_id}"}
-        system = _get_system(db, row.system_id)
-        live = await _open_live_browser_session(
-            db,
-            screen_session_id=screen_session_id,
-            system_id=row.system_id,
-            system=system,
-        )
-
     row = db.query(ScreenSession).filter(
         ScreenSession.screen_session_id == screen_session_id
     ).first()
     system = _get_system(db, row.system_id) if row else None
+    live = await _ensure_replay_live_session(
+        db, screen_session_id=screen_session_id, system=system
+    )
+    if not live:
+        return {"success": False, "error": f"浏览器会话不存在: {screen_session_id}"}
+
     allowed = (system.allowed_domains or []) if system else []
     risk_rules = (system.risk_rules or {}) if system else {}
 
@@ -989,7 +1026,11 @@ async def act_ui(
                 target_label = el.get("label") or target_ref
 
         risk_tier = classify_risk(action, target_label, risk_rules)
-        if requires_hitl(risk_tier) and not force_execute:
+        resolved_vela = (vela_session_id or (row.vela_session_id if row else "") or "").strip()
+        effective_force = bool(force_execute) or (
+            requires_hitl(risk_tier) and not resolved_vela
+        )
+        if requires_hitl(risk_tier) and not effective_force:
             preview = {
                 "action": action,
                 "target_ref": target_ref,
@@ -1004,7 +1045,7 @@ async def act_ui(
             approval = create_hitl_for_ui_action(
                 db,
                 screen_session_id=screen_session_id,
-                vela_session_id=vela_session_id or (row.vela_session_id if row else ""),
+                vela_session_id=resolved_vela,
                 agent_id=agent_id or (row.agent_id if row else ""),
                 tool_name="cu_act",
                 action_payload={"action": action, "target_ref": target_ref, "value": value},
@@ -1063,7 +1104,14 @@ async def act_ui(
 
     risk_tier = classify_risk(action, target_label, risk_rules)
 
-    if requires_hitl(risk_tier) and not force_execute:
+    resolved_vela = (vela_session_id or (row.vela_session_id if row else "") or "").strip()
+    # Standalone skill recorder has no agent Session; HITL FK requires sessions.session_id.
+    # Operator already confirmed via「执行并录制」, so skip the gate when no vela session.
+    effective_force = bool(force_execute) or (
+        requires_hitl(risk_tier) and not resolved_vela
+    )
+
+    if requires_hitl(risk_tier) and not effective_force:
         preview = {
             "action": action,
             "target_ref": target_ref,
@@ -1080,7 +1128,7 @@ async def act_ui(
         approval = create_hitl_for_ui_action(
             db,
             screen_session_id=screen_session_id,
-            vela_session_id=vela_session_id or (row.vela_session_id if row else ""),
+            vela_session_id=resolved_vela,
             agent_id=agent_id or (row.agent_id if row else ""),
             tool_name="cu_act",
             action_payload={
@@ -1125,6 +1173,23 @@ async def act_ui(
         value=value,
         allowed_domains=allowed,
     )
+    # Click may open a new tab asynchronously; adopt it before observe.
+    if (action or "").lower() == "click" and result.get("success"):
+        adopt_info = await adopt_spawned_pages(live)
+        if not adopt_info.get("switched"):
+            # Popup may lag behind click; wait for a new page event.
+            ctx = live.context or getattr(live.page, "context", None)
+            if ctx is not None:
+                try:
+                    new_page = await ctx.wait_for_event("page", timeout=5000)
+                    if new_page is not None:
+                        try:
+                            await new_page.wait_for_load_state("domcontentloaded", timeout=8000)
+                        except Exception:
+                            pass
+                        await adopt_spawned_pages(live)
+                except Exception:
+                    pass
     # If a login-looking click had no effect, nudge agent toward the real submit button.
     if (
         action == "click"
@@ -1239,31 +1304,95 @@ async def replay_skill(
     vela_session_id: str = "",
     agent_id: str = "",
     force_execute: bool = False,
+    resume_from_step: Optional[int] = None,
+    stop_after_step: Optional[int] = None,
+    on_step_done: Optional[Any] = None,
 ) -> Dict[str, Any]:
-    """确定性重放 UI 技能；指纹失效时返回 needs_replan。"""
+    """确定性重放 UI 技能；指纹失效时返回 needs_replan。
+
+    技能步骤一律自动执行，不因 T2/T3 风险触发步骤人工审批（缺参追问仍会 HITL）。
+    force_execute 保留以兼容调用方，不再用于跳过步骤审批。
+    stop_after_step: 若设置，执行到该 step_order（含）后停止。
+    on_step_done: 可选回调 async/sync (step, exec_result, results) -> None，用于写入会话进度。
+    """
     skill = skill_store.get_skill(db, skill_id)
     if not skill:
         return {"success": False, "error": f"技能不存在: {skill_id}"}
 
-    steps = skill_store.get_steps(db, skill_id)
-    if not steps:
+    all_steps = skill_store.get_steps(db, skill_id)
+    if not all_steps:
         return {"success": False, "error": "技能无步骤"}
+    steps = list(all_steps)
+    if resume_from_step is not None:
+        try:
+            start_at = int(resume_from_step)
+        except (TypeError, ValueError):
+            start_at = 0
+        if start_at > 0:
+            steps = [s for s in steps if int(getattr(s, "step_order", 0) or 0) >= start_at]
+    stop_at = None
+    if stop_after_step is not None:
+        try:
+            stop_at = int(stop_after_step)
+        except (TypeError, ValueError):
+            stop_at = None
 
-    live = get_live_session(screen_session_id)
     system = _get_system(db, skill.system_id)
+    live = await _ensure_replay_live_session(
+        db, screen_session_id=screen_session_id, system=system
+    )
     if not live:
-        row = db.query(ScreenSession).filter(
-            ScreenSession.screen_session_id == screen_session_id
-        ).first()
-        if not row:
-            return {"success": False, "error": f"浏览器会话不存在: {screen_session_id}"}
-        system = _get_system(db, skill.system_id)
-        live = await _open_live_browser_session(
-            db,
-            screen_session_id=screen_session_id,
-            system_id=row.system_id,
-            system=system,
-        )
+        return {"success": False, "error": f"浏览器会话不存在: {screen_session_id}"}
+
+    # Align browser to the skill's recorded start host before replaying steps.
+    # Absolute box fingerprints are host-specific (e.g. creator.* vs www.*).
+    try:
+        from urllib.parse import urlparse
+        from services.screenpilot.layers.act import wait_for_page_settle
+
+        start_url = ""
+        for _st in steps:
+            start_url = ((_st.fingerprints or {}).get("url") or "").strip()
+            if start_url:
+                break
+        if start_url:
+            cur = live.page.url or ""
+            want_host = (urlparse(start_url).netloc or "").lower()
+            cur_host = (urlparse(cur).netloc or "").lower()
+            if want_host and cur_host and want_host != cur_host:
+                allowed = (system.allowed_domains or []) if system else []
+                # Allow creator subdomain for recorded publish flows.
+                if want_host and want_host not in (allowed or []):
+                    # soft-allow same parent domain hosts already in allowlist
+                    parent = ".".join(want_host.split(".")[-2:])
+                    if any(parent in (d or "") or (d or "") in want_host for d in allowed):
+                        pass
+                nav = await execute_action(
+                    live.page,
+                    "navigate",
+                    [],
+                    value=start_url,
+                    allowed_domains=allowed,
+                )
+                if not nav.get("success"):
+                    return {
+                        "success": False,
+                        "error": (
+                            f"技能录制在 {want_host}，当前在 {cur_host}，"
+                            f"自动跳转失败: {nav.get('error') or 'unknown'}。"
+                            f"请确认已登录创作者中心，或将 {want_host} 加入系统域名白名单。"
+                        ),
+                        "needs_replan": True,
+                        "recorded_start_url": start_url,
+                        "page_url": cur,
+                    }
+                await wait_for_page_settle(live.page, timeout_ms=12000)
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"对齐技能起始页失败: {e}",
+            "needs_replan": True,
+        }
 
     risk_rules = (system.risk_rules or {}) if system else {}
     from services.screenpilot.layers.credential import load_credential_map
@@ -1319,6 +1448,7 @@ async def replay_skill(
         _tpl = _st.value_template or ""
         if _tpl:
             missing_keys.extend(unresolved_template_keys(_tpl, params))
+
     if missing_keys:
         uniq = sorted(set(missing_keys))
         schema = skill.param_schema if isinstance(getattr(skill, "param_schema", None), dict) else {}
@@ -1361,42 +1491,9 @@ async def replay_skill(
         value = resolve_template(raw_tpl, params)
         action = step.action
         label = step.target_label or ""
+        # Risk tier is recorded for audit only — skill replay never pauses for T2/T3 HITL.
         risk_tier = classify_risk(action, label, risk_rules)
-
-        if requires_hitl(risk_tier) and not force_execute:
-            preview = {
-                "action": action,
-                "target_label": label,
-                "value": value,
-                "risk_tier": risk_tier,
-                "skill_id": skill_id,
-                "step_order": step.step_order,
-            }
-            approval = create_hitl_for_ui_action(
-                db,
-                screen_session_id=screen_session_id,
-                vela_session_id=vela_session_id,
-                agent_id=agent_id,
-                tool_name="cu_replay_skill",
-                action_payload={
-                    "skill_id": skill_id,
-                    "screen_session_id": screen_session_id,
-                    "step_id": step.step_id,
-                    "params": params,
-                    "resume_from_step": step.step_order,
-                },
-                preview_payload=preview,
-                risk_tier=risk_tier,
-            )
-            return {
-                "success": True,
-                "hitl_pending": True,
-                "approval_id": approval.approval_id,
-                "risk_tier": risk_tier,
-                "preview_payload": preview,
-                "completed_steps": len(results),
-                "message": f"重放步骤 {step.step_order} 触发 {risk_tier} HITL",
-            }
+        _ = force_execute  # kept for API compat; step HITL is disabled
 
         if action == "navigate" and value:
             allowed = (system.allowed_domains or []) if system else []
@@ -1415,22 +1512,36 @@ async def replay_skill(
                     "needs_replan": True,
                     "failed_step": step.step_order,
                     "completed_steps": results,
+                    "risk_tier": risk_tier,
                 }
-            return exec_result
+            return {**exec_result, "risk_tier": risk_tier, "failed_step": step.step_order}
 
-        results.append(
-            {
-                "step_order": step.step_order,
-                "action": action,
-                "locate_method": exec_result.get("locate_method"),
-                "verification": exec_result.get("verification"),
-            }
-        )
+        step_row = {
+            "step_order": step.step_order,
+            "action": action,
+            "locate_method": exec_result.get("locate_method"),
+            "verification": exec_result.get("verification"),
+            "risk_tier": risk_tier,
+        }
+        if action == "type":
+            step_row["typed_value_preview"] = (value or "")[:80]
+        results.append(step_row)
 
         if step.fingerprints and exec_result.get("locate_method"):
             updated = dict(step.fingerprints)
             updated["last_method"] = exec_result.get("locate_method")
             skill_store.update_step_fingerprints(db, step.step_id, updated)
+
+        if on_step_done is not None:
+            try:
+                maybe = on_step_done(step, exec_result, results)
+                if asyncio.iscoroutine(maybe):
+                    await maybe
+            except Exception:
+                pass
+
+        if stop_at is not None and int(getattr(step, "step_order", 0) or 0) >= stop_at:
+            break
 
     await observe_session(db, screen_session_id)
     write_audit(
@@ -1442,11 +1553,35 @@ async def replay_skill(
         risk_tier="T1",
         payload={"skill_id": skill_id, "steps": len(results)},
     )
+    last_order = int(results[-1].get("step_order") or 0) if results else 0
+    remaining_after = [
+        int(getattr(s, "step_order", 0) or 0)
+        for s in all_steps
+        if int(getattr(s, "step_order", 0) or 0) > last_order
+    ]
+    final_url = ""
+    try:
+        final_url = live.page.url or ""
+    except Exception:
+        final_url = ""
+    applied = {
+        k: str(v)[:200]
+        for k, v in (params or {}).items()
+        if k.lower() not in ("password", "username", "otp", "token", "secret")
+        and not str(k).startswith("_")
+        and str(v or "").strip()
+    }
     return {
         "success": True,
         "skill_id": skill_id,
+        "skill_name": skill.name,
         "replayed_steps": len(results),
         "results": results,
+        "total_skill_steps": len(all_steps),
+        "remaining_steps": remaining_after,
+        "skill_completed": not remaining_after,
+        "final_url": final_url,
+        "applied_params": applied,
     }
 
 
@@ -1478,7 +1613,21 @@ async def search_skills(
     scope: str = "default",
     top_k: int = 5,
 ) -> Dict[str, Any]:
-    matches = skill_store.search(query, scope=scope, top_k=top_k, db=db)
+    # FAISS/sentence-transformers encode is sync and can block the event loop.
+    # Run search in a worker thread with its own DB session (sessions are not
+    # thread-safe).
+    from database import SessionLocal
+
+    def _search_in_thread() -> list:
+        thread_db = SessionLocal()
+        try:
+            return skill_store.search(
+                query, scope=scope, top_k=top_k, db=thread_db
+            )
+        finally:
+            thread_db.close()
+
+    matches = await asyncio.to_thread(_search_in_thread)
     items = []
     for skill_id, score in matches:
         skill = skill_store.get_skill(db, skill_id)
@@ -1491,25 +1640,143 @@ async def search_skills(
                     "system_id": skill.system_id,
                     "visibility": getattr(skill, "visibility", "PRIVATE") or "PRIVATE",
                     "status": skill.status or "ACTIVE",
-                    "score": score,
+                    "score": float(score),
                 }
             )
     return {"success": True, "items": items}
 
 
 async def execute_deferred_ui_act(db: Session, approval: HITLApproval) -> str:
-    """HITL 批准后执行挂起的 cu_act / cu_replay_skill（兼容历史 ui_*）。"""
+    """HITL 批准后执行挂起的 cu_act / cu_replay_skill（兼容历史 ui_*）。
+
+    对技能重放：先强制执行被批准步骤，再从下一步起继续跑剩余步骤（遇 T2/T3 再挂起）。
+    """
     args = approval.tool_args or {}
     if approval.tool_name in ("cu_replay_skill", "ui_replay_skill") and args.get("skill_id"):
-        result = await replay_skill(
+        resume = args.get("resume_from_step")
+        try:
+            resume_i = int(resume) if resume is not None else None
+        except (TypeError, ValueError):
+            resume_i = None
+        skill_id = args["skill_id"]
+        screen_session_id = args.get("screen_session_id", "")
+        params = dict(args.get("params") or {})
+        vela_sid = approval.session_id or ""
+        agent_id = approval.agent_id or ""
+
+        progress_lines: List[str] = []
+
+        def _append_progress(line: str) -> None:
+            progress_lines.append(line)
+            if not (vela_sid or "").strip():
+                return
+            try:
+                from models import Session as AgentSession
+                from sqlalchemy.orm.attributes import flag_modified
+
+                sess = (
+                    db.query(AgentSession)
+                    .filter(AgentSession.session_id == vela_sid)
+                    .first()
+                )
+                if not sess:
+                    return
+                messages = list(sess.messages or [])
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": line,
+                        "meta": {"kind": "skill_replay_progress", "approval_id": approval.approval_id},
+                    }
+                )
+                sess.messages = messages
+                flag_modified(sess, "messages")
+                sess.last_active_at = now_utc()
+                db.commit()
+            except Exception:
+                pass
+
+        def _on_step_done(step, exec_result, results):
+            order = int(getattr(step, "step_order", 0) or 0)
+            label = (getattr(step, "target_label", None) or "")[:40]
+            action = getattr(step, "action", "") or ""
+            ok = bool((exec_result or {}).get("success", True))
+            _append_progress(
+                f"[技能重放] 步骤 {order}/{action}"
+                f"{(' · ' + label) if label else ''} → {'成功' if ok else '失败'}"
+            )
+
+        # Phase 1: force-run only the approved step.
+        phase1 = await replay_skill(
             db,
-            skill_id=args["skill_id"],
-            screen_session_id=args.get("screen_session_id", ""),
-            params=args.get("params") or {},
-            vela_session_id=approval.session_id,
-            agent_id=approval.agent_id,
+            skill_id=skill_id,
+            screen_session_id=screen_session_id,
+            params=params,
+            vela_session_id=vela_sid,
+            agent_id=agent_id,
             force_execute=True,
+            resume_from_step=resume_i,
+            stop_after_step=resume_i,
+            on_step_done=_on_step_done,
         )
+        if not phase1.get("success") or phase1.get("hitl_pending") or phase1.get("needs_params"):
+            return json.dumps(phase1, ensure_ascii=False)
+
+        merged_results = list(phase1.get("results") or [])
+        next_step = None
+        if resume_i is not None:
+            next_step = int(resume_i) + 1
+        remaining = list(phase1.get("remaining_steps") or [])
+
+        # Phase 2: continue remaining steps. One approval finishes the rest of the skill
+        # (subsequent T2/T3 in the same skill do not re-prompt).
+        if remaining and next_step is not None:
+            _append_progress(
+                f"[技能重放] 已批准步骤 {resume_i}，继续执行剩余步骤 {remaining}"
+            )
+            phase2 = await replay_skill(
+                db,
+                skill_id=skill_id,
+                screen_session_id=screen_session_id,
+                params=params,
+                vela_session_id=vela_sid,
+                agent_id=agent_id,
+                force_execute=True,
+                resume_from_step=next_step,
+                on_step_done=_on_step_done,
+            )
+            if phase2.get("hitl_pending") or phase2.get("needs_params"):
+                phase2 = dict(phase2)
+                phase2["results"] = merged_results + list(phase2.get("results") or [])
+                phase2["replayed_steps"] = len(phase2["results"])
+                phase2["approved_step"] = resume_i
+                phase2["progress"] = progress_lines
+                return json.dumps(phase2, ensure_ascii=False)
+            if not phase2.get("success"):
+                phase2 = dict(phase2)
+                phase2["results"] = merged_results + list(phase2.get("completed_steps") or phase2.get("results") or [])
+                phase2["approved_step"] = resume_i
+                phase2["progress"] = progress_lines
+                return json.dumps(phase2, ensure_ascii=False)
+            merged_results.extend(phase2.get("results") or [])
+            result = {
+                "success": True,
+                "skill_id": skill_id,
+                "skill_name": phase2.get("skill_name") or phase1.get("skill_name"),
+                "replayed_steps": len(merged_results),
+                "results": merged_results,
+                "total_skill_steps": phase2.get("total_skill_steps") or phase1.get("total_skill_steps"),
+                "remaining_steps": phase2.get("remaining_steps") or [],
+                "skill_completed": bool(phase2.get("skill_completed")),
+                "approved_step": resume_i,
+                "progress": progress_lines,
+            }
+            return json.dumps(result, ensure_ascii=False)
+
+        result = dict(phase1)
+        result["approved_step"] = resume_i
+        result["progress"] = progress_lines
+        result["skill_completed"] = not remaining
         return json.dumps(result, ensure_ascii=False)
 
     screen_session_id = args.get("screen_session_id", "")

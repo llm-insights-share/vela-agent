@@ -1387,9 +1387,28 @@ function mapSessionMessages(msgs) {
   const flushBuffer = () => {
     if (!buffer.length) return
     const steps = intermediateToSteps(buffer)
+    // If the turn ends while the last assistant still has tool_calls, promote its
+    // text (or a fallback) as the formal reply — otherwise UI shows only thinking.
+    let formal = ''
+    for (let i = buffer.length - 1; i >= 0; i--) {
+      const m = buffer[i]
+      if (m.role === 'assistant' && (m.content || '').trim()) {
+        formal = (m.content || '').trim()
+        break
+      }
+    }
+    if (!formal && steps.length) {
+      const toolSteps = steps.filter((s) => s.type === 'tool')
+      const lastTool = toolSteps[toolSteps.length - 1]
+      if (lastTool) {
+        formal = `执行已结束。最后调用工具「${lastTool.toolName}」，请展开上方过程查看详情。`
+      } else {
+        formal = '执行已结束，请展开上方思考与执行过程查看详情。'
+      }
+    }
     buffer = []
-    if (steps.length) {
-      out.push(normalizeMessage({ role: 'assistant', content: '' }, steps))
+    if (steps.length || formal) {
+      out.push(normalizeMessage({ role: 'assistant', content: formal }, steps))
     }
   }
 
@@ -1442,7 +1461,14 @@ async function refreshCurrentSession() {
       }
       unwatchBackgroundSession(sessionId.value)
       await fetchSessions()
-      stopSessionPoll()
+      if (s.status === 'HITL_WAIT') {
+        startSessionPollIfNeeded()
+      } else {
+        stopSessionPoll()
+      }
+    } else if (prevStatus === 'HITL_WAIT' && s.status === 'RUNNING') {
+      watchBackgroundSession(sessionId.value, agentId, agent.name)
+      startSessionPollIfNeeded()
     }
     await nextTick()
     scrollToBottom()
@@ -1453,7 +1479,8 @@ async function refreshCurrentSession() {
 
 function startSessionPollIfNeeded() {
   stopSessionPoll()
-  if (currentSessionStatus.value === 'RUNNING') {
+  // Also poll HITL_WAIT so inbox/other-tab approve can resume UI progress here.
+  if (currentSessionStatus.value === 'RUNNING' || currentSessionStatus.value === 'HITL_WAIT') {
     sessionPollTimer = setInterval(refreshCurrentSession, 2500)
   }
 }
@@ -1920,6 +1947,7 @@ async function submitOtpHitl(msg) {
     })
     msg.approvalStatus = 'approved'
     message.success(res.message || '验证码已提交')
+    await afterHitlApproved(msg, res)
   } catch (e) {
     message.error('提交失败: ' + e.message)
   } finally {
@@ -1945,10 +1973,36 @@ async function submitSkillParamsHitl(msg) {
     })
     msg.approvalStatus = 'approved'
     message.success(res.message || '参数已提交，技能继续执行')
+    await afterHitlApproved(msg, res)
   } catch (e) {
     message.error('提交失败: ' + e.message)
   } finally {
     msg.approving = false
+  }
+}
+
+async function afterHitlApproved(msg, res) {
+  if (res?.tool_result) {
+    msg.approvalFinalResult = typeof res.tool_result === 'string'
+      ? res.tool_result
+      : JSON.stringify(res.tool_result)
+  }
+  if (res?.pending_approval_id) {
+    msg.pendingApprovalId = res.pending_approval_id
+    msg.approvalStatus = null
+    if (res.preview_payload) {
+      msg.previewPayload = res.preview_payload
+    }
+    currentSessionStatus.value = 'HITL_WAIT'
+  } else if (res?.session_status === 'RUNNING') {
+    currentSessionStatus.value = 'RUNNING'
+    watchBackgroundSession(sessionId.value, agentId, agent.name)
+    startSessionPollIfNeeded()
+  }
+  await refreshCurrentSession()
+  if (currentSessionStatus.value === 'RUNNING') {
+    watchBackgroundSession(sessionId.value, agentId, agent.name)
+    startSessionPollIfNeeded()
   }
 }
 
@@ -1974,8 +2028,13 @@ async function approveHitl(msg) {
         msg.pendingWorkflow = true
         msg.content = res.final_result || msg.content
       }
+    } else {
+      await afterHitlApproved(msg, res)
+      message.success(res.message || '已批准')
+      return
     }
     message.success(res.message || '已批准')
+    await refreshCurrentSession()
   } catch (e) {
     message.error('审批失败: ' + e.message)
   } finally {

@@ -937,7 +937,7 @@ def get_approval(approval_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/approvals/{approval_id}/approve")
-def approve_screenpilot(
+async def approve_screenpilot(
     approval_id: str,
     body: ApprovalReviewRequest,
     db: Session = Depends(get_db),
@@ -958,7 +958,7 @@ def approve_screenpilot(
         comment=body.comment or "",
         otp_code=(body.otp_code or None) or None,
     )
-    return approve_action(row.session_id, approval_id, review, db)
+    return await approve_action(row.session_id, approval_id, review, db)
 
 
 @router.post("/approvals/{approval_id}/reject")

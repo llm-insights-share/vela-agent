@@ -166,9 +166,14 @@ async def call_screenpilot_inprocess(
         allowed = {k for k in sig.parameters if k != "db"}
         return {k: v for k, v in (args or {}).items() if k in allowed}
 
+    def _err_text(exc: BaseException) -> str:
+        msg = str(exc).strip()
+        if msg:
+            return msg
+        return f"{type(exc).__name__}: {exc!r}"
+
     db = SessionLocal()
     try:
-
         if tool_name == "cu_run_task":
             result = await run_task(db, **_filter_kwargs(run_task, arguments))
         elif tool_name in TOOL_HANDLERS:
@@ -178,13 +183,28 @@ async def call_screenpilot_inprocess(
         else:
             return {"success": False, "error": f"未知 ScreenPilot 工具: {tool_name}"}
 
+        if not isinstance(result, dict):
+            return {
+                "success": False,
+                "error": f"ScreenPilot 工具返回非对象: {type(result).__name__}",
+            }
+
         if result.get("hitl_pending"):
             return {"success": True, "result": json.dumps(result, ensure_ascii=False), "raw": result}
-        if not result.get("success", True) and result.get("error"):
-            return {"success": False, "error": result.get("error", "执行失败")}
+        if not result.get("success", True):
+            err = (
+                result.get("error")
+                or result.get("message")
+                or json.dumps(
+                    {k: result.get(k) for k in list(result.keys())[:12]},
+                    ensure_ascii=False,
+                )[:500]
+            )
+            return {"success": False, "error": err or "ScreenPilot 执行失败"}
         return {"success": True, "result": json.dumps(result, ensure_ascii=False), "raw": result}
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        logger.exception("ScreenPilot inprocess %s failed", tool_name)
+        return {"success": False, "error": _err_text(e)}
     finally:
         db.close()
 

@@ -108,7 +108,10 @@ TOOLS = [
     },
     {
         "name": "cu_replay_skill",
-        "description": "确定性重放已编译 UI 技能；指纹失效时返回 needs_replan",
+        "description": (
+            "确定性重放已编译 UI 技能；所有步骤自动执行，不经步骤人工审批。"
+            "缺参时仍会请求补参；指纹失效时返回 needs_replan。"
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {

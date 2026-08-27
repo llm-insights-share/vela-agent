@@ -226,45 +226,79 @@ class SkillStore:
                 bonus += 0.12
         return min(bonus, 0.45)
 
+    def _lexical_search(
+        self, query: str, scope: str, top_k: int, db: Optional[Session]
+    ) -> List[Tuple[str, float]]:
+        """Rank ACTIVE skills by name/description overlap when FAISS/embed is unavailable."""
+        if db is None or not (query or "").strip():
+            return []
+        skills = (
+            db.query(UiSkill)
+            .filter(UiSkill.scope == (scope or "default"), UiSkill.status == "ACTIVE")
+            .all()
+        )
+        scored: List[Tuple[str, float]] = []
+        for skill in skills:
+            boost = self._lexical_boost(
+                query, skill.name or "", skill.description or ""
+            )
+            if boost <= 0:
+                continue
+            scored.append((skill.skill_id, float(boost)))
+        scored.sort(key=lambda x: -x[1])
+        return scored[: max(1, top_k)]
+
     def search(
         self, query: str, scope: str = "default", top_k: int = 5, db: Optional[Session] = None
     ) -> List[Tuple[str, float]]:
         scope = scope or "default"
-        if db is not None:
-            self._sync_index_with_db(db, scope)
-        index = self._ensure_index(scope)
-        if index.ntotal == 0 and db is not None:
-            self.rebuild_scope_from_db(db, scope)
-            index = self._ensure_index(scope)
-        id_map = self._id_maps.get(scope, [])
-        if index.ntotal == 0 or not query.strip():
+        if not (query or "").strip():
             return []
-        emb = self._embed(query)
-        k = min(max(top_k * 3, top_k), index.ntotal)
-        scores, indices = index.search(emb, k)
-        scored: List[Tuple[str, float]] = []
-        for score, idx in zip(scores[0], indices[0]):
-            if idx < 0 or idx >= len(id_map):
-                continue
-            sid = id_map[idx]
-            adj = float(score)
+        try:
             if db is not None:
-                skill = self.get_skill(db, sid)
-                if skill:
-                    adj += self._lexical_boost(query, skill.name or "", skill.description or "")
-            scored.append((sid, adj))
-        scored.sort(key=lambda x: -x[1])
-        # Dedupe and truncate
-        seen = set()
-        results: List[Tuple[str, float]] = []
-        for sid, score in scored:
-            if sid in seen:
-                continue
-            seen.add(sid)
-            results.append((sid, score))
-            if len(results) >= top_k:
-                break
-        return results
+                self._sync_index_with_db(db, scope)
+            index = self._ensure_index(scope)
+            if index.ntotal == 0 and db is not None:
+                self.rebuild_scope_from_db(db, scope)
+                index = self._ensure_index(scope)
+            id_map = self._id_maps.get(scope, [])
+            if index.ntotal == 0:
+                return self._lexical_search(query, scope, top_k, db)
+            emb = self._embed(query)
+            k = min(max(top_k * 3, top_k), index.ntotal)
+            scores, indices = index.search(emb, k)
+            scored: List[Tuple[str, float]] = []
+            for score, idx in zip(scores[0], indices[0]):
+                if idx < 0 or idx >= len(id_map):
+                    continue
+                sid = id_map[idx]
+                adj = float(score)
+                if db is not None:
+                    skill = self.get_skill(db, sid)
+                    if skill:
+                        adj += self._lexical_boost(
+                            query, skill.name or "", skill.description or ""
+                        )
+                scored.append((sid, adj))
+            scored.sort(key=lambda x: -x[1])
+            # Dedupe and truncate
+            seen = set()
+            results: List[Tuple[str, float]] = []
+            for sid, score in scored:
+                if sid in seen:
+                    continue
+                seen.add(sid)
+                results.append((sid, score))
+                if len(results) >= top_k:
+                    break
+            return results
+        except Exception as e:
+            logger.warning(
+                "FAISS/embed search failed scope=%s, falling back to lexical: %s",
+                scope,
+                e,
+            )
+            return self._lexical_search(query, scope, top_k, db)
 
     def create_skill(
         self,

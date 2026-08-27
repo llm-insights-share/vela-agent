@@ -2,39 +2,107 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 from services.screenpilot.layers.act import clear_and_type, wait_for_page_settle
 from services.screenpilot.layers.govern import verify_action
 
 
+def _host(url: str) -> str:
+    try:
+        return (urlparse(url or "").netloc or "").lower()
+    except Exception:
+        return ""
+
+
 async def try_locate_by_fingerprints(page, fingerprints: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """按优先级尝试定位元素，返回 {method, box?}。"""
+    """按优先级尝试定位元素，返回 {method, box?}。
+
+    有 role/label/css 等语义指纹时，语义失败不得回退到录制绝对坐标 box
+    （页面不同时 box 会点到错误控件，并被误判为 effect_ok）。
+    """
+    fingerprints = fingerprints or {}
     role = (fingerprints.get("role") or "").lower()
-    label = fingerprints.get("label") or ""
+    label = (fingerprints.get("label") or "").strip()
     box = fingerprints.get("box") or {}
+    recorded_url = fingerprints.get("url") or ""
+    page_url = ""
+    try:
+        page_url = page.url or ""
+    except Exception:
+        page_url = ""
+
+    semantic_hit = False
+    semantic_attempted = False
 
     if role and label:
+        semantic_attempted = True
         try:
             locator = page.get_by_role(role, name=label, exact=False)
             if await locator.count() > 0:
                 bb = await locator.first.bounding_box()
                 if bb:
+                    semantic_hit = True
                     return {"method": "role", "box": bb, "role": role, "label": label}
+        except Exception:
+            pass
+
+    # role without accessible name (e.g. unlabeled body editor)
+    if role and not label:
+        semantic_attempted = True
+        try:
+            locator = page.get_by_role(role)
+            n = await locator.count()
+            if n > 0:
+                # Prefer a visible large textbox when multiple
+                chosen = locator.first
+                if role in ("textbox", "searchbox") and n > 1:
+                    best = None
+                    best_area = 0
+                    for i in range(min(n, 8)):
+                        loc = locator.nth(i)
+                        try:
+                            if not await loc.is_visible():
+                                continue
+                            bb = await loc.bounding_box()
+                        except Exception:
+                            continue
+                        if not bb:
+                            continue
+                        area = float(bb.get("width") or 0) * float(bb.get("height") or 0)
+                        if area > best_area:
+                            best_area = area
+                            best = bb
+                    if best:
+                        semantic_hit = True
+                        return {"method": "role", "box": best, "role": role, "label": ""}
+                bb = await chosen.bounding_box()
+                if bb:
+                    semantic_hit = True
+                    return {"method": "role", "box": bb, "role": role, "label": ""}
         except Exception:
             pass
 
     css = fingerprints.get("css")
     if css:
+        semantic_attempted = True
         try:
             locator = page.locator(css)
             if await locator.count() > 0:
                 bb = await locator.first.bounding_box()
                 if bb:
+                    semantic_hit = True
                     return {"method": "css", "box": bb}
         except Exception:
             pass
 
+    # Absolute box is only safe on the same recorded host.
     if box.get("width") and box.get("height"):
+        if recorded_url and page_url and _host(recorded_url) != _host(page_url):
+            return None
+        if semantic_attempted and not semantic_hit:
+            # Semantic fingerprint existed but missed — do not click stale coordinates.
+            return None
         return {"method": "box", "box": box}
 
     return None
@@ -52,7 +120,17 @@ async def execute_by_fingerprints(
 
     located = await try_locate_by_fingerprints(page, fingerprints)
     if not located and action not in ("navigate", "wait", "scroll"):
-        return {"success": False, "error": "所有指纹定位方式均失效", "needs_replan": True}
+        recorded = (fingerprints or {}).get("url") or ""
+        hint = ""
+        if recorded and _host(recorded) != _host(before_url):
+            hint = f"；当前页 {before_url[:120]} 与录制页 {_host(recorded)} 不一致，请先导航到录制站点"
+        return {
+            "success": False,
+            "error": f"所有指纹定位方式均失效{hint}",
+            "needs_replan": True,
+            "page_url": before_url,
+            "recorded_url": recorded,
+        }
 
     try:
         if action == "navigate":
