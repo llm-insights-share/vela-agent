@@ -124,7 +124,7 @@
                   @change="syncManifestJsonFromForm"
                 />
               </a-form-item>
-              <a-form-item label="每轮 Tavily 上限">
+              <a-form-item label="每轮搜索上限">
                 <a-input-number
                   v-model:value="manifestForm.tool_budget.max_tavily_per_iter"
                   :min="1"

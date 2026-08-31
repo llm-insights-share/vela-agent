@@ -97,6 +97,9 @@
             <template v-else-if="column.key === 'rank'">
               {{ record.rank || '—' }}
             </template>
+            <template v-else-if="column.key === 'created_at'">
+              {{ formatDateTime(record.created_at) }}
+            </template>
             <template v-else-if="column.key === 'actions'">
               <a-popconfirm title="确认删除该归档记忆？" @confirm="removePassage(record)">
                 <a-button type="link" size="small" danger>删除</a-button>
@@ -149,6 +152,9 @@
             <template v-else-if="column.key === 'agent_id'">
               {{ agentName(record.agent_id) }}
             </template>
+            <template v-else-if="column.key === 'created_at'">
+              {{ formatDateTime(record.created_at) }}
+            </template>
             <template v-else-if="column.key === 'actions'">
               <a-button type="link" size="small" @click="openEpisode(record)">查看</a-button>
             </template>
@@ -188,6 +194,9 @@
             </template>
             <template v-else-if="column.key === 'user'">
               {{ record.username || record.user_id || '—' }}
+            </template>
+            <template v-else-if="column.key === 'created_at'">
+              {{ formatDateTime(record.created_at) }}
             </template>
           </template>
         </a-table>
@@ -254,6 +263,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import { agentApi, memoryApi } from '../../api'
+import { formatDateTime } from '../../utils/datetime'
 
 const activeTab = ref('blocks')
 const agentOptions = ref([])
@@ -325,7 +335,7 @@ const passageColumns = computed(() => {
   const cols = [
     { title: '内容', key: 'content', dataIndex: 'content' },
     { title: 'Tags', key: 'tags', width: 180 },
-    { title: '创建时间', dataIndex: 'created_at', width: 180 },
+    { title: '创建时间', key: 'created_at', dataIndex: 'created_at', width: 180 },
     { title: '操作', key: 'actions', width: 100 },
   ]
   if (passageQuery.value) {
@@ -338,7 +348,7 @@ const episodeColumns = [
   { title: '事件类型', key: 'event_type', width: 140 },
   { title: 'Agent', key: 'agent_id', width: 160 },
   { title: 'Session', dataIndex: 'session_id', ellipsis: true },
-  { title: '时间', dataIndex: 'created_at', width: 180 },
+  { title: '时间', key: 'created_at', dataIndex: 'created_at', width: 180 },
   { title: '详情', key: 'actions', width: 80 },
 ]
 
@@ -346,7 +356,7 @@ const scopeColumns = [
   { title: 'Agent', key: 'agent_id', width: 180 },
   { title: '用户', key: 'user', width: 160 },
   { title: 'Letta Agent ID', dataIndex: 'letta_agent_id' },
-  { title: '创建时间', dataIndex: 'created_at', width: 180 },
+  { title: '创建时间', key: 'created_at', dataIndex: 'created_at', width: 180 },
 ]
 
 function blockLabelZh(label) {

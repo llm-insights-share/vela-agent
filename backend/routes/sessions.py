@@ -23,6 +23,7 @@ from schemas import (
 from services.agent_service import agent_service, _ensure_files_for_session
 from services.session_abort import request_abort, clear_abort
 from services.attachment_service import attachment_service, MIME_TYPES as ATTACHMENT_MIME_TYPES
+from services.session_title import ensure_session_title
 from deps import CurrentUser
 
 router = APIRouter(prefix="/api/v1/sessions", tags=["sessions"])
@@ -125,6 +126,8 @@ def list_sessions(
     ).limit(page_size).all()
     for s in sessions:
         _ensure_files_for_session(s, db)
+        ensure_session_title(s)
+    db.commit()
     return PaginatedResponse(
         total=total, page=page, page_size=page_size,
         items=[SessionResponse.model_validate(s) for s in sessions]
@@ -146,6 +149,7 @@ def create_session(
         caller_id=caller_id,
         token_budget=data.token_budget,
         ttl_seconds=data.ttl_seconds,
+        title="",
         messages=[],
         trace_id=gen_uuid(),
     )
@@ -286,6 +290,7 @@ def get_session(session_id: str, db: Session = Depends(get_db)):
     if not session:
         raise HTTPException(status_code=404, detail="会话不存在")
     _ensure_files_for_session(session, db)
+    ensure_session_title(session)
     session.last_active_at = now_utc()
     db.commit()
     return SessionResponse.model_validate(session)
@@ -347,6 +352,7 @@ async def chat_async(
     messages.append(_build_user_message_payload(data, session, db))
     session.messages = messages
     flag_modified(session, "messages")
+    ensure_session_title(session)
 
     pending = dict(session.pending_context or {})
     pending["background_job"] = {

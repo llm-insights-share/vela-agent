@@ -5,7 +5,7 @@ from database import get_db
 from models import McpServer, Tool, ToolType, ToolStatus, gen_uuid, now_utc
 from schemas import ToolCreate, ToolUpdate, ToolResponse, ToolTestRequest, McpDiscoverRequest, PaginatedResponse
 from services.tool_service import tool_execution_service
-from services.builtin_tools import BUILTIN_TOOLS
+from services.builtin_tools import get_builtin_tools_for_runtime
 
 router = APIRouter(prefix="/api/v1/tools", tags=["tools"])
 
@@ -23,7 +23,7 @@ def _tool_response(tool: Tool) -> ToolResponse:
 @router.get("/builtin")
 def list_builtin_tools():
     items = []
-    for t in BUILTIN_TOOLS:
+    for t in get_builtin_tools_for_runtime():
         items.append({
             "tool_id": f"builtin_{t.name}",
             "name": t.name,

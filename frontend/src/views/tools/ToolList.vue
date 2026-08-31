@@ -517,6 +517,7 @@ const TOOL_MOCK_PARAMS = {
   cu_wait_for_otp: { screen_session_id: 'sess_demo', selector: 'input[name="otp"]', prompt: '请输入短信验证码' },
   cu_run_task: { system_id: '示例系统', goal: '打开首页并提取页面标题', max_steps: 6 },
   tavily_web_search: { query: '今天北京天气', max_results: 5, search_depth: 'basic', include_answer: true },
+  duckduckgo_web_search: { query: '今天北京天气', max_results: 5 },
   web_extract: { url: 'https://example.com', max_length: 10000 },
   kb_search: { query: '检索示例问题', top_k: 5 },
   bash: { command: 'ls -la', timeout: 30 },

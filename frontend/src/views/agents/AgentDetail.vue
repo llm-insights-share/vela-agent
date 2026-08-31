@@ -123,6 +123,7 @@ import { ref, reactive, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { agentApi, scheduleApi } from '../../api'
 import { message } from 'ant-design-vue'
+import { formatDateTime } from '../../utils/datetime'
 
 const route = useRoute()
 const agentId = route.params.id
@@ -150,14 +151,6 @@ function statusLabel(s) {
   const m = { DRAFT: '草稿', PUBLISHED: '已发布', DEPRECATED: '已下架', DELETED: '已删除' }
   return m[s] || s
 }
-function formatDateTime(value) {
-  if (!value) return '-'
-  const d = new Date(value)
-  if (Number.isNaN(d.getTime())) return String(value)
-  const pad = (n) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
-}
-
 async function fetchAgent() {
   loading.value = true
   try {

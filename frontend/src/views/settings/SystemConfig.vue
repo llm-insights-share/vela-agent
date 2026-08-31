@@ -21,8 +21,26 @@
         </a-button>
       </template>
       <div v-show="!cardCollapsed.tools">
+        <a-form :label-col="{ span: 4 }" :wrapper-col="{ span: 16 }" style="margin-bottom: 8px;">
+          <a-form-item label="Web Search 提供方">
+            <a-radio-group v-model:value="webSearchProvider" @change="onWebSearchProviderChange">
+              <a-radio-button value="tavily">Tavily</a-radio-button>
+              <a-radio-button value="duckduckgo">DuckDuckGo</a-radio-button>
+            </a-radio-group>
+            <div class="field-hint">
+              运行时只向 Agent 注入选定的搜索工具；保存后新对话生效。
+            </div>
+          </a-form-item>
+        </a-form>
+        <a-alert
+          v-if="webSearchProvider === 'tavily' && !tavilyStatus.configured"
+          type="warning"
+          show-icon
+          message="已选定 Tavily，但尚未配置 API Key；请填写下方 Key，不会自动切换到 DuckDuckGo。"
+          style="margin-bottom: 12px;"
+        />
         <a-collapse v-model:activeKey="activeKeys">
-          <a-collapse-panel key="tavily" header="Tavily Web Search">
+          <a-collapse-panel v-if="webSearchProvider === 'tavily'" key="tavily" header="Tavily Web Search">
             <template #extra>
               <a-tag v-if="tavilyStatus.configured" color="green">已配置</a-tag>
               <a-tag v-else color="orange">未配置</a-tag>
@@ -51,7 +69,78 @@
               />
             </div>
           </a-collapse-panel>
+          <a-collapse-panel v-else key="duckduckgo" header="DuckDuckGo Web Search">
+            <template #extra>
+              <a-tag v-if="ddgStatus.available" color="green">可用</a-tag>
+              <a-tag v-else color="orange">未安装</a-tag>
+            </template>
+            <div class="field-hint" style="margin-bottom: 12px;">
+              无需 API Key。依赖包 <code>duckduckgo-search</code>，Agent 将使用
+              <code>duckduckgo_web_search</code>。
+            </div>
+            <a-alert
+              v-if="!ddgStatus.available"
+              type="warning"
+              show-icon
+              message="后端未检测到 duckduckgo-search，请执行 pip install duckduckgo-search"
+            />
+            <a-alert
+              v-else
+              type="success"
+              show-icon
+              message="DuckDuckGo 可用，当前对话将只暴露 duckduckgo_web_search"
+            />
+          </a-collapse-panel>
         </a-collapse>
+
+        <a-divider style="margin: 20px 0 16px;" />
+
+        <div class="field-hint" style="margin-bottom: 12px;">
+          <strong>Tool Search（延迟加载）</strong>：开启后 Agent 默认只向 LLM 暴露少量核心工具与
+          <code>tool_search</code>；其余绑定工具需搜索激活后再注入 context。
+        </div>
+        <a-form :model="toolSearchForm" :label-col="{ span: 4 }" :wrapper-col="{ span: 16 }">
+          <a-form-item label="启用 Tool Search">
+            <a-switch v-model:checked="toolSearchForm.enabled" />
+            <div class="field-hint">默认关闭；开启后可在下方选择 eager（全量）或 deferred（延迟）模式。</div>
+          </a-form-item>
+          <template v-if="toolSearchForm.enabled">
+            <a-form-item label="加载模式">
+              <a-radio-group v-model:value="toolSearchForm.mode">
+                <a-radio-button value="eager">Eager（全量注入）</a-radio-button>
+                <a-radio-button value="deferred">Deferred（延迟加载）</a-radio-button>
+              </a-radio-group>
+            </a-form-item>
+            <a-form-item label="搜索后端">
+              <a-radio-group v-model:value="toolSearchForm.search_backend">
+                <a-radio-button value="bm25">BM25</a-radio-button>
+                <a-radio-button value="keyword">关键词</a-radio-button>
+              </a-radio-group>
+            </a-form-item>
+            <a-form-item label="最大命中数">
+              <a-input-number v-model:value="toolSearchForm.max_results" :min="1" :max="20" style="width: 120px;" />
+            </a-form-item>
+            <a-form-item label="会话加载上限">
+              <a-input-number v-model:value="toolSearchForm.max_loaded_per_session" :min="1" :max="50" style="width: 120px;" />
+            </a-form-item>
+            <a-form-item label="常驻工具">
+              <a-select
+                v-model:value="toolSearchForm.always_loaded"
+                mode="multiple"
+                placeholder="选择始终暴露给 LLM 的工具"
+                style="width: 100%;"
+              >
+                <a-select-option v-for="opt in toolSearchCoreOptions" :key="opt" :value="opt">{{ opt }}</a-select-option>
+              </a-select>
+              <div class="field-hint">
+                当前 Web Search 工具：<code>{{ toolSearchMeta.active_web_search || '—' }}</code>
+              </div>
+            </a-form-item>
+          </template>
+          <a-form-item :wrapper-col="{ offset: 4, span: 16 }">
+            <a-button type="primary" :loading="toolSearchSaving" @click="saveToolSearch">保存 Tool Search</a-button>
+          </a-form-item>
+        </a-form>
       </div>
     </a-card>
 
@@ -384,6 +473,29 @@ const cardCollapsed = reactive({
   rewrite: true,
 })
 
+const webSearchProvider = ref('tavily')
+const webSearchSaving = ref(false)
+const toolSearchSaving = ref(false)
+const toolSearchMeta = reactive({ active_web_search: '' })
+const toolSearchCoreOptions = [
+  'tool_search',
+  'tavily_web_search',
+  'duckduckgo_web_search',
+  'web_extract',
+  'execute_code',
+  'memory',
+  'kb_search',
+  'cu_search_skills',
+  'ui_search_skills',
+]
+const toolSearchForm = reactive({
+  enabled: false,
+  mode: 'eager',
+  search_backend: 'bm25',
+  max_results: 5,
+  max_loaded_per_session: 12,
+  always_loaded: [],
+})
 const activeKeys = ref(['tavily'])
 const tavilySaving = ref(false)
 const tavilyTesting = ref(false)
@@ -391,6 +503,9 @@ const tavilyTestResult = ref(null)
 
 const tavilyStatus = reactive({
   configured: false,
+})
+const ddgStatus = reactive({
+  available: false,
 })
 
 const tavilyForm = reactive({
@@ -543,17 +658,41 @@ async function onScreenpilotToggle(checked) {
 
 async function fetchConfig() {
   try {
-    const res = await configApi.getToolConfig()
-    const tavily = res.tavily || {}
-    tavilyStatus.configured = !!tavily.api_key
+    const res = await configApi.getWebSearch()
+    webSearchProvider.value = res.provider === 'duckduckgo' ? 'duckduckgo' : 'tavily'
+    tavilyStatus.configured = !!(res.tavily && res.tavily.configured)
+    ddgStatus.available = !!(res.duckduckgo && res.duckduckgo.available)
+    activeKeys.value = [webSearchProvider.value]
   } catch (e) {
-    // ignore
+    try {
+      const status = await configApi.getTavilyStatus()
+      tavilyStatus.configured = status.configured
+    } catch (_) {
+      // ignore
+    }
   }
+}
+
+async function onWebSearchProviderChange() {
+  const provider = webSearchProvider.value
+  if (provider === 'tavily' && !tavilyStatus.configured) {
+    message.warning('已选定 Tavily，请配置 API Key（不会自动切换到 DuckDuckGo）')
+  }
+  webSearchSaving.value = true
   try {
-    const status = await configApi.getTavilyStatus()
-    tavilyStatus.configured = status.configured
+    await configApi.updateWebSearch({ provider })
+    activeKeys.value = [provider]
+    message.success(
+      provider === 'duckduckgo'
+        ? '已切换为 DuckDuckGo；当前对话将只暴露 duckduckgo_web_search'
+        : '已切换为 Tavily；当前对话将只暴露 tavily_web_search'
+    )
+    await fetchConfig()
   } catch (e) {
-    // ignore
+    message.error(e.message)
+    await fetchConfig()
+  } finally {
+    webSearchSaving.value = false
   }
 }
 
@@ -732,8 +871,44 @@ async function saveRewriteMounts() {
   }
 }
 
+async function fetchToolSearch() {
+  try {
+    const res = await configApi.getToolSearch()
+    toolSearchForm.enabled = !!res.enabled
+    toolSearchForm.mode = res.mode === 'deferred' ? 'deferred' : 'eager'
+    toolSearchForm.search_backend = res.search_backend === 'keyword' ? 'keyword' : 'bm25'
+    toolSearchForm.max_results = res.max_results || 5
+    toolSearchForm.max_loaded_per_session = res.max_loaded_per_session || 12
+    toolSearchForm.always_loaded = Array.isArray(res.always_loaded) ? [...res.always_loaded] : []
+    toolSearchMeta.active_web_search = res.active_web_search || ''
+  } catch (_) {
+    // ignore
+  }
+}
+
+async function saveToolSearch() {
+  toolSearchSaving.value = true
+  try {
+    const res = await configApi.updateToolSearch({
+      enabled: toolSearchForm.enabled,
+      mode: toolSearchForm.mode,
+      search_backend: toolSearchForm.search_backend,
+      max_results: toolSearchForm.max_results,
+      max_loaded_per_session: toolSearchForm.max_loaded_per_session,
+      always_loaded: toolSearchForm.always_loaded,
+    })
+    message.success(res.message || 'Tool Search 配置已保存')
+    await fetchToolSearch()
+  } catch (e) {
+    message.error(e.message)
+  } finally {
+    toolSearchSaving.value = false
+  }
+}
+
 onMounted(async () => {
   await fetchConfig()
+  await fetchToolSearch()
   await fetchCodeExecConfig()
   await fetchContextualConfig()
   await fetchScreenpilot()

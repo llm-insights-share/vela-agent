@@ -510,8 +510,10 @@ class SessionResponse(BaseModel):
     token_used: int = 0
     token_budget: int = 100000
     ttl_seconds: int = 1800
+    title: str = ""
     messages: List[Dict[str, Any]] = []
     llm_calls: List[Dict[str, Any]] = []
+    pending_context: Optional[Dict[str, Any]] = None
     created_at: Optional[datetime] = None
     last_active_at: Optional[datetime] = None
 

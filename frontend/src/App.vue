@@ -90,7 +90,7 @@
                   >
                     <div class="inbox-item-title">{{ msg.title }}</div>
                     <div class="inbox-item-body">{{ msg.body }}</div>
-                    <div class="inbox-item-time">{{ formatInboxTime(msg.created_at) }}</div>
+                    <div class="inbox-item-time">{{ formatDateTimeShort(msg.created_at) }}</div>
                   </div>
                 </a-spin>
               </div>
@@ -146,6 +146,7 @@ import {
 } from './composables/useBackgroundSessions'
 import { useAuthStore } from './stores/auth'
 import { inboxApi } from './api'
+import { formatDateTimeShort } from './utils/datetime'
 
 const router = useRouter()
 const route = useRoute()
@@ -192,21 +193,6 @@ function stopInboxWatcher() {
     clearInterval(inboxTimer)
     inboxTimer = null
   }
-}
-
-function formatInboxTime(t) {
-  if (!t) return ''
-  const s = String(t).trim().replace(' ', 'T')
-  const hasTz = /Z$/i.test(s) || /[+-]\d{2}:\d{2}$/.test(s)
-  const d = new Date(hasTz ? s : `${s}Z`)
-  if (Number.isNaN(d.getTime())) return String(t)
-  return d.toLocaleString('zh-CN', {
-    hour12: false,
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  })
 }
 
 async function onInboxItemClick(msg) {

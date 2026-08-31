@@ -89,6 +89,8 @@ def _migrate_db():
         cursor.execute("ALTER TABLE sessions ADD COLUMN pending_context TEXT DEFAULT '{}'")
     if "llm_calls" not in sess_cols:
         cursor.execute("ALTER TABLE sessions ADD COLUMN llm_calls TEXT DEFAULT '[]'")
+    if "title" not in sess_cols:
+        cursor.execute("ALTER TABLE sessions ADD COLUMN title VARCHAR(128) DEFAULT ''")
 
     # ScreenPilot P1: ui_audit_logs 哈希链字段
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='ui_audit_logs'")

@@ -105,6 +105,25 @@
           </a-table>
           <span class="form-hint">勾选后，该工具调用前会触发 HITL 审批（SGL-CFG-06）</span>
         </a-form-item>
+
+        <a-form-item label="工具加载策略">
+          <a-space direction="vertical" style="width: 100%;">
+            <a-switch
+              v-model:checked="toolLoadingEnabled"
+              checked-children="延迟加载"
+              un-checked-children="系统默认"
+            />
+            <a-radio-group v-if="toolLoadingEnabled" v-model:value="toolLoadingMode">
+              <a-radio-button value="deferred">Deferred（按需搜索激活）</a-radio-button>
+              <a-radio-button value="eager">Eager（全量注入）</a-radio-button>
+            </a-radio-group>
+            <span class="form-hint">
+              需在系统配置中启用 Tool Search。绑定工具仍全部授权，但 deferred 模式下运行时仅核心工具 +
+              <code>tool_search</code> 直接进入 LLM context，其余工具需搜索后激活。
+            </span>
+          </a-space>
+        </a-form-item>
+
         <a-form-item label="标签" name="tags">
           <a-select v-model:value="form.tags" mode="tags" placeholder="输入标签" />
         </a-form-item>
@@ -174,6 +193,8 @@ const skills = ref([])
 const knowledgeBases = ref([])
 const toolList = ref([])
 const selectedProviderId = ref('')
+const toolLoadingEnabled = ref(false)
+const toolLoadingMode = ref('deferred')
 
 const groupedTools = computed(() => {
   const groups = new Map()
@@ -325,6 +346,9 @@ onMounted(async () => {
         agent_type: agent.agent_type || 'SINGLE',
         composition_config: agent.composition_config || {},
       })
+      const tl = (agent.composition_config || {}).tool_loading || {}
+      toolLoadingEnabled.value = tl.enabled === true || tl.mode === 'deferred' || tl.mode === 'eager'
+      toolLoadingMode.value = tl.mode === 'eager' ? 'eager' : 'deferred'
       // SGL-CFG-06: 回填工具审批配置
       const bindings = agent.tool_bindings || []
       selectedToolBindings.value = (agent.tool_ids || []).map(tid => {
@@ -349,6 +373,19 @@ async function onSubmit() {
   try {
     // SGL-CFG-06: 提交时合并 tool_ids + require_approval 为 tool_bindings
     const payload = { ...form }
+    if (toolLoadingEnabled.value) {
+      payload.composition_config = {
+        ...(form.composition_config || {}),
+        tool_loading: {
+          enabled: true,
+          mode: toolLoadingMode.value,
+        },
+      }
+    } else if (form.composition_config?.tool_loading) {
+      const next = { ...(form.composition_config || {}) }
+      delete next.tool_loading
+      payload.composition_config = next
+    }
     if (selectedToolBindings.value.length > 0) {
       payload.tool_bindings = selectedToolBindings.value.map(b => ({
         tool_id: b.tool_id,

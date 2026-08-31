@@ -256,6 +256,7 @@ class Session(Base):
     token_used = Column(Integer, default=0)
     token_budget = Column(Integer, default=100000)
     ttl_seconds = Column(Integer, default=1800)
+    title = Column(String(128), default="")
     messages = Column(JSON, default=list)
     llm_calls = Column(JSON, default=list)
     # SGL-CFG-06 / MA-IMP-09: HITL 挂起上下文（pending_tool_call / pending_delivery）

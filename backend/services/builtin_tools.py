@@ -133,6 +133,69 @@ BUILTIN_TAVILY_SEARCH_TOOL = BuiltinTool(
     },
 )
 
+BUILTIN_DDG_SEARCH_TOOL = BuiltinTool(
+    name="duckduckgo_web_search",
+    description=(
+        "使用 DuckDuckGo 进行网络搜索，无需 API Key。"
+        "适用于实时信息、事实查询、新闻检索；与 web_extract 互补。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "搜索查询关键词",
+            },
+            "max_results": {
+                "type": "integer",
+                "description": "返回结果数量，默认5，最大10",
+            },
+            "region": {
+                "type": "string",
+                "description": "区域代码，默认 wt-wt（全球）；如 cn-zh、us-en",
+            },
+            "timelimit": {
+                "type": "string",
+                "description": "时间范围：d（天）/ w（周）/ m（月）/ y（年），可选",
+                "enum": ["d", "w", "m", "y"],
+            },
+        },
+        "required": ["query"],
+    },
+)
+
+BUILTIN_TOOL_SEARCH = BuiltinTool(
+    name="tool_search",
+    description=(
+        "在 Agent 已授权的工具目录中搜索并激活工具。"
+        "当需要 MCP、数据库、文件操作等非核心能力时，先调用本工具再使用命中工具。"
+        "核心工具（web 搜索、网页提取、代码执行）无需搜索即可直接调用。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "搜索关键词或任务描述，如「SQL 查询」「ScreenPilot 点击」",
+            },
+            "max_results": {
+                "type": "integer",
+                "description": "返回结果数量，默认 5，最大 10",
+            },
+            "tool_types": {
+                "type": "array",
+                "items": {"type": "string", "enum": ["mcp", "restful", "local_python", "builtin"]},
+                "description": "可选，按工具类型过滤",
+            },
+            "activate": {
+                "type": "boolean",
+                "description": "是否将命中工具加入本会话可用列表，默认 true",
+            },
+        },
+        "required": ["query"],
+    },
+)
+
 BUILTIN_WEB_EXTRACT_TOOL = BuiltinTool(
     name="web_extract",
     description="提取指定 URL 网页的正文内容，输出为 Markdown 格式。适用于获取网页文章、文档、新闻等正文内容，与 tavily_web_search 互补。",
@@ -363,6 +426,7 @@ BUILTIN_TOOLS: List[BuiltinTool] = [
     BUILTIN_EDIT_TOOL,
     BUILTIN_BASH_TOOL,
     BUILTIN_TAVILY_SEARCH_TOOL,
+    BUILTIN_DDG_SEARCH_TOOL,
     BUILTIN_WEB_EXTRACT_TOOL,
     BUILTIN_SEARCH_FILES_TOOL,
     BUILTIN_MEMORY_TOOL,
@@ -372,6 +436,61 @@ BUILTIN_TOOLS: List[BuiltinTool] = [
     BUILTIN_KB_SEARCH_TOOL,
     BUILTIN_CREATE_SCHEDULE_TOOL,
 ]
+
+WEB_SEARCH_TOOL_NAMES = frozenset({"tavily_web_search", "duckduckgo_web_search"})
+
+
+def get_web_search_provider() -> str:
+    """Return configured provider: tavily | duckduckgo (default tavily)."""
+    import yaml
+
+    config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "vela.yaml")
+    if not os.path.isfile(config_path):
+        return "tavily"
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f) or {}
+        provider = (
+            (config.get("tools") or {}).get("web_search") or {}
+        ).get("provider") or "tavily"
+        provider = str(provider).strip().lower()
+        if provider not in ("tavily", "duckduckgo"):
+            return "tavily"
+        return provider
+    except Exception:
+        return "tavily"
+
+
+def get_active_web_search_tool_name() -> str:
+    return (
+        "duckduckgo_web_search"
+        if get_web_search_provider() == "duckduckgo"
+        else "tavily_web_search"
+    )
+
+
+def get_builtin_tools_for_runtime() -> List[BuiltinTool]:
+    """Builtin tools filtered by system web_search.provider."""
+    from services.tool_search.config import load_tool_search_config
+
+    active = get_active_web_search_tool_name()
+    ts_cfg = load_tool_search_config()
+    out: List[BuiltinTool] = []
+    for t in BUILTIN_TOOLS:
+        if t.name in WEB_SEARCH_TOOL_NAMES and t.name != active:
+            continue
+        out.append(t)
+    if ts_cfg.enabled and not any(x.name == "tool_search" for x in out):
+        out.append(BUILTIN_TOOL_SEARCH)
+    return out
+
+
+def is_duckduckgo_available() -> bool:
+    try:
+        import duckduckgo_search  # noqa: F401
+        return True
+    except Exception:
+        return False
 
 
 def build_builtin_openai_tool_def(tool: BuiltinTool) -> Dict[str, Any]:
@@ -396,6 +515,8 @@ async def execute_builtin_tool(tool_name: str, args: Dict[str, Any], output_dir:
         return await _execute_bash(args, output_dir)
     elif tool_name == "tavily_web_search":
         return await _execute_tavily_search(args)
+    elif tool_name == "duckduckgo_web_search":
+        return await _execute_duckduckgo_search(args)
     elif tool_name == "web_extract":
         return await _execute_web_extract(args)
     elif tool_name == "search_files":
@@ -716,6 +837,197 @@ async def _execute_tavily_search(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"success": False, "error": "Tavily API 请求超时"}
     except Exception as e:
         return {"success": False, "error": f"Tavily 搜索异常: {str(e)}"}
+
+
+def _normalize_ddg_result_url(href: str) -> str:
+    from urllib.parse import parse_qs, unquote, urlparse
+
+    href = (href or "").strip()
+    if not href:
+        return ""
+    if href.startswith("//"):
+        href = "https:" + href
+    parsed = urlparse(href)
+    if "uddg=" in href:
+        uddg = (parse_qs(parsed.query).get("uddg") or [""])[0]
+        if uddg:
+            return unquote(uddg)
+    return href
+
+
+def _strip_html_text(value: str) -> str:
+    import re
+    from html import unescape
+
+    text = re.sub(r"<[^>]+>", " ", value or "")
+    return " ".join(unescape(text).split())
+
+
+def _parse_ddg_html_page(html: str, max_results: int) -> List[Dict[str, str]]:
+    import re
+
+    titles = [
+        _strip_html_text(t)
+        for t in re.findall(r'class="result__a"[^>]*>(.*?)</a>', html, flags=re.S)
+    ]
+    hrefs = [
+        _normalize_ddg_result_url(h)
+        for h in re.findall(r'<a[^>]*class="result__a"[^>]*href="([^"]+)"', html)
+    ]
+    snippets = [
+        _strip_html_text(s)
+        for s in re.findall(
+            r'class="result__snippet"[^>]*>(.*?)</(?:a|td|div)>', html, flags=re.S
+        )
+    ]
+    rows: List[Dict[str, str]] = []
+    for i in range(min(len(titles), len(hrefs), max_results)):
+        row = {
+            "title": titles[i],
+            "href": hrefs[i],
+            "body": snippets[i] if i < len(snippets) else "",
+        }
+        if row["title"] or row["href"]:
+            rows.append(row)
+    return rows
+
+
+def _ddg_search_via_httpx_html(
+    query: str,
+    region: str,
+    timelimit: str | None,
+    max_results: int,
+) -> List[Dict[str, str]]:
+    import httpx
+
+    payload: Dict[str, str] = {"q": query, "b": ""}
+    if region:
+        payload["kl"] = region
+    if timelimit:
+        payload["df"] = timelimit
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Referer": "https://html.duckduckgo.com/",
+    }
+    with httpx.Client(timeout=20.0, follow_redirects=True, headers=headers) as client:
+        response = client.post("https://html.duckduckgo.com/html/", data=payload)
+        response.raise_for_status()
+        return _parse_ddg_html_page(response.text, max_results)
+
+
+def _ddg_search_via_library(
+    query: str,
+    region: str,
+    timelimit: str | None,
+    max_results: int,
+) -> List[Dict[str, str]]:
+    try:
+        from duckduckgo_search import DDGS
+    except ImportError as exc:
+        raise RuntimeError(
+            "未安装 duckduckgo-search，请执行: pip install duckduckgo-search"
+        ) from exc
+
+    backends = ("html", "lite")
+    last_err: Exception | None = None
+    for backend in backends:
+        try:
+            with DDGS(timeout=8) as ddgs:
+                if backend == "html" and hasattr(ddgs, "_text_html"):
+                    rows = ddgs._text_html(query, region, timelimit, max_results)
+                elif backend == "lite" and hasattr(ddgs, "_text_lite"):
+                    rows = ddgs._text_lite(query, region, timelimit, max_results)
+                else:
+                    rows = ddgs.text(
+                        query,
+                        region=region,
+                        timelimit=timelimit,
+                        backend=backend,
+                        max_results=max_results,
+                    )
+            result_list = list(rows or [])
+            if result_list:
+                return result_list
+        except Exception as ex:
+            last_err = ex
+            continue
+    if last_err:
+        raise last_err
+    return []
+
+
+def _ddg_collect_search_results(
+    query: str,
+    region: str,
+    timelimit: str | None,
+    max_results: int,
+) -> List[Dict[str, str]]:
+    strategies = (
+        ("httpx_html", _ddg_search_via_httpx_html),
+        ("library", _ddg_search_via_library),
+    )
+    last_err: Exception | None = None
+    for strategy_name, strategy_fn in strategies:
+        try:
+            rows = strategy_fn(query, region, timelimit, max_results)
+            if rows:
+                return rows
+        except Exception as ex:
+            last_err = ex
+            continue
+    if last_err:
+        raise last_err
+    return []
+
+
+async def _execute_duckduckgo_search(args: Dict[str, Any]) -> Dict[str, Any]:
+    query = (args.get("query") or "").strip()
+    if not query:
+        return {"success": False, "error": "缺少 query 参数"}
+
+    max_results = min(int(args.get("max_results", 5) or 5), 10)
+    region = (args.get("region") or "wt-wt").strip() or "wt-wt"
+    timelimit = args.get("timelimit") or None
+    if timelimit and str(timelimit) not in ("d", "w", "m", "y"):
+        timelimit = None
+
+    def _clip(text: str, limit: int = 220) -> str:
+        text = (text or "").strip()
+        if len(text) <= limit:
+            return text
+        return text[: limit - 1].rstrip() + "…"
+
+    try:
+        import asyncio
+
+        results = await asyncio.to_thread(
+            _ddg_collect_search_results,
+            query,
+            region,
+            timelimit,
+            max_results,
+        )
+        if not results:
+            return {"success": True, "result": "未找到相关结果"}
+
+        output_parts = ["## 搜索结果"]
+        for i, r in enumerate(results, 1):
+            title = (r.get("title") or "无标题").strip()
+            url = (r.get("href") or r.get("link") or r.get("url") or "").strip()
+            snippet = _clip(r.get("body") or r.get("snippet") or r.get("content") or "", 220)
+            item_lines = [f"### {i}. {title}"]
+            if url:
+                item_lines.append(f"- 链接: {url}")
+            if snippet:
+                item_lines.append(f"- 摘要: {snippet}")
+            output_parts.append("\n".join(item_lines))
+
+        return {"success": True, "result": "\n\n".join(output_parts)}
+    except Exception as e:
+        return {"success": False, "error": f"DuckDuckGo 搜索异常: {str(e)}"}
 
 
 # ─── web_extract: 网页正文提取 ─────────────────────────────────────────────

@@ -1,0 +1,124 @@
+"""Tool search service tests."""
+from unittest.mock import MagicMock
+
+from services.tool_search.catalog import ToolCatalog, ToolCatalogEntry, build_catalog_from_tools
+from services.tool_search.config import (
+    ToolSearchConfig,
+    resolve_core_tool_names,
+    resolve_tool_loading_for_agent,
+)
+from services.tool_search.registry import SessionToolRegistry
+from services.tool_search.search import search_tools
+from services.builtin_tools import BuiltinTool
+
+
+def _entry(name: str, desc: str = "", tool_type: str = "mcp") -> ToolCatalogEntry:
+    return ToolCatalogEntry(
+        name=name,
+        display_name=name,
+        description=desc,
+        tool_type=tool_type,
+    )
+
+
+def test_search_tools_bm25_ranks_relevant():
+    catalog = ToolCatalog([
+        _entry("nl2sql_query", "自然语言转 SQL 查询数据库"),
+        _entry("cu_act", "ScreenPilot 页面点击"),
+        _entry("weather_api", "查询城市天气"),
+    ])
+    hits = search_tools(catalog, "SQL 数据库查询", max_results=2, backend="bm25")
+    assert hits
+    assert hits[0].name == "nl2sql_query"
+
+
+def test_search_tools_keyword_backend():
+    catalog = ToolCatalog([_entry("send_email", "发送邮件通知")])
+    hits = search_tools(catalog, "邮件", max_results=3, backend="keyword")
+    assert len(hits) == 1
+    assert hits[0].name == "send_email"
+
+
+def test_search_respects_searchable_names():
+    catalog = ToolCatalog([
+        _entry("allowed_tool", "可见工具"),
+        _entry("hidden_tool", "隐藏工具"),
+    ])
+    hits = search_tools(
+        catalog,
+        "隐藏",
+        searchable_names={"allowed_tool"},
+        backend="keyword",
+    )
+    assert hits == []
+
+
+def test_resolve_core_tool_names_conditional():
+    cfg = ToolSearchConfig(enabled=True, mode="deferred", always_loaded=["tool_search", "execute_code"])
+    core = resolve_core_tool_names(
+        cfg,
+        memory_enabled=True,
+        has_kb=True,
+        available_tool_names={"memory", "kb_search", "execute_code", "tool_search", "nl2sql_query"},
+    )
+    assert "tool_search" in core
+    assert "execute_code" in core
+    assert "memory" in core
+    assert "kb_search" in core
+    assert "nl2sql_query" not in core
+
+
+def test_resolve_tool_loading_for_agent_override():
+    agent = MagicMock()
+    agent.composition_config = {
+        "tool_loading": {"mode": "deferred", "enabled": True},
+    }
+    cfg = resolve_tool_loading_for_agent(agent, ToolSearchConfig(enabled=False, mode="eager"))
+    assert cfg.enabled is True
+    assert cfg.mode == "deferred"
+
+
+def test_session_registry_activate_respects_max():
+    session = MagicMock()
+    session.pending_context = {}
+    reg = SessionToolRegistry(session, max_loaded=2)
+    added = reg.activate(["a", "b", "c"], core_names=set())
+    assert len(added) == 2
+    assert reg.loaded_list() == ["a", "b"]
+
+
+def test_build_catalog_from_builtin():
+    bt = BuiltinTool(name="demo", description="demo tool", parameters={"type": "object", "properties": {}})
+    cat = build_catalog_from_tools([bt])
+    assert cat.get("demo") is not None
+
+
+def test_agent_loop_tools_active_for_llm_deferred():
+    from services.agent_service import AgentLoop
+
+    loop = object.__new__(AgentLoop)
+    loop.tool_loading_cfg = ToolSearchConfig(enabled=True, mode="deferred", always_loaded=["tool_search", "execute_code"])
+    loop.core_tool_names = {"tool_search", "execute_code"}
+    loop.tool_registry = SessionToolRegistry(MagicMock(pending_context={}), max_loaded=5)
+    loop.tool_registry.loaded.add("nl2sql_query")
+    loop.available_tools = [
+        BuiltinTool(name="tool_search", description="", parameters={}),
+        BuiltinTool(name="execute_code", description="", parameters={}),
+        BuiltinTool(name="nl2sql_query", description="", parameters={}),
+        BuiltinTool(name="bash", description="", parameters={}),
+    ]
+    active = loop._tools_active_for_llm()
+    names = {t.name for t in active}
+    assert names == {"tool_search", "execute_code", "nl2sql_query"}
+
+
+def test_agent_loop_tools_active_eager():
+    from services.agent_service import AgentLoop
+
+    loop = object.__new__(AgentLoop)
+    loop.tool_loading_cfg = ToolSearchConfig(enabled=False, mode="eager")
+    loop.available_tools = [
+        BuiltinTool(name="a", description="", parameters={}),
+        BuiltinTool(name="b", description="", parameters={}),
+    ]
+    assert len(loop._tools_active_for_llm()) == 2

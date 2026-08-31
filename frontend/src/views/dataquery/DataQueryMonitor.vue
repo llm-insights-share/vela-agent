@@ -37,7 +37,9 @@
       <a-col :span="12">
         <a-card title="失败日志 Top">
           <a-table :data-source="failedLogs" rowKey="log_id" size="small" :pagination="{ pageSize: 10 }">
-            <a-table-column title="时间" dataIndex="created_at" />
+            <a-table-column title="时间" key="created_at" width="180">
+              <template #default="{ record }">{{ formatDateTime(record.created_at) }}</template>
+            </a-table-column>
             <a-table-column title="问题" dataIndex="question" ellipsis />
             <a-table-column title="状态" dataIndex="execution_status" />
           </a-table>
@@ -51,6 +53,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { message } from 'ant-design-vue'
 import { dataQueryApi } from '../../api'
+import { formatDateTime } from '../../utils/datetime'
 
 const agents = ref([])
 const currentAgentId = ref('')

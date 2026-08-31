@@ -77,6 +77,7 @@ import { ref, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { message } from 'ant-design-vue'
 import { scheduleApi } from '../../api'
+import { formatLocaleString } from '../../utils/datetime'
 
 const route = useRoute()
 const id = route.params.id
@@ -104,21 +105,7 @@ function statusColor(status) {
 }
 
 function formatScheduleTime(t) {
-  if (!t) return '-'
-  const s = String(t).trim().replace(' ', 'T')
-  const hasTz = /Z$/i.test(s) || /[+-]\d{2}:\d{2}$/.test(s)
-  const d = new Date(hasTz ? s : `${s}Z`)
-  if (Number.isNaN(d.getTime())) return String(t)
-  return d.toLocaleString('zh-CN', {
-    timeZone: detail.value?.timezone || 'Asia/Shanghai',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
-  })
+  return formatLocaleString(t, '-')
 }
 
 async function fetchDetail() {

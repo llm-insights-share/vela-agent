@@ -397,6 +397,7 @@
 import { ref, onMounted, computed } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import { dataQueryApi, serviceApi, toolApi } from '../../api'
+import { formatLocaleString } from '../../utils/datetime'
 
 const agents = ref([])
 const currentAgentId = ref('')
@@ -1068,10 +1069,7 @@ function deleteTerm(item) {
 }
 
 function formatLogTime(v) {
-  if (!v) return '-'
-  const d = new Date(v)
-  if (Number.isNaN(d.getTime())) return String(v)
-  return d.toLocaleString()
+  return formatLocaleString(v, '-')
 }
 
 function toolDqAgentId(tool) {

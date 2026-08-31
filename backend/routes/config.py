@@ -42,8 +42,13 @@ class TavilyConfigUpdate(BaseModel):
     api_key: str = ""
 
 
+class WebSearchProviderUpdate(BaseModel):
+    provider: str
+
+
 class ToolConfigResponse(BaseModel):
     tavily: dict = {}
+    web_search: dict = {}
 
 
 @router.get("/tools", response_model=ToolConfigResponse)
@@ -58,7 +63,14 @@ def get_tool_config():
         masked["api_key"] = key[:4] + "*" * (len(key) - 8) + key[-4:]
     elif key:
         masked["api_key"] = "****"
-    return ToolConfigResponse(tavily=masked)
+    web_search = tools.get("web_search") or {}
+    provider = str(web_search.get("provider") or "tavily").strip().lower()
+    if provider not in ("tavily", "duckduckgo"):
+        provider = "tavily"
+    return ToolConfigResponse(
+        tavily=masked,
+        web_search={"provider": provider},
+    )
 
 
 @router.put("/tools/tavily")
@@ -78,6 +90,84 @@ def tavily_status():
     config = _load_config()
     api_key = (config.get("tools", {}).get("tavily", {}).get("api_key", "")) or ""
     return {"configured": bool(api_key), "api_key_set": bool(api_key)}
+
+
+@router.get("/tools/web-search")
+def get_web_search_config():
+    from services.builtin_tools import get_web_search_provider, is_duckduckgo_available
+
+    config = _load_config()
+    api_key = (config.get("tools", {}).get("tavily", {}).get("api_key", "")) or ""
+    return {
+        "provider": get_web_search_provider(),
+        "tavily": {"configured": bool(api_key)},
+        "duckduckgo": {"available": is_duckduckgo_available()},
+    }
+
+
+@router.put("/tools/web-search")
+def update_web_search_config(data: WebSearchProviderUpdate):
+    provider = (data.provider or "").strip().lower()
+    if provider not in ("tavily", "duckduckgo"):
+        raise HTTPException(status_code=400, detail="provider 须为 tavily 或 duckduckgo")
+    config = _load_config()
+    if "tools" not in config:
+        config["tools"] = {}
+    if "web_search" not in config["tools"]:
+        config["tools"]["web_search"] = {}
+    config["tools"]["web_search"]["provider"] = provider
+    _save_config(config)
+    return {"message": "Web Search 提供方已保存", "provider": provider}
+
+
+class ToolSearchConfigUpdate(BaseModel):
+    enabled: bool = False
+    mode: str = "eager"
+    search_backend: str = "bm25"
+    max_results: int = 5
+    max_loaded_per_session: int = 12
+    always_loaded: List[str] = []
+
+
+@router.get("/tools/tool-search")
+def get_tool_search_config():
+    from services.tool_search.config import load_tool_search_config
+    from services.builtin_tools import get_active_web_search_tool_name
+
+    cfg = load_tool_search_config()
+    return {
+        "enabled": cfg.enabled,
+        "mode": cfg.mode,
+        "search_backend": cfg.search_backend,
+        "max_results": cfg.max_results,
+        "max_loaded_per_session": cfg.max_loaded_per_session,
+        "always_loaded": cfg.always_loaded,
+        "active_web_search": get_active_web_search_tool_name(),
+    }
+
+
+@router.put("/tools/tool-search")
+def update_tool_search_config(data: ToolSearchConfigUpdate):
+    mode = (data.mode or "eager").strip().lower()
+    if mode not in ("eager", "deferred"):
+        raise HTTPException(status_code=400, detail="mode 须为 eager 或 deferred")
+    backend = (data.search_backend or "bm25").strip().lower()
+    if backend not in ("bm25", "keyword"):
+        raise HTTPException(status_code=400, detail="search_backend 须为 bm25 或 keyword")
+
+    config = _load_config()
+    if "tools" not in config:
+        config["tools"] = {}
+    config["tools"]["tool_search"] = {
+        "enabled": bool(data.enabled),
+        "mode": mode,
+        "search_backend": backend,
+        "max_results": max(1, min(int(data.max_results or 5), 20)),
+        "max_loaded_per_session": max(1, min(int(data.max_loaded_per_session or 12), 50)),
+        "always_loaded": list(data.always_loaded or []),
+    }
+    _save_config(config)
+    return {"message": "Tool Search 配置已保存", **config["tools"]["tool_search"]}
 
 
 @router.get("/code-exec", response_model=CodeExecConfigResponse)

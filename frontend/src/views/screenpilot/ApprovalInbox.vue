@@ -23,7 +23,13 @@
       :loading="loading"
       size="middle"
       :customRow="customRow"
-    />
+    >
+      <template #bodyCell="{ column, record }">
+        <template v-if="column.key === 'created_at'">
+          {{ formatDateTime(record.created_at) }}
+        </template>
+      </template>
+    </a-table>
 
     <a-drawer v-model:open="drawerOpen" title="审批详情" width="560">
       <template v-if="selected">
@@ -98,6 +104,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { message } from 'ant-design-vue'
 import { screenpilotApi } from '../../api'
+import { formatDateTime } from '../../utils/datetime'
 
 const loading = ref(false)
 const acting = ref(false)

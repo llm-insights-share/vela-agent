@@ -17,8 +17,21 @@ from models import (
 )
 from schemas import AgentCreate, AgentUpdate, ValidationResult
 from services.builtin_tools import (
-    BuiltinTool, BUILTIN_TOOLS, build_builtin_openai_tool_def, execute_builtin_tool,
+    BuiltinTool,
+    WEB_SEARCH_TOOL_NAMES,
+    build_builtin_openai_tool_def,
+    execute_builtin_tool,
+    get_active_web_search_tool_name,
+    get_builtin_tools_for_runtime,
 )
+from services.tool_search import (
+    build_catalog_from_tools,
+    resolve_core_tool_names,
+    resolve_tool_loading_for_agent,
+    search_tools,
+    SessionToolRegistry,
+)
+from services.tool_search.format_result import format_tool_search_result
 
 
 class AgentLoopError(Exception):
@@ -432,6 +445,8 @@ class AgentService:
         session.messages = messages
         session.token_used = (session.token_used or 0) + result.get("total_tokens", 0)
         session.last_active_at = now_utc()
+        from services.session_title import ensure_session_title
+        ensure_session_title(session)
         db.commit()
 
         if pending_approval_id:
@@ -497,6 +512,10 @@ class AgentService:
                 msg["content"] = content
             if result.get("thinking"):
                 msg["thinking"] = result["thinking"]
+            if result.get("execution_story"):
+                msg["executionStory"] = result["execution_story"]
+            if result.get("llm_turns"):
+                msg["llmTurns"] = result["llm_turns"]
             if result.get("execution_trace"):
                 msg["executionTrace"] = result["execution_trace"]
             if result.get("execution_mode"):
@@ -569,6 +588,7 @@ class AgentService:
             session.status = SessionStatus.ACTIVE
 
         pending_ctx.pop("background_job", None)
+        pending_ctx.pop("llm_turns", None)
         session.pending_context = pending_ctx
         session.last_active_at = now_utc()
         db.commit()
@@ -873,7 +893,7 @@ class AgentService:
                     available_tools.append(tool)
 
 
-            available_tools.extend(BUILTIN_TOOLS)
+            available_tools.extend(get_builtin_tools_for_runtime())
 
             has_tools = len(available_tools) > 0
             has_kb = len(kb_bindings) > 0
@@ -921,6 +941,7 @@ class AgentService:
                 skill_context=skill_context,
                 skip_history=skip_history,
                 attachment_metadata=attachment_metadata,
+                has_kb=bool(kb_bindings),
             )
             if rewrite_meta:
                 loop.thinking_log.append(
@@ -932,6 +953,12 @@ class AgentService:
                     loop.thinking_log.append(
                         f"  原文: {original_message[:120]}\n  改写: {str(rewrite_meta.get('rewritten'))[:200]}"
                     )
+                loop.story.add_rewrite(
+                    rewrite_meta.get("_summary")
+                    or f"[QueryRewrite] T{rewrite_meta.get('tier')}/{rewrite_meta.get('method')}",
+                    original=str(original_message or "")[:200],
+                    rewritten=str(rewrite_meta.get("rewritten") or "")[:200],
+                )
 
             try:
                 result = await loop.run(mode)
@@ -1012,6 +1039,20 @@ class AgentService:
                     or preview_payload.get("flow_kind") == "skill_params",
                     "session_status": "HITL_WAIT",
                 }
+                if loop:
+                    loop.story.add_hitl(he.tool_name, he.approval_id)
+                    hitl_result["execution_story"] = loop.story.finalize(
+                        status="hitl_wait",
+                        summary=f"等待审批：{he.tool_name}",
+                        metrics=dict(loop._run_metrics),
+                    )
+                    from services.llm_call_recorder import get_llm_turns
+
+                    hitl_result["llm_turns"] = get_llm_turns()
+                    try:
+                        loop._flush_llm_turns_preview()
+                    except Exception:
+                        pass
                 if rewrite_meta:
                     hitl_result["rewrite"] = rewrite_meta
                 return hitl_result
@@ -1087,6 +1128,7 @@ class AgentLoop:
         attachment_metadata: Optional[List[Dict[str, str]]] = None,
         active_skill_pack=None,
         skill_relevance: Optional[float] = None,
+        has_kb: bool = False,
     ):
         self.db = db
         self.agent = agent
@@ -1112,8 +1154,10 @@ class AgentLoop:
         self.code_executions: List[Dict[str, Any]] = []
         self._code_fail_history: List[str] = []
 
+        from services.execution_story import ExecutionStoryBuilder
         from services.skill_budget import resolve_skill_budget, get_execution_hints
 
+        self.story = ExecutionStoryBuilder()
         self.skill_budget = resolve_skill_budget(active_skill_pack) if active_skill_name else resolve_skill_budget(None)
         self.execution_hints = get_execution_hints(active_skill_pack) if active_skill_name else None
         self._run_metrics: Dict[str, Any] = {
@@ -1125,6 +1169,8 @@ class AgentLoop:
             "forced_synthesis": False,
             "elapsed_ms": 0,
             "timed_out": False,
+            "tool_search_calls": 0,
+            "loaded_tool_count": 0,
         }
 
         # SGL-CFG-02: ReAct 最大迭代次数（可配置）
@@ -1170,6 +1216,25 @@ class AgentLoop:
             os.path.dirname(os.path.dirname(__file__)), "data", "outputs", session.session_id
         )
         os.makedirs(self.output_dir, exist_ok=True)
+
+        self.tool_loading_cfg = resolve_tool_loading_for_agent(agent)
+        avail_names = {
+            (getattr(t, "name", "") or "") for t in (available_tools or [])
+        }
+        self.core_tool_names = resolve_core_tool_names(
+            self.tool_loading_cfg,
+            memory_enabled=self.memory_enabled,
+            has_kb=has_kb,
+            available_tool_names=avail_names,
+        )
+        self.tool_catalog = build_catalog_from_tools(available_tools)
+        self.tool_registry = SessionToolRegistry.from_session(
+            session,
+            max_loaded=self.tool_loading_cfg.max_loaded_per_session,
+        )
+        self._tool_search_calls = self.tool_registry.tool_search_calls()
+        self._run_metrics["tool_search_calls"] = self._tool_search_calls
+        self._run_metrics["loaded_tool_count"] = len(self.tool_registry.loaded)
 
     def _sync_load_memory(self) -> str:
         """在线程池中执行：召回归档 + 加载核心 blocks。"""
@@ -1222,16 +1287,31 @@ class AgentLoop:
                     f"[Memory] 已注入长期记忆 {len(self._memory_context)} 字"
                     + ("（含归档召回）" if "相关归档" in self._memory_context else "（仅核心 blocks）")
                 )
+                self.story.add_memory(
+                    f"已注入长期记忆 {len(self._memory_context)} 字",
+                    hit=True,
+                )
             else:
                 self.thinking_log.append("[Memory] 未召回到可用长期记忆")
+                self.story.add_memory("未召回到可用长期记忆", hit=False)
         except Exception as e:
             print(f"[AgentLoop] 记忆检索失败，跳过: {e}")
             self.thinking_log.append(f"[Memory] 检索失败，跳过: {e}")
+            self.story.add_memory(f"检索失败: {e}", hit=False)
 
     async def run(self, mode: str) -> Dict[str, Any]:
         self._current_mode = mode
         self._run_metrics["execution_mode"] = mode
+        intent_text = self._content_to_str(self.original_user_message or self.user_message)
+        self.story.add_intent(intent_text[:400], skill=self.active_skill_name)
+        if self.active_skill_name:
+            self.story.add_skill_match(self.active_skill_name, self._run_metrics.get("skill_relevance"))
+        if self.knowledge_context:
+            self.story.add_knowledge(self.knowledge_context.strip()[:400])
+            self.story.complete_phase("gather", "已准备知识库上下文")
         await self._ensure_memory_loaded()
+        if self.story.phases["gather"]["steps"]:
+            self.story.complete_phase("gather")
         total_timeout = float(getattr(self.agent, "timeout_seconds", None) or 180)
         if self.timeout_seconds:
             total_timeout = max(total_timeout, float(self.timeout_seconds))
@@ -1252,10 +1332,12 @@ class AgentLoop:
             self._run_metrics["web_search_calls"] = self._web_search_calls
             self._run_metrics["tool_rounds"] = self._tool_rounds
             self.thinking_log.append(f"[TIMEOUT] 整体执行超时（{total_timeout}s）")
+            self.story.add_error(f"整体执行超时（{total_timeout}s）")
             return self._build_result(
                 f"任务执行超时（{total_timeout}s）。请尝试简化 Skill 内容或增加超时时间。",
                 "\n".join(self.thinking_log),
                 mode,
+                story_status="error",
             )
 
     async def _run_inner(self, mode: str) -> Dict[str, Any]:
@@ -1291,11 +1373,12 @@ class AgentLoop:
             if self.execution_hints:
                 system_prompt += f"\n\n## Skill 执行效率\n{self.execution_hints}"
             else:
+                search_tool = get_active_web_search_tool_name()
                 system_prompt += (
                     "\n\n## Skill 执行效率\n"
                     "已匹配 Skill，请在 3 轮工具调用内完成信息采集并输出最终结果。"
                     "A股实时行情优先用 web_extract 抓取 qt.gtimg.cn 或 eastmoney 行情接口；"
-                    "tavily_web_search 最多 2 次，避免重复搜索。"
+                    f"{search_tool} 最多 2 次，避免重复搜索。"
                     "信息足够后立即输出报告，不要继续调用工具。"
                 )
         if self._memory_context:
@@ -1366,6 +1449,15 @@ class AgentLoop:
                 f"3. 工作区路径: {ws_hint}；产物保存到 outputs/ 子目录或使用 plt.show() 自动出图。\n"
                 "4. 代码报错时阅读 traceback，修正后重试；连续失败 3 次应换思路。\n"
                 "5. 缺少依赖时用 install_packages 安装白名单内的包。\n"
+            )
+        if self.tool_loading_cfg.is_deferred() and self._deferred_tool_names():
+            core_list = ", ".join(sorted(self.core_tool_names))
+            system_prompt += (
+                "\n\n【工具延迟加载 / Tool Search】\n"
+                f"当前可直接调用的核心工具：{core_list}。\n"
+                "其他已授权工具需先调用 tool_search(query=关键词) 搜索并激活后再使用。\n"
+                "不要猜测未激活工具的名称；若无命中请换关键词或使用 execute_code。\n"
+                "已激活的工具会在下一轮对话中出现在可用工具列表中。\n"
             )
         return system_prompt
 
@@ -1552,7 +1644,45 @@ class AgentLoop:
 
         usage = completion.get("usage", {})
         self.total_tokens_used += usage.get("total_tokens", 0)
+        try:
+            self._flush_llm_turns_preview()
+        except Exception:
+            pass
         return completion
+
+    def _flush_llm_turns_preview(self) -> None:
+        from services.llm_call_recorder import flush_turns_preview, get_active_context
+        from sqlalchemy.orm.attributes import flag_modified
+
+        flush_turns_preview(self.db, self.session)
+        if getattr(self, "tool_registry", None):
+            pending = dict(self.session.pending_context or {})
+            loaded = self.tool_registry.loaded_list()
+            pending["loaded_tool_names"] = loaded
+            pending["tool_search_calls"] = self.tool_registry.tool_search_calls()
+            self.session.pending_context = pending
+            flag_modified(self.session, "pending_context")
+            ctx = get_active_context()
+            if ctx and ctx.get("turns"):
+                for t in reversed(ctx["turns"]):
+                    inp = t.get("input")
+                    if isinstance(inp, dict):
+                        inp["loaded_tool_names"] = loaded
+                        break
+            try:
+                self.db.commit()
+            except Exception:
+                pass
+
+    def _attach_tool_results_to_turn(self, tool_results: List[Dict[str, Any]]) -> None:
+        from services.llm_call_recorder import attach_tool_results
+
+        if tool_results:
+            attach_tool_results(tool_results)
+        try:
+            self._flush_llm_turns_preview()
+        except Exception:
+            pass
 
     def _parse_tool_calls(self, msg: Dict[str, Any]) -> List[Dict[str, Any]]:
         tool_calls = msg.get("tool_calls")
@@ -1700,7 +1830,7 @@ class AgentLoop:
             data["elements_truncated"] = True
 
         compact = json.dumps(data, ensure_ascii=False)
-        if tool_name in ("tavily_web_search", "web_extract") and len(compact) > 5000:
+        if tool_name in (*WEB_SEARCH_TOOL_NAMES, "web_extract") and len(compact) > 5000:
             compact = compact[:5000] + "…[truncated]"
         if tool_name in ("cu_search_skills", "ui_search_skills") and isinstance(
             data.get("items"), list
@@ -1937,14 +2067,25 @@ class AgentLoop:
         )
 
         if assessment.get("satisfied"):
+            self.story.add_check(
+                f"{tool.name} 结果质检通过",
+                assessment.get("reason", "") or "",
+                ok=True,
+            )
             return result
 
         self.thinking_log.append(
             f"  工具 [{tool.name}] 结果质检未通过: {assessment.get('reason', '')[:200]}"
         )
+        self.story.add_check(
+            f"{tool.name} 结果质检未通过",
+            assessment.get("reason", "") or "",
+            ok=False,
+        )
         fallback = await self._try_nl2sql_fallback(tool, args)
         if fallback and fallback.get("success"):
             self.thinking_log.append("  质检失败后已通过 NL2SQL 工具重新查询")
+            self.story.add_check("已通过 NL2SQL 降级查询", ok=True)
             return fallback
 
         return {
@@ -2224,8 +2365,23 @@ class AgentLoop:
             pass
 
     async def _execute_tool_with_retry(self, tool, args: Dict[str, Any]) -> Dict[str, Any]:
-        # ScreenPilot：注入会话关联，便于轨迹自动编译回落 UI 技能库
         tool_name = getattr(tool, "name", "") or ""
+
+        if tool_name == "tool_search":
+            return await self._execute_tool_search(args)
+
+        if self.tool_loading_cfg.is_deferred() and not self.tool_registry.is_loaded(
+            tool_name, core_names=set(self.core_tool_names)
+        ):
+            return {
+                "success": False,
+                "error": (
+                    f"工具 [{tool_name}] 尚未激活。请先调用 tool_search(query=...) "
+                    f"搜索并加载该工具后再试。"
+                ),
+            }
+
+        # ScreenPilot：注入会话关联，便于轨迹自动编译回落 UI 技能库
         if tool_name.startswith(("cu_", "ui_")):
             args = dict(args or {})
             if not args.get("vela_session_id"):
@@ -2274,6 +2430,8 @@ class AgentLoop:
             if tool.name == "execute_code":
                 if not result.get("success") and args.get("code"):
                     self._record_code_failure(args["code"])
+                if not result.get("code") and args.get("code"):
+                    result = {**result, "code": args["code"]}
                 self._record_code_execution(result)
             elif result.get("artifacts"):
                 for art in result["artifacts"]:
@@ -2616,6 +2774,78 @@ class AgentLoop:
         return self._build_result(assistant_content, reasoning_for_thinking, "direct")
 
     @staticmethod
+    def _tool_name(tool) -> str:
+        return (getattr(tool, "name", "") or "").strip()
+
+    def _tools_active_for_llm(self) -> list:
+        if not self.tool_loading_cfg.is_deferred():
+            return list(self.available_tools or [])
+        active_names = set(self.core_tool_names) | set(self.tool_registry.loaded)
+        return [
+            t for t in (self.available_tools or [])
+            if self._tool_name(t) in active_names
+        ]
+
+    def _deferred_tool_names(self) -> set:
+        return self.tool_catalog.all_names() - set(self.core_tool_names)
+
+    async def _execute_tool_search(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        query = (args.get("query") or "").strip()
+        if not query:
+            return {"success": False, "error": "缺少 query 参数"}
+
+        max_results = min(
+            int(args.get("max_results", self.tool_loading_cfg.max_results) or self.tool_loading_cfg.max_results),
+            10,
+        )
+        activate = args.get("activate", True)
+        if isinstance(activate, str):
+            activate = activate.lower() not in ("false", "0", "no")
+
+        tool_types = args.get("tool_types")
+        if isinstance(tool_types, str):
+            tool_types = [tool_types]
+
+        searchable = self._deferred_tool_names()
+        matches = search_tools(
+            self.tool_catalog,
+            query,
+            max_results=max_results,
+            backend=self.tool_loading_cfg.search_backend,
+            tool_types=tool_types,
+            searchable_names=searchable,
+        )
+
+        activated: List[str] = []
+        if activate and matches:
+            activated = self.tool_registry.activate(
+                [m.name for m in matches],
+                core_names=set(self.core_tool_names),
+            )
+            try:
+                self.db.commit()
+            except Exception:
+                pass
+
+        self._tool_search_calls = self.tool_registry.tool_search_calls()
+        self._run_metrics["tool_search_calls"] = self._tool_search_calls
+        self._run_metrics["loaded_tool_count"] = len(self.tool_registry.loaded)
+        self.tool_registry.record_search_call()
+        try:
+            self.db.commit()
+        except Exception:
+            pass
+
+        text = format_tool_search_result(
+            query,
+            matches,
+            activated,
+            already_loaded=self.tool_registry.loaded_list(),
+            max_loaded=self.tool_loading_cfg.max_loaded_per_session,
+        )
+        return {"success": True, "result": text, "activated": activated, "matches": [m.name for m in matches]}
+
+    @staticmethod
     def _build_tool_defs(available_tools: list) -> list:
         from services.tool_service import tool_execution_service
 
@@ -2634,20 +2864,27 @@ class AgentLoop:
         if not is_aborted(sid):
             return None
         self.thinking_log.append("[中止] 用户取消任务")
+        self.story.status = "aborted"
+        self.story.add_error("用户取消任务")
         content = "任务已由用户中止。"
         history = self._build_history_with_user([
             {"role": "assistant", "content": content},
         ])
         self._persist_session(history)
-        result = self._build_result(content, "\n".join(self.thinking_log), getattr(self, "_abort_mode", "react"))
+        result = self._build_result(
+            content,
+            "\n".join(self.thinking_log),
+            getattr(self, "_abort_mode", "react"),
+            story_status="aborted",
+        )
         result["aborted"] = True
         result["success"] = True
         result["session_status"] = "ACTIVE"
         return result
 
-    _WEB_SEARCH_TOOLS = frozenset({"tavily_web_search", "web_extract"})
+    _WEB_SEARCH_TOOLS = WEB_SEARCH_TOOL_NAMES | frozenset({"web_extract"})
 
-    def _check_web_tool_allowed(self, func_name: str, tavily_this_iter: int) -> Optional[str]:
+    def _check_web_tool_allowed(self, func_name: str, search_this_iter: int) -> Optional[str]:
         if not self.active_skill_name or func_name not in self._WEB_SEARCH_TOOLS:
             return None
         if self._web_search_calls >= self.skill_budget.max_web_search:
@@ -2656,11 +2893,11 @@ class AgentLoop:
                 "请基于已有信息输出报告，勿再搜索。"
             )
         if (
-            func_name == "tavily_web_search"
-            and tavily_this_iter >= self.skill_budget.max_tavily_per_iter
+            func_name in WEB_SEARCH_TOOL_NAMES
+            and search_this_iter >= self.skill_budget.max_tavily_per_iter
         ):
             return (
-                f"【系统】本轮 tavily 已达上限({self.skill_budget.max_tavily_per_iter}次)，"
+                f"【系统】本轮搜索已达上限({self.skill_budget.max_tavily_per_iter}次)，"
                 "请改用 web_extract 或直接输出报告。"
             )
         return None
@@ -2825,9 +3062,16 @@ class AgentLoop:
 
     async def _run_react(self) -> Dict[str, Any]:
         self._abort_mode = "react"
-        openai_tools = self._build_tool_defs(self.available_tools)
+        llm_tools = self._tools_active_for_llm()
+        openai_tools = self._build_tool_defs(llm_tools)
 
-        self.thinking_log.append(f"[ReAct] 开始执行, 可用工具: {len(self.available_tools)}")
+        if self.tool_loading_cfg.is_deferred():
+            self.thinking_log.append(
+                f"[ReAct] 开始执行, LLM 可见工具: {len(llm_tools)} / 目录 {len(self.available_tools)} "
+                f"(已加载 {len(self.tool_registry.loaded)})"
+            )
+        else:
+            self.thinking_log.append(f"[ReAct] 开始执行, 可用工具: {len(self.available_tools)}")
 
         messages = self._build_initial_messages()
         messages = self._truncate_context(messages)
@@ -2843,7 +3087,11 @@ class AgentLoop:
 
             iteration += 1
             self.thinking_log.append(f"[ReAct 迭代 {iteration}/{self.max_iterations}]")
+            self.story.mark_iteration(iteration, self.max_iterations)
             tavily_this_iter = 0
+
+            llm_tools = self._tools_active_for_llm()
+            openai_tools = self._build_tool_defs(llm_tools) if llm_tools else None
 
             completion = await self._call_llm(messages, tools=openai_tools)
 
@@ -2863,9 +3111,11 @@ class AgentLoop:
                 preview = self._content_to_str(msg.get("content"))[:300]
                 if not planning_done and iteration == 1:
                     self.thinking_log.append(f"[规划] {preview}")
+                    self.story.add_thought(preview, phase_id="act")
                     planning_done = True
                 else:
                     self.thinking_log.append(f"思考: {preview[:200]}")
+                    self.story.add_thought(preview[:400], phase_id="act")
 
             tool_calls = self._parse_tool_calls(msg)
 
@@ -2890,6 +3140,7 @@ class AgentLoop:
                 messages.append(assistant_entry)
                 new_messages.append(assistant_entry)
 
+                turn_tool_results: List[Dict[str, Any]] = []
                 for tc in tool_calls:
                     aborted = self._abort_if_requested()
                     if aborted:
@@ -2898,6 +3149,7 @@ class AgentLoop:
                     func_name = tc["function"]["name"]
                     raw_args = tc["function"].get("arguments", "")
                     func_args = self._safe_parse_tool_args(raw_args)
+                    exec_result: Optional[Dict[str, Any]] = None
 
                     parse_failed = bool(raw_args) and not func_args
 
@@ -2912,17 +3164,26 @@ class AgentLoop:
                                 f"3) 大文件内容建议通过代码块输出而非工具参数传递。"
                             )
                             self.thinking_log.append(f"  工具 [{func_name}] 参数解析失败: {raw_args[:200]}")
+                            self.story.add_tool_result(
+                                func_name, tool_result_str, ok=False, tool_call_id=tc.get("id") or ""
+                            )
                         elif skip_msg := self._check_web_tool_allowed(func_name, tavily_this_iter):
                             tool_result_str = skip_msg
                             self.thinking_log.append(f"  工具 [{func_name}] 已跳过：预算限制")
+                            self.story.add_tool_result(
+                                func_name, tool_result_str, skipped=True, tool_call_id=tc.get("id") or ""
+                            )
                         else:
                             # SGL-IMP-03: 死循环检测
                             if self._check_dead_loop(func_name, func_args):
                                 tool_result_str = f"检测到死循环：连续 {self.max_repeat_threshold} 次以相同参数调用 {func_name}，已强制中断。请尝试不同的方法。"
+                                self.story.add_tool_result(
+                                    func_name, tool_result_str, ok=False, tool_call_id=tc.get("id") or ""
+                                )
                             else:
                                 exec_result = await self._execute_tool_with_retry(tool, func_args)
                                 self._record_web_tool_call(func_name)
-                                if func_name == "tavily_web_search":
+                                if func_name in WEB_SEARCH_TOOL_NAMES:
                                     tavily_this_iter += 1
                                 if exec_result.get("success"):
                                     tool_result_str = self._tool_result_to_str(exec_result.get("result", ""))
@@ -2939,10 +3200,17 @@ class AgentLoop:
                                         self._last_ui_skill_result = payload
                                 self._extract_files_from_result(tool_result_str)
                                 tool_result_str = self._compact_tool_result_for_llm(func_name, tool_result_str)
+                                self.story.add_tool_result(
+                                    func_name,
+                                    tool_result_str[:800],
+                                    ok=bool(exec_result.get("success")),
+                                    tool_call_id=tc.get("id") or "",
+                                )
                             self.thinking_log.append(f"  工具 [{func_name}] 结果: {tool_result_str[:200]}")
                     else:
                         tool_result_str = f"工具 {func_name} 未找到，可用工具: {[t.name for t in self.available_tools]}"
                         self.thinking_log.append(f"  {tool_result_str}")
+                        self.story.add_tool_result(func_name, tool_result_str, ok=False, tool_call_id=tc.get("id") or "")
 
                     tool_msg = {
                         "role": "tool",
@@ -2951,7 +3219,32 @@ class AgentLoop:
                     }
                     messages.append(tool_msg)
                     new_messages.append(tool_msg)
+                    turn_tool_results.append({
+                        "tool_call_id": tc["id"],
+                        "name": func_name,
+                        "content": tool_result_str,
+                        "ok": not str(tool_result_str or "").startswith("工具执行错误")
+                        and "参数解析失败" not in str(tool_result_str or "")
+                        and "未找到" not in str(tool_result_str or "")[:40]
+                        and "死循环" not in str(tool_result_str or "")[:40],
+                        **(
+                            {"code_exec": self.code_executions[-1]}
+                            if func_name == "execute_code" and self.code_executions
+                            else {}
+                        ),
+                        **(
+                            {
+                                "tool_search": {
+                                    "activated": list(exec_result.get("activated") or []),
+                                    "matches": list(exec_result.get("matches") or []),
+                                }
+                            }
+                            if func_name == "tool_search" and exec_result and exec_result.get("success")
+                            else {}
+                        ),
+                    })
 
+                self._attach_tool_results_to_turn(turn_tool_results)
                 messages = self._truncate_context(messages)
                 self._tool_rounds += 1
                 if (
@@ -3060,11 +3353,6 @@ class AgentLoop:
 
         self.thinking_log.append(f"[Plan-and-Execute] 开始执行阶段，共 {len(steps)} 个步骤")
 
-        openai_tools = (
-            self._build_tool_defs(self.available_tools)
-            if self.available_tools else None
-        )
-
         execute_messages = list(messages)
         step_results = []
 
@@ -3072,6 +3360,12 @@ class AgentLoop:
             aborted = self._abort_if_requested()
             if aborted:
                 return aborted
+
+            llm_tools = self._tools_active_for_llm()
+            openai_tools = (
+                self._build_tool_defs(llm_tools)
+                if llm_tools else None
+            )
 
             step_text = step.strip()[:500]
             self.thinking_log.append(f"  执行步骤 {i + 1}/{len(steps)}: {step_text[:100]}")
@@ -3131,7 +3425,7 @@ class AgentLoop:
                                 else:
                                     exec_result = await self._execute_tool_with_retry(tool, func_args)
                                     self._record_web_tool_call(func_name)
-                                    if func_name == "tavily_web_search":
+                                    if func_name in WEB_SEARCH_TOOL_NAMES:
                                         tavily_this_iter += 1
                                     if exec_result.get("success"):
                                         tool_result_str = self._tool_result_to_str(exec_result.get("result", ""))
@@ -3232,10 +3526,28 @@ class AgentLoop:
         self.session.messages = history
         self.session.token_used = (self.session.token_used or 0) + self.total_tokens_used
         self.session.last_active_at = now_utc()
+        from services.session_title import ensure_session_title
+        ensure_session_title(self.session)
         self.db.commit()
 
-    def _build_result(self, content: str, thinking: str, mode: str) -> Dict[str, Any]:
+    def _build_result(
+        self,
+        content: str,
+        thinking: str,
+        mode: str,
+        *,
+        story_status: str = "done",
+    ) -> Dict[str, Any]:
         content = self._replace_file_references(content)
+        if story_status == "done" and self.story.status == "running":
+            self.story.add_deliver()
+        execution_story = self.story.finalize(
+            status=story_status,
+            metrics=dict(self._run_metrics),
+        )
+        from services.llm_call_recorder import get_llm_turns
+
+        llm_turns = get_llm_turns()
         result = {
             "content": content,
             "thinking": "\n".join(self.thinking_log) + "\n" + (thinking or ""),
@@ -3244,6 +3556,8 @@ class AgentLoop:
             "active_skill": self.active_skill_name,
             "execution_mode": mode,
             "run_metrics": dict(self._run_metrics),
+            "execution_story": execution_story,
+            "llm_turns": llm_turns,
         }
         if self.generated_files:
             result["files"] = self.generated_files
@@ -3263,6 +3577,9 @@ class AgentLoop:
                 msg["executionMode"] = mode
                 if self._run_metrics:
                     msg["runMetrics"] = dict(self._run_metrics)
+                msg["executionStory"] = execution_story
+                if llm_turns:
+                    msg["llmTurns"] = llm_turns
                 if self.generated_files:
                     msg["files"] = self.generated_files
                     if any(f.get("truncated") for f in self.generated_files):

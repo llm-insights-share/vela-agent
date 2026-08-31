@@ -15,7 +15,7 @@
           @click="switchSession(s)"
         >
           <div class="session-item-top">
-            <span class="session-item-id">{{ s.session_id?.substring(0, 8) }}...</span>
+            <span class="session-item-title" :title="s.title || '新对话'">{{ s.title || '新对话' }}</span>
             <a-tag :color="sessionStatusColor(s.status)" size="small">
               <LoadingOutlined v-if="s.status === 'RUNNING'" style="margin-right: 4px;" />
               {{ sessionStatusLabel(s.status) }}
@@ -88,13 +88,33 @@
             </a-tag>
             <span v-if="msg.runMetrics" class="run-metrics-hint" style="margin-left: 6px; font-size: 10px; color: #888;">
               搜索 {{ msg.runMetrics.web_search_calls || 0 }} 次
+              <template v-if="msg.runMetrics.tool_search_calls">
+                · 工具检索 {{ msg.runMetrics.tool_search_calls }} 次
+              </template>
+              <template v-if="msg.runMetrics.loaded_tool_count">
+                · 已加载 {{ msg.runMetrics.loaded_tool_count }} 工具
+              </template>
               · {{ msg.runMetrics.elapsed_ms ? Math.round(msg.runMetrics.elapsed_ms / 1000) + 's' : '' }}
               <template v-if="msg.runMetrics.forced_synthesis"> · 强制合成</template>
             </span>
           </template>
         </div>
 
-        <div v-if="msg._thinkingSteps && msg._thinkingSteps.length" class="chat-thinking">
+        <LlmTurnCards
+          v-if="msg.role === 'assistant' && msg._llmTurns?.length"
+          :turns="msg._llmTurns"
+          :code-executions="msg.codeExecutions"
+          :default-expanded="!msg.content || currentSessionStatus === 'RUNNING' || currentSessionStatus === 'HITL_WAIT'"
+        />
+
+        <ExecutionStoryPanel
+          v-else-if="msg.role === 'assistant' && msg._executionStory"
+          :story="msg._executionStory"
+          :default-expanded="msg._executionStory.status === 'running' || msg._executionStory.status === 'hitl_wait'"
+        />
+
+        <!-- Legacy flat timeline fallback when no structured story -->
+        <div v-else-if="msg._thinkingSteps && msg._thinkingSteps.length" class="chat-thinking">
           <div class="chat-thinking-header" @click="msg.thinkingExpanded = !msg.thinkingExpanded">
             <CaretRightOutlined v-if="!msg.thinkingExpanded" style="font-size: 10px;" />
             <CaretDownOutlined v-else style="font-size: 10px;" />
@@ -155,12 +175,13 @@
             <span v-html="renderMarkdown(msg.content)"></span>
           </template>
         </div>
+
         <div v-if="msg.attachments && msg.attachments.length" class="chat-attachments">
           <a-tag v-for="att in msg.attachments" :key="att.id" color="blue">
             <PaperClipOutlined /> {{ att.filename }}
           </a-tag>
         </div>
-        <div v-if="msg.codeExecutions && msg.codeExecutions.length" class="chat-code-execs">
+        <div v-if="msg.codeExecutions && msg.codeExecutions.length && !msg._llmTurns?.length" class="chat-code-execs">
           <CodeExecutionCard
             v-for="(cex, ci) in msg.codeExecutions"
             :key="ci"
@@ -311,41 +332,18 @@
         </div>
       </div>
 
-      <div v-if="isSending" class="chat-msg chat-msg-assistant">
+      <div v-if="showLiveProgress" class="chat-msg chat-msg-assistant">
         <div class="chat-msg-role">
           {{ agent.name }}
           <a-tag v-if="activeSkill" color="orange" style="margin-left: 6px; font-size: 10px;">
             {{ activeSkill }}
           </a-tag>
+          <a-spin size="small" style="margin-left: 8px;" />
         </div>
-        <div class="chat-thinking sending">
-          <div class="chat-thinking-header" @click="thinkingExpanded = !thinkingExpanded">
-            <CaretRightOutlined v-if="!thinkingExpanded" style="font-size: 10px;" />
-            <CaretDownOutlined v-else style="font-size: 10px;" />
-            <span style="margin-left: 4px;">分析规划中...</span>
-            <a-spin size="small" style="margin-left: 8px;" />
-          </div>
-          <div v-if="thinkingExpanded" class="chat-thinking-body">
-            <div class="thinking-steps">
-              <div class="thinking-step">
-                <span class="step-dot active"></span>
-                执行模式: {{ executionModeOptions.find(o => o.value === executionMode)?.label || executionMode }}
-              </div>
-              <div class="thinking-step">
-                <span class="step-dot active"></span>
-                正在分析请求...
-              </div>
-              <div class="thinking-step" v-if="activeSkill">
-                <span class="step-dot active"></span>
-                使用 Skill: {{ activeSkill }}
-              </div>
-              <div class="thinking-step">
-                <span class="step-dot active"></span>
-                等待模型响应...
-              </div>
-            </div>
-          </div>
-        </div>
+        <LlmTurnCards
+          :turns="liveLlmTurns.length ? liveLlmTurns : livePlaceholderTurns"
+          :default-expanded="true"
+        />
       </div>
     </div>
 
@@ -764,12 +762,17 @@ import javascript from 'highlight.js/lib/languages/javascript'
 import bash from 'highlight.js/lib/languages/bash'
 import json from 'highlight.js/lib/languages/json'
 import CodeExecutionCard from '../../components/CodeExecutionCard.vue'
+import LlmTurnCards from '../../components/LlmTurnCards.vue'
+import ExecutionStoryPanel from '../../components/ExecutionStoryPanel.vue'
 import 'highlight.js/styles/github-dark.css'
 import {
   watchBackgroundSession,
   setActiveViewing,
   unwatchBackgroundSession,
 } from '../../composables/useBackgroundSessions'
+import { formatRelativeTime, formatLocaleString } from '../../utils/datetime'
+import { normalizeExecutionStory, synthesizeStoryFromSteps } from '../../utils/executionStory'
+import { normalizeLlmTurns, turnsFromLlmCalls, turnsFromThinkingSteps, enrichTurnsWithCodeExecutions } from '../../utils/llmTurns'
 
 hljs.registerLanguage('python', python)
 hljs.registerLanguage('javascript', javascript)
@@ -978,12 +981,7 @@ function tokenTotal(call) {
 }
 
 function formatCallTime(iso) {
-  if (!iso) return ''
-  try {
-    return new Date(iso).toLocaleString()
-  } catch {
-    return iso
-  }
+  return formatLocaleString(iso, '')
 }
 
 async function fetchLlmCalls() {
@@ -1026,6 +1024,44 @@ const isRunning = computed(() => currentSessionStatus.value === 'RUNNING')
 const isHitlWait = computed(() => currentSessionStatus.value === 'HITL_WAIT')
 const canAbort = computed(() => isRunning.value || isHitlWait.value)
 const isSending = computed(() => sending.value || isRunning.value)
+
+const liveTurnsPreview = ref([])
+const liveLlmTurns = computed(() => normalizeLlmTurns(liveTurnsPreview.value) || [])
+
+/** Placeholder turn while waiting for first LLM call to flush */
+const livePlaceholderTurns = computed(() => {
+  const modeLabel = executionModeOptions.find(o => o.value === executionMode.value)?.label || executionMode.value
+  return [{
+    turn_id: 'live_pending',
+    seq: 1,
+    source: executionMode.value === 'direct' ? 'direct' : 'react',
+    input: {
+      messages: [{ role: 'user', content: (inputText.value || '').trim().slice(0, 200) || '…' }],
+      summary: '等待模型响应…',
+      has_system: true,
+      tools_count: 0,
+    },
+    thinking: null,
+    response: { content: `执行模式: ${modeLabel} · 正在调用大模型…`, tool_calls: null },
+    tool_results: [],
+  }]
+})
+
+const showLiveProgress = computed(() => {
+  if (!isSending.value) return false
+  const last = messages.value[messages.value.length - 1]
+  // Final/in-progress assistant bubble already has turn cards
+  if (last?.role === 'assistant' && last._llmTurns?.length) return false
+  if (liveLlmTurns.value.length) return true
+  if (
+    last?.role === 'assistant'
+    && !last.content
+    && (last._executionStory || last._thinkingSteps?.length)
+  ) {
+    return false
+  }
+  return true
+})
 
 watch(debugOpen, (open) => {
   if (open) {
@@ -1344,12 +1380,35 @@ function normalizeMessage(msg, intermediateSteps) {
   const steps = baseSteps.length
     ? mergeToolResults(baseSteps, intermediateSteps)
     : intermediateSteps
+  const enrichedSteps = attachSearchCards(steps)
+
+  let llmTurns = normalizeLlmTurns(msg.llmTurns || msg.llm_turns)
+  if (!llmTurns?.length) {
+    llmTurns = turnsFromThinkingSteps(enrichedSteps)
+  }
+  const codeExecutions = msg.codeExecutions || msg.code_executions || []
+  if (llmTurns?.length) {
+    llmTurns = enrichTurnsWithCodeExecutions(llmTurns, codeExecutions)
+  }
+
+  let executionStory = normalizeExecutionStory(msg.executionStory || msg.execution_story)
+  if (!executionStory && !llmTurns?.length && enrichedSteps.length) {
+    const status = msg.pendingApprovalId || msg.pending_approval_id
+      ? 'hitl_wait'
+      : (msg.content ? 'done' : 'running')
+    executionStory = synthesizeStoryFromSteps(enrichedSteps, {
+      status,
+      metrics: msg.runMetrics || msg.run_metrics || null,
+    })
+  }
 
   return {
     ...msg,
     thinking,
     thinkingExpanded: false,
-    _thinkingSteps: attachSearchCards(steps),
+    _thinkingSteps: enrichedSteps,
+    _llmTurns: llmTurns,
+    _executionStory: executionStory,
     traceExpanded: true,
     executionTrace: msg.executionTrace || msg.execution_trace || [],
     executionMode: msg.executionMode || msg.execution_mode || '',
@@ -1357,7 +1416,7 @@ function normalizeMessage(msg, intermediateSteps) {
     runMetrics: msg.runMetrics || msg.run_metrics || null,
     files: msg.files || [],
     filesTruncated: msg.filesTruncated || msg.files_truncated || false,
-    codeExecutions: msg.codeExecutions || msg.code_executions || [],
+    codeExecutions,
     pendingApprovalId: msg.pendingApprovalId || msg.pending_approval_id || null,
     pendingDelivery: msg.pendingDelivery || msg.pending_delivery || false,
     pendingWorkflow: msg.pendingWorkflow || msg.pending_workflow || false,
@@ -1434,8 +1493,20 @@ async function loadSessionById(id) {
   const s = await sessionApi.get(id)
   currentSessionStatus.value = s.status
   messages.value = mapSessionMessages(s.messages)
+  enrichMessagesWithSessionLlmCalls(s)
+  liveTurnsPreview.value = s.pending_context?.llm_turns || []
   await nextTick()
   scrollToBottom()
+}
+
+function enrichMessagesWithSessionLlmCalls(session) {
+  if (!session?.llm_calls?.length) return
+  const mapped = messages.value
+  // Attach session llm_calls as turns to the last assistant without llmTurns
+  const lastAssistant = [...mapped].reverse().find((m) => m.role === 'assistant')
+  if (lastAssistant && !lastAssistant._llmTurns?.length) {
+    lastAssistant._llmTurns = turnsFromLlmCalls(session.llm_calls)
+  }
 }
 
 async function refreshCurrentSession() {
@@ -1445,6 +1516,10 @@ async function refreshCurrentSession() {
     const prevStatus = currentSessionStatus.value
     currentSessionStatus.value = s.status
     messages.value = mapSessionMessages(s.messages)
+    enrichMessagesWithSessionLlmCalls(s)
+    liveTurnsPreview.value = (s.status === 'RUNNING' || s.status === 'HITL_WAIT')
+      ? (s.pending_context?.llm_turns || [])
+      : []
 
     const idx = sessions.value.findIndex(x => x.session_id === s.session_id)
     if (idx >= 0) {
@@ -1587,27 +1662,8 @@ async function switchSession(s) {
 }
 
 /** Backend stores UTC; naive ISO strings must be treated as UTC for local relative time. */
-function parseServerTime(t) {
-  if (!t) return null
-  if (t instanceof Date) return t
-  const s = String(t).trim()
-  if (!s) return null
-  if (/[zZ]$|[+-]\d{2}:?\d{2}$/.test(s)) return new Date(s)
-  const normalized = s.includes('T') ? s : s.replace(' ', 'T')
-  return new Date(`${normalized}Z`)
-}
-
 function formatTime(t) {
-  if (!t) return ''
-  const d = parseServerTime(t)
-  if (!d || Number.isNaN(d.getTime())) return ''
-  const now = new Date()
-  const diff = now - d
-  if (diff < 0) return '刚刚'
-  if (diff < 60000) return '刚刚'
-  if (diff < 3600000) return `${Math.floor(diff / 60000)} 分钟前`
-  if (diff < 86400000) return `${Math.floor(diff / 3600000)} 小时前`
-  return d.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' })
+  return formatRelativeTime(t, '')
 }
 
 async function createNewSession() {
@@ -1842,6 +1898,7 @@ async function sendMessage() {
   })
   sending.value = true
   thinkingExpanded.value = false
+  liveTurnsPreview.value = []
 
   await nextTick()
   scrollToBottom()
@@ -2138,11 +2195,16 @@ function renderMarkdown(text) {
   justify-content: space-between;
   margin-bottom: 4px;
 }
-.session-item-id {
-  font-size: 12px;
-  font-family: monospace;
+.session-item-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
   color: #5c5650;
   font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-right: 8px;
 }
 .session-item-meta {
   display: flex;

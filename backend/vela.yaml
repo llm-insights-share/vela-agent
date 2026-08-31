@@ -44,3 +44,15 @@ memory:
 tools:
   tavily:
     api_key: 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
+  tool_search:
+    always_loaded:
+    - tool_search
+    - web_extract
+    - execute_code
+    enabled: true
+    max_loaded_per_session: 12
+    max_results: 3
+    mode: deferred
+    search_backend: bm25
+  web_search:
+    provider: duckduckgo
