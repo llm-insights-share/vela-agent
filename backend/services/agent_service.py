@@ -248,6 +248,10 @@ class AgentService:
                     )
                     db.add(binding)
 
+        if getattr(data, "connector_bindings", None) is not None:
+            from services.connector_service import set_agent_connector_bindings
+            set_agent_connector_bindings(db, agent.agent_id, data.connector_bindings)
+
         db.commit()
         db.refresh(agent)
         return agent
@@ -261,7 +265,17 @@ class AgentService:
         auto_publish_on_update = agent.status in (AgentStatus.PUBLISHED, AgentStatus.DEPRECATED)
         previous_version_id = agent.current_version_id
 
-        update_fields = data.model_dump(exclude_unset=True, exclude={"skill_pack_ids", "knowledge_base_ids", "tool_ids", "tool_bindings", "change_summary"})
+        update_fields = data.model_dump(
+            exclude_unset=True,
+            exclude={
+                "skill_pack_ids",
+                "knowledge_base_ids",
+                "tool_ids",
+                "tool_bindings",
+                "connector_bindings",
+                "change_summary",
+            },
+        )
         change_summary = data.change_summary or "配置修改"
 
         for key, value in update_fields.items():
@@ -393,6 +407,10 @@ class AgentService:
                     )
                     db.add(binding)
 
+        if data.connector_bindings is not None:
+            from services.connector_service import set_agent_connector_bindings
+            set_agent_connector_bindings(db, agent_id, data.connector_bindings)
+
         db.commit()
         db.refresh(agent)
         return agent
@@ -502,7 +520,9 @@ class AgentService:
         pending_approval_id = result.get("pending_approval_id")
         session_status = result.get("session_status")
         success = result.get("success", True)
-        content = result.get("content", "")
+        content = (result.get("content") or "").strip()
+        if not content and success is False:
+            content = (result.get("error") or "").strip() or "任务执行失败，请稍后重试"
         pending_ctx = dict(session.pending_context or {})
         hitl_resume = bool((pending_ctx.get("background_job") or {}).get("hitl_resume"))
         last_role = (messages[-1].get("role") if messages else None)
@@ -512,6 +532,8 @@ class AgentService:
                 msg["content"] = content
             if result.get("thinking"):
                 msg["thinking"] = result["thinking"]
+            if result.get("run_metrics"):
+                msg["runMetrics"] = result["run_metrics"]
             if result.get("execution_story"):
                 msg["executionStory"] = result["execution_story"]
             if result.get("llm_turns"):
@@ -568,6 +590,11 @@ class AgentService:
             new_msg = {"role": "assistant", "content": content}
             _apply_assistant_fields(new_msg)
             messages.append(new_msg)
+        elif success is False and content:
+            # Failed run with empty prior assistant: still surface error to UI.
+            new_msg = {"role": "assistant", "content": content}
+            _apply_assistant_fields(new_msg)
+            messages.append(new_msg)
         else:
             for msg in reversed(messages):
                 if msg.get("role") != "assistant":
@@ -592,6 +619,28 @@ class AgentService:
         session.pending_context = pending_ctx
         session.last_active_at = now_utc()
         db.commit()
+
+        try:
+            from models import Agent as AgentModel
+            from services.monitor.trace_sink import record_agent_run
+
+            # AgentLoop._build_result already persisted a Trace for this turn
+            if not result.get("monitor_run_id"):
+                agent = db.query(AgentModel).filter(AgentModel.agent_id == session.agent_id).first()
+                if agent:
+                    run_id = record_agent_run(
+                        db,
+                        session=session,
+                        agent=agent,
+                        result=result,
+                        story_status="error" if success is False else "done",
+                        success=success,
+                        guard_events=[],
+                    )
+                    if run_id:
+                        result["monitor_run_id"] = run_id
+        except Exception:
+            pass
 
         try:
             from services.session_abort import clear_abort
@@ -895,6 +944,31 @@ class AgentService:
 
             available_tools.extend(get_builtin_tools_for_runtime())
 
+            from services.connector_service import (
+                connector_context_for_agent,
+                resolve_runtime_connectors,
+            )
+            runtime_connectors = resolve_runtime_connectors(
+                db,
+                agent_id=agent_id,
+                user_id=session.caller_id or "",
+            )
+            connector_tools = runtime_connectors.get("tools") or []
+            if connector_tools:
+                available_tools.extend(connector_tools)
+            connector_context = connector_context_for_agent(
+                db,
+                connectors=runtime_connectors.get("connectors") or [],
+                tools=connector_tools,
+                configured_catalog_keys=runtime_connectors.get("configured_catalog_keys") or [],
+                missing_catalog_keys=runtime_connectors.get("missing_catalog_keys") or [],
+                platform_servers=runtime_connectors.get("platform_servers") or [],
+            )
+            connector_tool_names = [
+                getattr(t, "name", "") for t in connector_tools if getattr(t, "name", "")
+            ]
+            connector_approval_by_tool_id = runtime_connectors.get("approval_by_tool_id") or {}
+
             has_tools = len(available_tools) > 0
             has_kb = len(kb_bindings) > 0
             has_skills = bool(skill_context)
@@ -923,6 +997,9 @@ class AgentService:
                         "请立即调用 cu_observe 查看当前页面，将验证码填入验证码输入框，"
                         "然后点击登录按钮完成登录。必须调用工具，不要只回复文字。"
                     )
+                # Agent-configured connectors require ReAct so MCP tools are callable.
+                if mode == "direct" and connector_tool_names:
+                    mode = "react"
 
             loop = AgentLoop(
                 db=db,
@@ -942,6 +1019,9 @@ class AgentService:
                 skip_history=skip_history,
                 attachment_metadata=attachment_metadata,
                 has_kb=bool(kb_bindings),
+                connector_context=connector_context,
+                connector_tool_names=connector_tool_names,
+                connector_approval_by_tool_id=connector_approval_by_tool_id,
             )
             if rewrite_meta:
                 loop.thinking_log.append(
@@ -1061,10 +1141,11 @@ class AgentService:
                 if loop and getattr(loop, "memory_enabled", False):
                     loop._memory_record_exception(str(e))
                 thinking_log = loop.thinking_log if loop else []
+                err_text = (str(e) or "").strip() or f"任务执行失败（{type(e).__name__}）"
                 return {
                     "success": False,
-                    "error": str(e),
-                    "content": str(e),
+                    "error": err_text,
+                    "content": err_text,
                     "thinking_log": thinking_log,
                     "files": [],
                 }
@@ -1129,6 +1210,9 @@ class AgentLoop:
         active_skill_pack=None,
         skill_relevance: Optional[float] = None,
         has_kb: bool = False,
+        connector_context: str = "",
+        connector_tool_names: Optional[List[str]] = None,
+        connector_approval_by_tool_id: Optional[Dict[str, bool]] = None,
     ):
         self.db = db
         self.agent = agent
@@ -1137,6 +1221,10 @@ class AgentLoop:
         self.model_svc = model_svc
         self.available_tools = available_tools
         self.timeout_seconds = timeout_seconds
+        self.connector_tool_names = {
+            str(n).strip() for n in (connector_tool_names or []) if str(n).strip()
+        }
+        self.connector_approval_by_tool_id = dict(connector_approval_by_tool_id or {})
         self.user_message = user_message
         # 会话历史保存原文；LLM / 检索使用可能已改写的 user_message
         self.original_user_message = (
@@ -1147,6 +1235,7 @@ class AgentLoop:
         self.active_skill_pack = active_skill_pack
         self.knowledge_context = knowledge_context
         self.skill_context = skill_context
+        self.connector_context = connector_context or ""
         self.skip_history = skip_history
         self.thinking_log: List[str] = []
         self.total_tokens_used = 0
@@ -1188,6 +1277,9 @@ class AgentLoop:
 
         # SGL-IMP-03: 死循环检测历史
         self._tool_call_history: List[str] = []
+        self._tools_called: List[str] = []
+        self._guard_events: List[Dict[str, Any]] = []
+        self._run_wall_started_at = now_utc()
         self._screenpilot_session_ids: set = set()
         self._sp_used_skill_tools = False
         self._sp_skill_gate_done = False
@@ -1205,6 +1297,9 @@ class AgentLoop:
         ).all():
             if b.require_approval:
                 self.tool_require_approval[b.tool_id] = True
+        for tid, need in (self.connector_approval_by_tool_id or {}).items():
+            if need and tid:
+                self.tool_require_approval[tid] = True
 
         # 记忆闭环：仅当 Agent 挂载记忆模块时启用
         # 注意：不在 __init__ 同步调用 Letta——会阻塞事件循环，导致 Letta→llm-gateway 死锁超时
@@ -1227,6 +1322,10 @@ class AgentLoop:
             has_kb=has_kb,
             available_tool_names=avail_names,
         )
+        # Session/agent-enabled connectors must be immediately callable (not deferred).
+        self.core_tool_names |= {
+            n for n in self.connector_tool_names if n in avail_names
+        }
         self.tool_catalog = build_catalog_from_tools(available_tools)
         self.tool_registry = SessionToolRegistry.from_session(
             session,
@@ -1322,15 +1421,13 @@ class AgentLoop:
                 self._run_inner(mode),
                 timeout=total_timeout,
             )
-            self._run_metrics["elapsed_ms"] = int((time.monotonic() - self._run_started_at) * 1000)
-            self._run_metrics["web_search_calls"] = self._web_search_calls
-            self._run_metrics["tool_rounds"] = self._tool_rounds
+            self._sync_run_metrics()
+            if isinstance(result.get("run_metrics"), dict):
+                result["run_metrics"] = dict(self._run_metrics)
             return result
         except asyncio.TimeoutError:
             self._run_metrics["timed_out"] = True
-            self._run_metrics["elapsed_ms"] = int((time.monotonic() - self._run_started_at) * 1000)
-            self._run_metrics["web_search_calls"] = self._web_search_calls
-            self._run_metrics["tool_rounds"] = self._tool_rounds
+            self._sync_run_metrics()
             self.thinking_log.append(f"[TIMEOUT] 整体执行超时（{total_timeout}s）")
             self.story.add_error(f"整体执行超时（{total_timeout}s）")
             return self._build_result(
@@ -1339,6 +1436,21 @@ class AgentLoop:
                 mode,
                 story_status="error",
             )
+
+    def _sync_run_metrics(self) -> None:
+        """Fill elapsed/tool counters before result snapshot or Trace persist."""
+        try:
+            started = float(self._run_started_at)
+            self._run_metrics["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+        except (TypeError, ValueError):
+            self._run_metrics["elapsed_ms"] = 0
+        self._run_metrics["web_search_calls"] = self._web_search_calls
+        self._run_metrics["tool_rounds"] = self._tool_rounds
+        self._run_metrics["tool_search_calls"] = getattr(self, "_tool_search_calls", 0)
+        loaded = 0
+        if getattr(self, "tool_registry", None) is not None:
+            loaded = len(self.tool_registry.loaded)
+        self._run_metrics["loaded_tool_count"] = loaded
 
     async def _run_inner(self, mode: str) -> Dict[str, Any]:
         if mode == "direct":
@@ -1389,6 +1501,8 @@ class AgentLoop:
                 "不得声称「无法确认」或编造冲突信息。"
             )
             system_prompt += self._memory_context
+        if self.connector_context:
+            system_prompt += f"\n\n## 连接器\n{self.connector_context}"
         has_cu = any(
             (getattr(t, "name", "") or "").startswith("cu_")
             for t in (self.available_tools or [])
@@ -2367,6 +2481,18 @@ class AgentLoop:
     async def _execute_tool_with_retry(self, tool, args: Dict[str, Any]) -> Dict[str, Any]:
         tool_name = getattr(tool, "name", "") or ""
 
+        allowed_names = {getattr(t, "name", "") for t in (self.available_tools or [])}
+        from services.monitor.guardrails import check_before_tool, truncate_tool_result
+
+        guard = check_before_tool(
+            tool_name,
+            args or {},
+            allowed_tool_names=allowed_names if allowed_names else None,
+        )
+        self._guard_events.append(guard.to_event())
+        if not guard.allowed:
+            return {"success": False, "error": guard.reason, "guard_blocked": True}
+
         if tool_name == "tool_search":
             return await self._execute_tool_search(args)
 
@@ -2438,8 +2564,11 @@ class AgentLoop:
                     path = art.get("output_path") or art.get("path")
                     if path and art.get("kind") != "skipped":
                         self._register_file(path)
+            if result.get("success") is not False:
+                self._tools_called.append(tool.name)
             self._memory_record_tool(tool.name, args, result)
-            return result
+            from services.monitor.guardrails import truncate_tool_result
+            return truncate_tool_result(result)
 
         from services.tool_service import tool_execution_service
 
@@ -2481,6 +2610,8 @@ class AgentLoop:
                     finalized = await self._finalize_tool_success(tool, args, result)
                     if tool_name.startswith(("cu_", "ui_")):
                         self._track_screenpilot_session(finalized.get("result", ""))
+                    self._tools_called.append(tool_name)
+                    finalized = truncate_tool_result(finalized)
                     self._memory_record_tool(tool.name, args, finalized)
                     return finalized
 
@@ -3538,7 +3669,22 @@ class AgentLoop:
         *,
         story_status: str = "done",
     ) -> Dict[str, Any]:
+        # Persist Trace with final metrics — must run before snapshotting run_metrics
+        self._sync_run_metrics()
         content = self._replace_file_references(content)
+        from services.monitor.guardrails import check_before_reply
+
+        reply_guard = check_before_reply(
+            content,
+            execution_mode=mode,
+            connector_tool_names=list(self.connector_tool_names),
+            tools_called=list(self._tools_called),
+        )
+        self._guard_events.append(reply_guard.to_event())
+        if not reply_guard.allowed and not content.strip():
+            content = "任务未能生成有效回复，请重试或检查模型/工具连接。"
+            story_status = "error"
+
         if story_status == "done" and self.story.status == "running":
             self.story.add_deliver()
         execution_story = self.story.finalize(
@@ -3615,6 +3761,31 @@ class AgentLoop:
                     ]
             except Exception:
                 pass
+
+        try:
+            from services.monitor.trace_sink import record_agent_run
+            from services.llm_call_recorder import flush_to_session
+
+            # llm_calls live in recorder buffer until scope exit; flush before Trace persist
+            try:
+                flush_to_session(self.db, self.session)
+            except Exception:
+                pass
+
+            run_id = record_agent_run(
+                self.db,
+                session=self.session,
+                agent=self.agent,
+                result=result,
+                story_status=story_status,
+                success=story_status != "error",
+                started_at=getattr(self, "_run_wall_started_at", None),
+                guard_events=list(self._guard_events),
+            )
+            if run_id:
+                result["monitor_run_id"] = run_id
+        except Exception:
+            pass
 
         return result
 
@@ -4061,8 +4232,10 @@ def _analyze_execution_mode(message: str, has_tools: bool, has_kb: bool, has_ski
     action_keywords = [
         "查询", "搜索", "获取", "调用", "执行", "计算", "生成",
         "发布", "打开", "登录", "填写", "点击", "导航", "操作", "重放",
+        "读取", "查看", "列出", "发送", "邮件", "邮箱", "收件",
         "search", "get", "fetch", "call", "execute", "calculate",
         "publish", "open", "login", "click", "navigate",
+        "read", "list", "mail", "email", "inbox",
     ]
 
     msg_lower = message.lower()

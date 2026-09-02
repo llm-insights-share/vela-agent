@@ -189,6 +189,25 @@ export const sessionApi = {
   llmCalls: (id) => api.get(`/sessions/${id}/llm-calls`),
   close: (id) => api.post(`/sessions/${id}/close`),
   delete: (id) => api.delete(`/sessions/${id}`),
+  getConnectors: (id) => api.get(`/sessions/${id}/connectors`),
+  updateConnectors: (id, connectorIds) => api.put(`/sessions/${id}/connectors`, { connector_ids: connectorIds }),
+}
+
+export const connectorApi = {
+  catalog: () => api.get('/connectors/catalog'),
+  list: () => api.get('/connectors'),
+  fromCatalog: (data) => api.post('/connectors/from-catalog', data),
+  create: (data) => api.post('/connectors', data),
+  get: (id) => api.get(`/connectors/${id}`),
+  update: (id, data) => api.put(`/connectors/${id}`, data),
+  delete: (id) => api.delete(`/connectors/${id}`),
+  discover: (id) => api.post(`/connectors/${id}/discover`, {}, { timeout: 60000 }),
+  sync: (id) => api.post(`/connectors/${id}/sync`, {}, { timeout: 90000 }),
+  test: (id) => api.post(`/connectors/${id}/test`, {}, { timeout: 60000 }),
+  testTool: (id, data) => api.post(`/connectors/${id}/test-tool`, data, { timeout: 60000 }),
+  testToolLlm: (id, data) => api.post(`/connectors/${id}/test-tool-llm`, data, { timeout: 120000 }),
+  disconnect: (id) => api.post(`/connectors/${id}/disconnect`),
+  startOauth: (id, data) => api.post(`/connectors/${id}/oauth/start`, data || {}),
 }
 
 export const toolApi = {
@@ -210,6 +229,8 @@ export const mcpServerApi = {
   delete: (id) => api.delete(`/mcp/servers/${id}`),
   discover: (id) => api.post(`/mcp/servers/${id}/discover`, {}, { timeout: 60000 }),
   sync: (id) => api.post(`/mcp/servers/${id}/sync`, {}, { timeout: 60000 }),
+  testTool: (id, data) => api.post(`/mcp/servers/${id}/test-tool`, data, { timeout: 60000 }),
+  testToolLlm: (id, data) => api.post(`/mcp/servers/${id}/test-tool-llm`, data, { timeout: 120000 }),
   startOauth: (id, data) => api.post(`/mcp/servers/${id}/oauth/start`, data || {}),
 }
 
@@ -265,6 +286,57 @@ export const workflowApi = {
   validate: (agentId) => api.post(`/agents/${agentId}/workflow/validate`),
   candidates: (agentId) => api.get(`/agents/${agentId}/workflow/candidates`),
   triggerCron: (agentId) => api.post(`/agents/${agentId}/workflow/cron/trigger`),
+}
+
+export const monitorApi = {
+  summary: (params) => api.get('/monitor/summary', { params }),
+  listRuns: (params) => api.get('/monitor/runs', { params }),
+  listObservations: (params) => api.get('/monitor/observations', { params }),
+  listSessions: (params) => api.get('/monitor/sessions', { params }),
+  listUsers: (params) => api.get('/monitor/users', { params }),
+  getRun: (id) => api.get(`/monitor/runs/${id}`),
+  exportOtel: (id) => api.get(`/monitor/runs/${id}/export/otel`),
+  listAlerts: (params) => api.get('/monitor/alerts', { params }),
+  ackAlert: (id) => api.post(`/monitor/alerts/${id}/ack`),
+  listAlertRules: () => api.get('/monitor/alert-rules'),
+  createAlertRule: (data) => api.post('/monitor/alert-rules', data),
+  updateAlertRule: (id, data) => api.patch(`/monitor/alert-rules/${id}`, data),
+  deleteAlertRule: (id) => api.delete(`/monitor/alert-rules/${id}`),
+  listSavedViews: () => api.get('/monitor/saved-views'),
+  createSavedView: (data) => api.post('/monitor/saved-views', data),
+  submitFeedback: (data) => api.post('/monitor/feedback', data),
+  effectReport: (params) => api.get('/monitor/reports/effect', { params }),
+}
+
+export const evalApi = {
+  listDatasets: (params) => api.get('/eval/datasets', { params }),
+  getDataset: (id) => api.get(`/eval/datasets/${id}`),
+  createDataset: (data) => api.post('/eval/datasets', data),
+  updateDataset: (id, data) => api.patch(`/eval/datasets/${id}`, data),
+  deleteDataset: (id) => api.delete(`/eval/datasets/${id}`),
+  listCases: (id) => api.get(`/eval/datasets/${id}/cases`),
+  createCase: (id, data) => api.post(`/eval/datasets/${id}/cases`, data),
+  updateCase: (datasetId, caseId, data) => api.patch(`/eval/datasets/${datasetId}/cases/${caseId}`, data),
+  deleteCase: (datasetId, caseId) => api.delete(`/eval/datasets/${datasetId}/cases/${caseId}`),
+  importRun: (datasetId, runId) => api.post(`/eval/datasets/${datasetId}/import-run/${runId}`),
+  importFeedback: (datasetId, data) => api.post(`/eval/datasets/${datasetId}/import-feedback`, data),
+  listJobs: (params) => api.get('/eval/jobs', { params }),
+  createJob: (data) => api.post('/eval/jobs', data),
+  runJob: (id) => api.post(`/eval/jobs/${id}/run`),
+  getJob: (id) => api.get(`/eval/jobs/${id}`),
+  compareJobs: (params) => api.get('/eval/jobs/compare', { params }),
+  listEvaluators: (params) => api.get('/eval/evaluators', { params }),
+  createEvaluator: (data) => api.post('/eval/evaluators', data),
+  updateEvaluator: (id, data) => api.patch(`/eval/evaluators/${id}`, data),
+  deleteEvaluator: (id) => api.delete(`/eval/evaluators/${id}`),
+  listJudgeEvaluators: () => api.get('/eval/judge-evaluators'),
+  createJudgeEvaluator: (data) => api.post('/eval/judge-evaluators', data),
+  updateJudgeEvaluator: (id, data) => api.patch(`/eval/judge-evaluators/${id}`, data),
+  listAnnotationQueues: () => api.get('/eval/annotation-queues'),
+  createAnnotationQueue: (data) => api.post('/eval/annotation-queues', data),
+  listAnnotationItems: (queueId) => api.get(`/eval/annotation-queues/${queueId}/items`),
+  addAnnotationItem: (queueId, data) => api.post(`/eval/annotation-queues/${queueId}/items`, data),
+  updateAnnotationItem: (queueId, itemId, data) => api.patch(`/eval/annotation-queues/${queueId}/items/${itemId}`, data),
 }
 
 export const scheduleApi = {

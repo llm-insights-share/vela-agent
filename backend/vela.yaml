@@ -55,4 +55,4 @@ tools:
     mode: deferred
     search_backend: bm25
   web_search:
-    provider: duckduckgo
+    provider: tavily

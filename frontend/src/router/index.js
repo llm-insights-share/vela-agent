@@ -101,6 +101,11 @@ const routes = [
     component: () => import('../views/tools/ToolList.vue'),
   },
   {
+    path: '/connectors',
+    name: 'ConnectorList',
+    component: () => import('../views/connectors/ConnectorList.vue'),
+  },
+  {
     path: '/screenpilot/systems',
     name: 'ScreenPilotSystems',
     component: () => import('../views/screenpilot/SystemList.vue'),
@@ -123,6 +128,25 @@ const routes = [
     path: '/screenpilot/approvals',
     name: 'ScreenPilotApprovals',
     component: () => import('../views/screenpilot/ApprovalInbox.vue'),
+  },
+  {
+    path: '/monitor',
+    name: 'AgentMonitor',
+    component: () => import('../views/monitor/AgentMonitor.vue'),
+  },
+  {
+    path: '/eval',
+    name: 'EvalHub',
+    component: () => import('../views/eval/EvalHub.vue'),
+  },
+  {
+    path: '/eval/datasets',
+    redirect: (to) => ({ path: '/eval', query: { ...to.query, tab: 'datasets' } }),
+  },
+  {
+    path: '/eval/datasets/:id',
+    name: 'EvalDatasetDetail',
+    component: () => import('../views/eval/EvalDatasetDetail.vue'),
   },
   {
     path: '/data-access',

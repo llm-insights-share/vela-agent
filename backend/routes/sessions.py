@@ -19,6 +19,7 @@ from schemas import (
     PaginatedResponse,
     SessionAttachmentResponse,
     SessionAttachmentListResponse,
+    SessionConnectorsUpdate,
 )
 from services.agent_service import agent_service, _ensure_files_for_session
 from services.session_abort import request_abort, clear_abort
@@ -151,11 +152,16 @@ def create_session(
         ttl_seconds=data.ttl_seconds,
         title="",
         messages=[],
+        pending_context={},
         trace_id=gen_uuid(),
     )
     db.add(session)
     db.commit()
     db.refresh(session)
+
+    # Connector enablement is resolved at chat time from Agent connector_bindings
+    # ∩ user CONNECTED connectors (catalog_key). Session toggles are no longer used.
+
     return SessionResponse.model_validate(session)
 
 
@@ -529,6 +535,43 @@ def close_session(
         print(f"[sessions.close] 记忆处理调度失败: {e}")
 
     return {"message": "会话已关闭"}
+
+
+def _get_owned_session(db: Session, user_id: str, session_id: str) -> SessionModel:
+    session = db.query(SessionModel).filter(SessionModel.session_id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    if (session.caller_id or "") != user_id:
+        raise HTTPException(status_code=403, detail="无权访问该会话")
+    return session
+
+
+@router.get("/{session_id}/connectors")
+def get_session_connectors(
+    session_id: str,
+    user: CurrentUser,
+    db: Session = Depends(get_db),
+):
+    from services.connector_service import list_session_connectors
+
+    session = _get_owned_session(db, user.user_id, session_id)
+    return list_session_connectors(db, session, user.user_id)
+
+
+@router.put("/{session_id}/connectors")
+def update_session_connectors(
+    session_id: str,
+    data: SessionConnectorsUpdate,
+    user: CurrentUser,
+    db: Session = Depends(get_db),
+):
+    from services.connector_service import list_session_connectors, set_active_connector_ids
+
+    session = _get_owned_session(db, user.user_id, session_id)
+    active = set_active_connector_ids(db, session, data.connector_ids, user.user_id)
+    payload = list_session_connectors(db, session, user.user_id)
+    payload["active_connector_ids"] = active
+    return payload
 
 
 @router.delete("/{session_id}")

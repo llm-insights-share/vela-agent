@@ -1,6 +1,7 @@
 from typing import Annotated, List
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from database import get_db
@@ -9,6 +10,7 @@ from models import User, gen_uuid
 from schemas import ActiveIn, AdminCreateUserIn, RolesIn, UserOut
 from security import hash_password
 from routes import auth as auth_helpers
+from services.connector_service import purge_user_owned_resources
 
 router = APIRouter(prefix="/api/v1/users", tags=["users"])
 
@@ -109,6 +111,15 @@ def delete_user(user_id: str, admin: AdminUser, db: Session = Depends(get_db)):
     if "admin" in _role_set(user.roles) and user.is_active:
         if _count_active_admins(db, exclude_id=user.user_id) < 1:
             raise HTTPException(status_code=400, detail="Cannot delete the last admin")
-    db.delete(user)
-    db.commit()
+
+    try:
+        purge_user_owned_resources(db, user_id)
+        db.delete(user)
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="无法删除用户：仍存在关联数据，请先清理连接器或 MCP 资源",
+        ) from exc
     return {"ok": True}

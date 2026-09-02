@@ -51,6 +51,7 @@ class ModelProviderService:
         max_tokens: int = 4096,
         temperature: float = 0.7,
         tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[Any] = None,
         timeout_seconds: Optional[int] = None,
         source: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -68,6 +69,8 @@ class ModelProviderService:
         }
         if tools:
             payload["tools"] = tools
+        if tool_choice is not None:
+            payload["tool_choice"] = tool_choice
 
         read_timeout = float(timeout_seconds) if timeout_seconds else float(provider.timeout_seconds)
         timeout = httpx.Timeout(
@@ -121,6 +124,23 @@ class ModelProviderService:
                 err = ValueError(
                     f"模型服务响应超时（{read_timeout}s），请尝试简化 Skill 内容或增加超时时间"
                 )
+                if record_enabled:
+                    record_call(
+                        model_name=model_name,
+                        messages=messages,
+                        tools=tools,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                        duration_ms=int((time.monotonic() - started) * 1000),
+                        source=source,
+                        raw_error=str(err),
+                    )
+                raise err
+            except (httpx.ConnectTimeout, httpx.ConnectError) as e:
+                err = ValueError(
+                    f"无法连接模型服务（{type(e).__name__}），请检查网络或稍后重试"
+                )
+                print(f"[ModelProviderService] chat error for {provider.provider_code}: {err}")
                 if record_enabled:
                     record_call(
                         model_name=model_name,

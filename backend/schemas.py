@@ -85,6 +85,7 @@ class AgentCreate(BaseModel):
     tool_ids: List[str] = Field(default_factory=list)
     # SGL-CFG-06: 支持按工具勾选 HITL 审批；与 tool_ids 二选一，优先 tool_bindings
     tool_bindings: Optional[List["ToolBindingItem"]] = None
+    connector_bindings: Optional[List["ConnectorBindingItem"]] = None
     tags: List[str] = Field(default_factory=list)
     # SGL-CFG-02~07: ReAct 循环参数
     max_iterations: int = Field(default=10, ge=1, le=50)
@@ -115,6 +116,7 @@ class AgentUpdate(BaseModel):
     tool_ids: Optional[List[str]] = None
     # SGL-CFG-06: 支持按工具勾选 HITL 审批
     tool_bindings: Optional[List["ToolBindingItem"]] = None
+    connector_bindings: Optional[List["ConnectorBindingItem"]] = None
     tags: Optional[List[str]] = None
     change_summary: str = Field(default="")
     max_iterations: Optional[int] = None
@@ -205,6 +207,17 @@ class ToolBindingItem(BaseModel):
     require_approval: bool = False
 
 
+class ConnectorToolPolicy(BaseModel):
+    mcp_tool_name: str
+    enabled: bool = True
+    require_approval: bool = False
+
+
+class ConnectorBindingItem(BaseModel):
+    catalog_key: str
+    tools: List[ConnectorToolPolicy] = Field(default_factory=list)
+
+
 # SGL-CFG-06: 解析 AgentCreate/AgentUpdate 中对 ToolBindingItem 的前向引用
 AgentCreate.model_rebuild()
 AgentUpdate.model_rebuild()
@@ -235,6 +248,8 @@ class AgentResponse(BaseModel):
     knowledge_base_names: List[str] = []
     tool_ids: List[str] = []
     tool_names: List[str] = []
+    tool_bindings: List[Dict[str, Any]] = []
+    connector_bindings: List[Dict[str, Any]] = []
     max_iterations: int = 10
     step_timeout_seconds: int = 60
     timeout_seconds: int = 180
@@ -450,6 +465,7 @@ class SessionCreate(BaseModel):
     caller_id: str = Field(default="")
     token_budget: int = Field(default=100000, ge=1)
     ttl_seconds: int = Field(default=1800, ge=60)
+    connector_ids: List[str] = Field(default_factory=list)
 
 
 class SessionMessage(BaseModel):
@@ -997,6 +1013,18 @@ class ToolTestRequest(BaseModel):
     parameters: Dict[str, Any] = Field(default_factory=dict)
 
 
+class McpToolTestRequest(BaseModel):
+    tool_name: str = Field(..., min_length=1)
+    arguments: Dict[str, Any] = Field(default_factory=dict)
+
+
+class McpToolLlmTestRequest(BaseModel):
+    tool_name: str = Field(..., min_length=1)
+    instruction: str = Field(..., min_length=1)
+    model_service_id: str = Field(..., min_length=1)
+    input_schema: Dict[str, Any] = Field(default_factory=dict)
+
+
 class McpDiscoverRequest(BaseModel):
     transport: str = Field(default="stdio")
     command: str = Field(default="")
@@ -1064,6 +1092,62 @@ class McpOAuthStartRequest(BaseModel):
     frontend_redirect: str = Field(default="")
     client_id: str = Field(default="")
     scope: str = Field(default="")
+
+
+class ConnectorFromCatalogCreate(BaseModel):
+    catalog_key: str = Field(..., min_length=1, max_length=32)
+    name: str = Field(..., min_length=1, max_length=128)
+    display_name: str = Field(default="", max_length=256)
+    description: str = Field(default="")
+    credentials: Dict[str, Any] = Field(default_factory=dict)
+    connector_config: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ConnectorCustomCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=128)
+    display_name: str = Field(default="", max_length=256)
+    description: str = Field(default="")
+    transport: str = Field(default="stdio")
+    command: str = Field(default="")
+    args: List[str] = Field(default_factory=list)
+    env: Dict[str, str] = Field(default_factory=dict)
+    url: str = Field(default="")
+    headers: Dict[str, str] = Field(default_factory=dict)
+    auth_type: str = Field(default="none")
+
+
+class ConnectorUpdate(BaseModel):
+    display_name: Optional[str] = None
+    description: Optional[str] = None
+    connector_config: Optional[Dict[str, Any]] = None
+    credentials: Optional[Dict[str, Any]] = None
+
+
+class SessionConnectorsUpdate(BaseModel):
+    connector_ids: List[str] = Field(default_factory=list)
+
+
+class ConnectorResponse(BaseModel):
+    connector_id: str
+    user_id: str
+    catalog_key: Optional[str] = None
+    name: str
+    display_name: str = ""
+    description: str = ""
+    mcp_server_id: str
+    connector_config: Dict[str, Any] = Field(default_factory=dict)
+    editable_credentials: Dict[str, Any] = Field(default_factory=dict)
+    status: str
+    last_error: str = ""
+    tool_count: int = 0
+    oauth_status: str = "not_required"
+    source: str = ""
+    transport: str = ""
+    active_in_session: bool = False
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
 
 
 class PaginatedResponse(BaseModel):

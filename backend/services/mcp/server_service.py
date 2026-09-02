@@ -66,6 +66,10 @@ def server_status_payload(server: McpServer, cred: Optional[McpOAuthCredential] 
 
 
 async def connection_config_for_server(db: Session, server: McpServer) -> Dict[str, Any]:
+    if getattr(server, "owner_user_id", None):
+        from services.connector_service import connection_config_for_user_server
+        return await connection_config_for_user_server(db, server)
+
     cfg = server_to_config(server)
     if server.auth_type == AUTH_OAUTH:
         token = await ensure_access_token(db, server)
@@ -84,11 +88,27 @@ async def resolve_tool_connection(db: Session, tool: Tool) -> Dict[str, Any]:
         raise McpError("关联的 MCP Server 不存在")
     if server.status == "DISABLED":
         raise McpError("MCP Server 已禁用")
-    merged = server_to_config(server, extra=config)
-    if server.auth_type == AUTH_OAUTH:
-        token = await ensure_access_token(db, server)
-        merged["auth_type"] = "bearer"
-        merged["auth_token"] = token
+    # Always use connection_config_for_server so user-owned connector secrets are decrypted.
+    merged = await connection_config_for_server(db, server)
+    # Overlay tool metadata without clobbering decrypted env/headers.
+    for key, val in config.items():
+        if key in {
+            "mcp_env",
+            "env",
+            "mcp_headers",
+            "headers",
+            "mcp_command",
+            "command",
+            "mcp_args",
+            "args",
+            "mcp_url",
+            "url",
+            "transport",
+            "auth_type",
+            "auth_token",
+        }:
+            continue
+        merged[key] = val
     return merged
 
 

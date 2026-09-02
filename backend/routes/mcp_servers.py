@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from database import get_db
 from models import McpOAuthCredential, McpOAuthState, McpServer, Tool, gen_uuid, now_utc
-from schemas import McpOAuthStartRequest, McpServerCreate, McpServerUpdate
+from schemas import McpOAuthStartRequest, McpServerCreate, McpServerUpdate, McpToolLlmTestRequest, McpToolTestRequest
 from services.mcp.config import AUTH_OAUTH, TRANSPORT_SSE, TRANSPORT_STDIO, TRANSPORT_STREAMABLE_HTTP, parse_mcp_config
 from services.mcp.crypto import decrypt_secret
 from services.mcp.jsonrpc import McpAuthError, McpError
@@ -56,7 +56,12 @@ def _validate_connection_fields(transport: str, command: str, url: str) -> None:
 
 @router.get("")
 def list_servers(db: Session = Depends(get_db)):
-    servers = db.query(McpServer).order_by(McpServer.created_at.desc()).all()
+    servers = (
+        db.query(McpServer)
+        .filter(McpServer.owner_user_id.is_(None))
+        .order_by(McpServer.created_at.desc())
+        .all()
+    )
     return {"items": [_serialize(db, s) for s in servers], "total": len(servers)}
 
 
@@ -145,6 +150,75 @@ async def discover_server(server_id: str, db: Session = Depends(get_db)):
     except McpError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return await discover_mcp_tools(cfg, timeout_seconds=45)
+
+
+@router.post("/{server_id}/test-tool")
+async def test_server_tool(
+    server_id: str,
+    data: McpToolTestRequest,
+    db: Session = Depends(get_db),
+):
+    from services.mcp.client import call_mcp_tool
+
+    server = db.query(McpServer).filter(McpServer.server_id == server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="MCP Server 不存在")
+    if not (data.tool_name or "").strip():
+        raise HTTPException(status_code=400, detail="tool_name 必填")
+    try:
+        cfg = await connection_config_for_server(db, server)
+    except McpAuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc))
+    except McpError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    result = await call_mcp_tool(
+        cfg,
+        data.tool_name.strip(),
+        data.arguments or {},
+        timeout_seconds=60,
+    )
+    if not result.get("success"):
+        status = result.get("status_code")
+        if status in (401, 403):
+            raise HTTPException(status_code=status, detail=result.get("error") or "调用失败")
+    return result
+
+
+@router.post("/{server_id}/test-tool-llm")
+async def test_server_tool_llm(
+    server_id: str,
+    data: McpToolLlmTestRequest,
+    db: Session = Depends(get_db),
+):
+    from services.mcp.client import call_mcp_tool
+    from services.mcp_tool_llm_test import run_mcp_tool_llm_test
+
+    server = db.query(McpServer).filter(McpServer.server_id == server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="MCP Server 不存在")
+    try:
+        cfg = await connection_config_for_server(db, server)
+    except McpAuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc))
+    except McpError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    async def _exec(tool_name: str, arguments: dict):
+        return await call_mcp_tool(
+            cfg,
+            tool_name,
+            arguments or {},
+            timeout_seconds=60,
+        )
+
+    return await run_mcp_tool_llm_test(
+        db,
+        tool_name=data.tool_name,
+        instruction=data.instruction,
+        model_service_id=data.model_service_id,
+        input_schema=data.input_schema or {},
+        execute_tool=_exec,
+    )
 
 
 @router.post("/{server_id}/sync")
@@ -238,7 +312,7 @@ async def oauth_callback(
     db: Session = Depends(get_db),
 ):
     if error:
-        return RedirectResponse(url=f"/tools?mcp_oauth=error&message={error}")
+        return RedirectResponse(url=f"/connectors?mcp_oauth=error&message={error}")
     if not code or not state:
         raise HTTPException(status_code=400, detail="缺少 code 或 state")
     row = db.query(McpOAuthState).filter(McpOAuthState.state == state).first()
@@ -279,7 +353,7 @@ async def oauth_callback(
         server.auth_type = AUTH_OAUTH
         server.last_error = ""
         server.status = "ACTIVE"
-        frontend = row.frontend_redirect or f"/tools?tab=servers&mcp_oauth=ok&server_id={server.server_id}"
+        frontend = row.frontend_redirect or f"/connectors?mcp_oauth=ok&server_id={server.server_id}"
         db.delete(row)
         db.commit()
         return RedirectResponse(url=frontend)
@@ -287,4 +361,4 @@ async def oauth_callback(
         server.last_error = str(exc)
         db.delete(row)
         db.commit()
-        return RedirectResponse(url=f"/tools?tab=servers&mcp_oauth=error&message={exc}")
+        return RedirectResponse(url=f"/connectors?mcp_oauth=error&message={exc}")

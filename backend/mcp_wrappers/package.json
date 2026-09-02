@@ -1,0 +1,9 @@
+{
+  "name": "vela-mcp-wrappers",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@larksuiteoapi/lark-mcp": "0.5.1",
+    "mcp-mail-server": "^2.0.2"
+  }
+}

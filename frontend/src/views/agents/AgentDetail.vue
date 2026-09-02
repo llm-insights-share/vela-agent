@@ -51,6 +51,25 @@
                 <a-tag v-for="(name, i) in (agent.tool_names || [])" :key="(agent.tool_ids || [])[i] || i" color="orange">{{ name }}</a-tag>
                 <span v-if="!agent.tool_names?.length" style="color: #9e9590">无</span>
               </a-descriptions-item>
+              <a-descriptions-item label="连接器">
+                <template v-if="(agent.connector_bindings || []).length">
+                  <div v-for="b in agent.connector_bindings" :key="b.catalog_key" style="margin-bottom: 6px;">
+                    <a-tag :color="String(b.catalog_key || '').startsWith('mcp:') ? 'purple' : 'blue'">
+                      {{ b.display_name || b.catalog_key }}
+                    </a-tag>
+                    <span style="font-size: 12px; color: #666;">
+                      审批:
+                      {{
+                        (b.tools || [])
+                          .filter((t) => t.require_approval)
+                          .map((t) => t.mcp_tool_name)
+                          .join(', ') || '无'
+                      }}
+                    </span>
+                  </div>
+                </template>
+                <span v-else style="color: #9e9590">无</span>
+              </a-descriptions-item>
             </a-descriptions>
           </a-card>
           <a-card title="标签" style="margin-bottom: 16px">

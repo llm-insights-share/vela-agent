@@ -78,8 +78,9 @@ class StdioSession:
                 raise McpError(f"MCP stdio 读取超时 ({timeout}s){hint}") from exc
             if not line:
                 extra = self._stderr_text()
+                code = self._process.returncode if self._process else None
                 hint = f"；stderr: {extra}" if extra else ""
-                raise McpError(f"MCP 进程已退出{hint}")
+                raise McpError(f"MCP 进程已退出 (code={code}){hint}")
             try:
                 msg = decode_ndjson_line(line)
             except Exception as exc:
@@ -113,7 +114,7 @@ class StdioSession:
             )
         )
         try:
-            msg = await self._read_message(timeout=min(15.0, self.timeout_seconds))
+            msg = await self._read_message(timeout=self.timeout_seconds)
         except McpError:
             raise
         result = extract_result(msg)

@@ -36,3 +36,18 @@ def test_ensure_session_title_backfill():
     assert session.title == "hello world"
     session.title = "已有标题"
     assert ensure_session_title(session) == "已有标题"
+
+
+def test_ensure_session_title_overwrites_placeholder():
+    session = SimpleNamespace(
+        title="新对话",
+        messages=[{"role": "user", "content": "请读取我 163 邮箱最新一封邮件."}],
+    )
+    assert ensure_session_title(session) == "请读取我 163 邮箱最新一封邮件."
+    assert session.title == "请读取我 163 邮箱最新一封邮件."
+
+
+def test_ensure_session_title_empty_messages_stays_blank():
+    session = SimpleNamespace(title="新对话", messages=[])
+    assert ensure_session_title(session) == DEFAULT_TITLE
+    assert session.title == ""

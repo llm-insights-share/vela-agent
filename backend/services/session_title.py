@@ -31,11 +31,28 @@ def title_from_messages(messages: Optional[List[Any]], *, max_len: int = MAX_TIT
     return DEFAULT_TITLE
 
 
+def _is_placeholder_title(title: str) -> bool:
+    """Empty or default UI label — not a real derived title."""
+    return not (title or "").strip() or (title or "").strip() == DEFAULT_TITLE
+
+
 def ensure_session_title(session: Any, *, persist: bool = True) -> str:
-    """Set session.title from first user message when empty. Returns the title."""
+    """Set session.title from first user message when unset/placeholder. Returns the title.
+
+    Does not persist DEFAULT_TITLE into the DB when there are no user messages —
+    leave title empty so the frontend can show "新对话" as a display fallback.
+    """
     current = (getattr(session, "title", None) or "").strip()
-    if current:
+    messages = getattr(session, "messages", None) or []
+    derived = title_from_messages(messages)
+
+    if not _is_placeholder_title(current):
         return current
-    derived = title_from_messages(getattr(session, "messages", None) or [])
+
+    if derived == DEFAULT_TITLE:
+        # Keep empty so UI falls back to "新对话" without locking the title.
+        session.title = ""
+        return DEFAULT_TITLE
+
     session.title = derived
     return derived

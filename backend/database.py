@@ -35,12 +35,14 @@ def init_db():
     from models import (
         Agent, AgentVersion, ModelProvider, ModelService, SkillPack, KnowledgeBase,
         AgentSchedule, AgentScheduleRun, InboxMessage,
-        McpServer, McpOAuthCredential, McpOAuthState,
+        McpServer, McpOAuthCredential, McpOAuthState, UserConnector,
         DataQueryAgent, DataQueryDatasourceBinding, DataQueryExecutionLog,
         DataTableDictionary, DataDictionaryItem, DataCodeMapping, DataQueryExample, DataTermMapping,
         DataQueryFeedback, DataQueryQualityStats,
         MemoryEpisode, MemoryRecord, LettaMemoryAgent,
         ScreenSystem, ScreenCredential, ScreenSession, UiAuditLog, UiSkill, UiSkillStep,
+        AgentRun, AgentSpan, AgentScore, AgentFeedback, MonitorAlert,
+        EvalDataset, EvalCase, EvalJob, EvalJobResult,
     )
     Base.metadata.create_all(bind=engine)
     _migrate_db()
@@ -287,6 +289,149 @@ def _migrate_db():
             cursor.execute(
                 "ALTER TABLE dataquery_datasource_bindings ADD COLUMN business_scope TEXT DEFAULT ''"
             )
+
+    cursor.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='mcp_servers'"
+    )
+    if cursor.fetchone():
+        cursor.execute("PRAGMA table_info(mcp_servers)")
+        mcp_cols = {row[1] for row in cursor.fetchall()}
+        if "owner_user_id" not in mcp_cols:
+            cursor.execute(
+                "ALTER TABLE mcp_servers ADD COLUMN owner_user_id VARCHAR"
+            )
+
+    cursor.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='agent_connector_bindings'"
+    )
+    if not cursor.fetchone():
+        cursor.execute(
+            """
+            CREATE TABLE agent_connector_bindings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_id VARCHAR NOT NULL,
+                catalog_key VARCHAR(64) NOT NULL,
+                tool_policies TEXT DEFAULT '{}',
+                created_at DATETIME,
+                UNIQUE (agent_id, catalog_key)
+            )
+            """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS ix_agent_connector_bindings_agent_id "
+            "ON agent_connector_bindings (agent_id)"
+        )
+
+    # Monitor / Eval gap alignment migrations
+    cursor.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='agent_scores'"
+    )
+    if cursor.fetchone():
+        cursor.execute("PRAGMA table_info(agent_scores)")
+        score_cols = {row[1] for row in cursor.fetchall()}
+        if "data_type" not in score_cols:
+            cursor.execute(
+                "ALTER TABLE agent_scores ADD COLUMN data_type VARCHAR(32) DEFAULT 'NUMERIC'"
+            )
+
+    cursor.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='eval_cases'"
+    )
+    if cursor.fetchone():
+        cursor.execute("PRAGMA table_info(eval_cases)")
+        case_cols = {row[1] for row in cursor.fetchall()}
+        if "expected_output" not in case_cols:
+            cursor.execute(
+                "ALTER TABLE eval_cases ADD COLUMN expected_output TEXT DEFAULT ''"
+            )
+
+    cursor.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='eval_jobs'"
+    )
+    if cursor.fetchone():
+        cursor.execute("PRAGMA table_info(eval_jobs)")
+        job_cols = {row[1] for row in cursor.fetchall()}
+        if "run_mode" not in job_cols:
+            cursor.execute(
+                "ALTER TABLE eval_jobs ADD COLUMN run_mode VARCHAR(16) DEFAULT 'replay'"
+            )
+        if "evaluator_id" not in job_cols:
+            cursor.execute(
+                "ALTER TABLE eval_jobs ADD COLUMN evaluator_id VARCHAR DEFAULT ''"
+            )
+
+    for table_sql in (
+        """
+        CREATE TABLE IF NOT EXISTS eval_rule_evaluators (
+            evaluator_id VARCHAR PRIMARY KEY,
+            name VARCHAR(128) NOT NULL,
+            agent_id VARCHAR,
+            enabled BOOLEAN DEFAULT 1,
+            rules_json TEXT DEFAULT '{}',
+            created_at DATETIME,
+            updated_at DATETIME
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS eval_judge_evaluators (
+            evaluator_id VARCHAR PRIMARY KEY,
+            name VARCHAR(128) NOT NULL,
+            agent_id VARCHAR,
+            enabled BOOLEAN DEFAULT 1,
+            sample_rate FLOAT DEFAULT 0.1,
+            prompt_template TEXT DEFAULT '',
+            model_service_id VARCHAR DEFAULT '',
+            created_at DATETIME,
+            updated_at DATETIME
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS monitor_alert_rules (
+            rule_id VARCHAR PRIMARY KEY,
+            name VARCHAR(128) NOT NULL,
+            metric VARCHAR(64) NOT NULL,
+            threshold_warning FLOAT DEFAULT 0,
+            threshold_alert FLOAT DEFAULT 0,
+            webhook_url VARCHAR(512) DEFAULT '',
+            enabled BOOLEAN DEFAULT 1,
+            agent_id VARCHAR DEFAULT '',
+            created_at DATETIME
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS annotation_queues (
+            queue_id VARCHAR PRIMARY KEY,
+            name VARCHAR(128) NOT NULL,
+            agent_id VARCHAR DEFAULT '',
+            description TEXT DEFAULT '',
+            created_at DATETIME
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS annotation_queue_items (
+            item_id VARCHAR PRIMARY KEY,
+            queue_id VARCHAR NOT NULL,
+            run_id VARCHAR DEFAULT '',
+            case_id VARCHAR DEFAULT '',
+            status VARCHAR(32) DEFAULT 'pending',
+            expected_output TEXT DEFAULT '',
+            notes TEXT DEFAULT '',
+            created_at DATETIME,
+            FOREIGN KEY(queue_id) REFERENCES annotation_queues(queue_id)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS monitor_saved_views (
+            view_id VARCHAR PRIMARY KEY,
+            name VARCHAR(128) NOT NULL,
+            path VARCHAR(64) DEFAULT 'runs',
+            filters_json TEXT DEFAULT '{}',
+            user_id VARCHAR DEFAULT '',
+            created_at DATETIME
+        )
+        """,
+    ):
+        cursor.execute(table_sql)
 
     conn.commit()
     conn.close()

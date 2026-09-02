@@ -366,6 +366,9 @@ def _agent_to_dict(agent: Agent, db: Session) -> dict:
             "require_approval": bool(b.require_approval),
         })
 
+    from services.connector_service import serialize_agent_connector_bindings
+    connector_bindings_out = serialize_agent_connector_bindings(db, agent.agent_id)
+
     return {
         "agent_id": agent.agent_id,
         "name": agent.name,
@@ -392,6 +395,7 @@ def _agent_to_dict(agent: Agent, db: Session) -> dict:
         "tool_ids": tool_ids,
         "tool_names": tool_names,
         "tool_bindings": tool_bindings_out,
+        "connector_bindings": connector_bindings_out,
         "max_iterations": agent.max_iterations if agent.max_iterations is not None else 10,
         "step_timeout_seconds": agent.step_timeout_seconds if agent.step_timeout_seconds is not None else 60,
         "timeout_seconds": agent.timeout_seconds if agent.timeout_seconds is not None else 180,

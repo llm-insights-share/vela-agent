@@ -22,6 +22,8 @@
           <a-menu-item key="/agents">Agent 列表</a-menu-item>
           <a-menu-item key="/agents/create">创建 Agent</a-menu-item>
           <a-menu-item key="/schedules">定时任务</a-menu-item>
+          <a-menu-item key="/monitor">监控</a-menu-item>
+          <a-menu-item key="/eval">评测</a-menu-item>
         </a-sub-menu>
         <a-sub-menu key="models">
           <template #icon><ApiOutlined /></template>
@@ -48,6 +50,10 @@
         <a-menu-item key="/tools">
           <ToolOutlined />
           <span>工具</span>
+        </a-menu-item>
+        <a-menu-item key="/connectors">
+          <ApiOutlined />
+          <span>连接器</span>
         </a-menu-item>
         <a-sub-menu key="screenpilot">
           <template #icon><DesktopOutlined /></template>
@@ -226,7 +232,13 @@ onUnmounted(() => {
 watch(
   () => route.path,
   (path) => {
-    selectedKeys.value = [path]
+    if (path.startsWith('/eval')) {
+      selectedKeys.value = ['/eval']
+    } else if (path.startsWith('/monitor')) {
+      selectedKeys.value = ['/monitor']
+    } else {
+      selectedKeys.value = [path]
+    }
     if (path === '/login' || path === '/register') {
       stopBackgroundSessionWatcher()
       stopInboxWatcher()

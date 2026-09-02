@@ -296,10 +296,38 @@ class Tool(Base):
     mcp_server = relationship("McpServer", back_populates="tools")
 
 
+class ConnectorStatus(str, enum.Enum):
+    DISCONNECTED = "DISCONNECTED"
+    CONNECTED = "CONNECTED"
+    ERROR = "ERROR"
+
+
+class UserConnector(Base):
+    __tablename__ = "user_connectors"
+    __table_args__ = (UniqueConstraint("user_id", "name", name="uq_user_connector_name"),)
+
+    connector_id = Column(String, primary_key=True, default=gen_uuid)
+    user_id = Column(String, ForeignKey("users.user_id"), nullable=False, index=True)
+    catalog_key = Column(String(32), nullable=True, index=True)
+    name = Column(String(128), nullable=False)
+    display_name = Column(String(256), default="")
+    description = Column(Text, default="")
+    mcp_server_id = Column(String, ForeignKey("mcp_servers.server_id"), nullable=False, unique=True, index=True)
+    connector_config = Column(JSON, default=dict)
+    status = Column(SAEnum(ConnectorStatus), default=ConnectorStatus.DISCONNECTED)
+    last_error = Column(Text, default="")
+    tool_count = Column(Integer, default=0)
+    created_at = Column(DateTime, default=now_utc)
+    updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)
+
+    mcp_server = relationship("McpServer", back_populates="user_connector")
+
+
 class McpServer(Base):
     __tablename__ = "mcp_servers"
 
     server_id = Column(String, primary_key=True, default=gen_uuid)
+    owner_user_id = Column(String, ForeignKey("users.user_id"), nullable=True, index=True)
     name = Column(String(128), unique=True, nullable=False, index=True)
     display_name = Column(String(256), default="")
     description = Column(Text, default="")
@@ -318,6 +346,7 @@ class McpServer(Base):
 
     tools = relationship("Tool", back_populates="mcp_server")
     oauth_credential = relationship("McpOAuthCredential", back_populates="server", uselist=False, cascade="all, delete-orphan")
+    user_connector = relationship("UserConnector", back_populates="mcp_server", uselist=False, cascade="all, delete-orphan")
 
 
 class McpOAuthCredential(Base):
@@ -365,6 +394,21 @@ class AgentToolBinding(Base):
     permission = Column(String(16), default="allowed")
     # SGL-CFG-06: 该工具调用前是否需要人工审批
     require_approval = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=now_utc)
+
+
+class AgentConnectorBinding(Base):
+    """Agent 允许使用的连接器类型（按 catalog_key）及工具级策略。"""
+    __tablename__ = "agent_connector_bindings"
+    __table_args__ = (
+        UniqueConstraint("agent_id", "catalog_key", name="uq_agent_connector_catalog"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    agent_id = Column(String, ForeignKey("agents.agent_id"), nullable=False, index=True)
+    catalog_key = Column(String(64), nullable=False)
+    # { mcp_tool_name: { enabled: bool, require_approval: bool } }
+    tool_policies = Column(JSON, default=dict)
     created_at = Column(DateTime, default=now_utc)
 
 
@@ -842,4 +886,231 @@ class CodeExecution(Base):
     artifacts = Column(JSON, default=list)
     status = Column(String(16), default="SUCCESS")
     error_message = Column(Text, default="")
+    created_at = Column(DateTime, default=now_utc)
+
+
+# ─── Monitor & Eval (Trace Store) ───────────────────────────────────────────
+
+
+class AgentRunStatus(str, enum.Enum):
+    SUCCESS = "SUCCESS"
+    ERROR = "ERROR"
+    HITL_WAIT = "HITL_WAIT"
+    ABORT = "ABORT"
+    TIMEOUT = "TIMEOUT"
+
+
+class AgentRun(Base):
+    """一次用户消息 → 助手完成（或 ERROR/HITL/ABORT）的根 Trace 记录。"""
+    __tablename__ = "agent_runs"
+
+    run_id = Column(String, primary_key=True, default=gen_uuid)
+    session_id = Column(String, ForeignKey("sessions.session_id"), nullable=False, index=True)
+    agent_id = Column(String, ForeignKey("agents.agent_id"), nullable=False, index=True)
+    version_id = Column(String, ForeignKey("agent_versions.version_id"), nullable=True)
+    trace_id = Column(String(128), default="", index=True)
+    caller_id = Column(String(128), default="")
+    status = Column(String(32), default=AgentRunStatus.SUCCESS.value, index=True)
+    started_at = Column(DateTime, default=now_utc, index=True)
+    ended_at = Column(DateTime, nullable=True)
+    elapsed_ms = Column(Integer, default=0)
+    token_in = Column(Integer, default=0)
+    token_out = Column(Integer, default=0)
+    tool_calls = Column(Integer, default=0)
+    execution_mode = Column(String(32), default="")
+    error_code = Column(String(64), default="")
+    summary = Column(Text, default="")
+    message_index = Column(Integer, default=-1)
+    attrs_json = Column(JSON, default=dict)
+    content_sampled = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=now_utc)
+
+
+class AgentSpan(Base):
+    __tablename__ = "agent_spans"
+
+    span_id = Column(String, primary_key=True, default=gen_uuid)
+    run_id = Column(String, ForeignKey("agent_runs.run_id"), nullable=False, index=True)
+    parent_span_id = Column(String, default="")
+    name = Column(String(256), default="")
+    kind = Column(String(32), default="internal")
+    attrs_json = Column(JSON, default=dict)
+    duration_ms = Column(Integer, default=0)
+    status = Column(String(32), default="OK")
+    started_at = Column(DateTime, default=now_utc)
+
+
+class AgentScore(Base):
+    __tablename__ = "agent_scores"
+
+    score_id = Column(String, primary_key=True, default=gen_uuid)
+    run_id = Column(String, ForeignKey("agent_runs.run_id"), nullable=False, index=True)
+    score_name = Column(String(128), nullable=False)
+    value = Column(Float, default=0.0)
+    data_type = Column(String(32), default="NUMERIC")
+    source = Column(String(32), default="rule")
+    comment = Column(Text, default="")
+    created_at = Column(DateTime, default=now_utc)
+
+
+class AgentFeedback(Base):
+    __tablename__ = "agent_feedback"
+
+    feedback_id = Column(String, primary_key=True, default=gen_uuid)
+    session_id = Column(String, ForeignKey("sessions.session_id"), nullable=False, index=True)
+    run_id = Column(String, ForeignKey("agent_runs.run_id"), nullable=True, index=True)
+    agent_id = Column(String, index=True, default="")
+    message_index = Column(Integer, default=-1)
+    rating = Column(Integer, default=0)
+    reason = Column(Text, default="")
+    user_id = Column(String(128), default="")
+    created_at = Column(DateTime, default=now_utc)
+
+
+class MonitorAlert(Base):
+    __tablename__ = "monitor_alerts"
+
+    alert_id = Column(String, primary_key=True, default=gen_uuid)
+    rule_name = Column(String(128), nullable=False, index=True)
+    severity = Column(String(16), default="warning")
+    message = Column(Text, default="")
+    run_id = Column(String, default="")
+    agent_id = Column(String, index=True, default="")
+    acknowledged = Column(Boolean, default=False)
+    attrs_json = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=now_utc, index=True)
+
+
+class EvalDataset(Base):
+    __tablename__ = "eval_datasets"
+
+    dataset_id = Column(String, primary_key=True, default=gen_uuid)
+    name = Column(String(128), unique=True, nullable=False)
+    description = Column(Text, default="")
+    agent_id = Column(String, index=True, default="")
+    tags = Column(JSON, default=list)
+    created_at = Column(DateTime, default=now_utc)
+    updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)
+
+
+class EvalCase(Base):
+    __tablename__ = "eval_cases"
+
+    case_id = Column(String, primary_key=True, default=gen_uuid)
+    dataset_id = Column(String, ForeignKey("eval_datasets.dataset_id"), nullable=False, index=True)
+    input_text = Column(Text, default="")
+    expected_output = Column(Text, default="")
+    expected_tools = Column(JSON, default=list)
+    expected_keywords = Column(JSON, default=list)
+    rubric = Column(Text, default="")
+    source_run_id = Column(String, default="")
+    created_at = Column(DateTime, default=now_utc)
+
+
+class EvalJobStatus(str, enum.Enum):
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    SUCCESS = "SUCCESS"
+    FAILED = "FAILED"
+
+
+class EvalJob(Base):
+    __tablename__ = "eval_jobs"
+
+    job_id = Column(String, primary_key=True, default=gen_uuid)
+    dataset_id = Column(String, ForeignKey("eval_datasets.dataset_id"), nullable=False, index=True)
+    agent_id = Column(String, index=True, default="")
+    status = Column(String(32), default=EvalJobStatus.PENDING.value)
+    pass_threshold = Column(Float, default=0.8)
+    run_mode = Column(String(16), default="replay")
+    evaluator_id = Column(String, default="")
+    summary = Column(JSON, default=dict)
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=now_utc)
+
+
+class EvalJobResult(Base):
+    __tablename__ = "eval_job_results"
+
+    result_id = Column(String, primary_key=True, default=gen_uuid)
+    job_id = Column(String, ForeignKey("eval_jobs.job_id"), nullable=False, index=True)
+    case_id = Column(String, ForeignKey("eval_cases.case_id"), nullable=False)
+    passed = Column(Boolean, default=False)
+    scores = Column(JSON, default=dict)
+    details = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=now_utc)
+
+
+class EvalRuleEvaluator(Base):
+    __tablename__ = "eval_rule_evaluators"
+
+    evaluator_id = Column(String, primary_key=True, default=gen_uuid)
+    name = Column(String(128), nullable=False)
+    agent_id = Column(String, index=True, default="")
+    enabled = Column(Boolean, default=True)
+    rules_json = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=now_utc)
+    updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)
+
+
+class EvalJudgeEvaluator(Base):
+    __tablename__ = "eval_judge_evaluators"
+
+    evaluator_id = Column(String, primary_key=True, default=gen_uuid)
+    name = Column(String(128), nullable=False)
+    agent_id = Column(String, index=True, default="")
+    enabled = Column(Boolean, default=True)
+    sample_rate = Column(Float, default=0.1)
+    prompt_template = Column(Text, default="")
+    model_service_id = Column(String, default="")
+    created_at = Column(DateTime, default=now_utc)
+    updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)
+
+
+class MonitorAlertRule(Base):
+    __tablename__ = "monitor_alert_rules"
+
+    rule_id = Column(String, primary_key=True, default=gen_uuid)
+    name = Column(String(128), nullable=False)
+    metric = Column(String(64), nullable=False)
+    threshold_warning = Column(Float, default=0.0)
+    threshold_alert = Column(Float, default=0.0)
+    webhook_url = Column(String(512), default="")
+    enabled = Column(Boolean, default=True)
+    agent_id = Column(String, index=True, default="")
+    created_at = Column(DateTime, default=now_utc)
+
+
+class AnnotationQueue(Base):
+    __tablename__ = "annotation_queues"
+
+    queue_id = Column(String, primary_key=True, default=gen_uuid)
+    name = Column(String(128), nullable=False)
+    agent_id = Column(String, index=True, default="")
+    description = Column(Text, default="")
+    created_at = Column(DateTime, default=now_utc)
+
+
+class AnnotationQueueItem(Base):
+    __tablename__ = "annotation_queue_items"
+
+    item_id = Column(String, primary_key=True, default=gen_uuid)
+    queue_id = Column(String, ForeignKey("annotation_queues.queue_id"), nullable=False, index=True)
+    run_id = Column(String, default="")
+    case_id = Column(String, default="")
+    status = Column(String(32), default="pending")
+    expected_output = Column(Text, default="")
+    notes = Column(Text, default="")
+    created_at = Column(DateTime, default=now_utc)
+
+
+class MonitorSavedView(Base):
+    __tablename__ = "monitor_saved_views"
+
+    view_id = Column(String, primary_key=True, default=gen_uuid)
+    name = Column(String(128), nullable=False)
+    path = Column(String(64), default="runs")
+    filters_json = Column(JSON, default=dict)
+    user_id = Column(String, default="")
     created_at = Column(DateTime, default=now_utc)

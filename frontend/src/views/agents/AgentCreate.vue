@@ -106,6 +106,64 @@
           <span class="form-hint">勾选后，该工具调用前会触发 HITL 审批（SGL-CFG-06）</span>
         </a-form-item>
 
+        <a-form-item label="连接器" name="connector_catalog_keys">
+          <a-select
+            v-model:value="selectedCatalogKeys"
+            mode="multiple"
+            placeholder="选择连接器或 MCP Server"
+            style="width: 100%"
+            option-label-prop="label"
+            @change="onConnectorSelectionChange"
+          >
+            <a-select-option
+              v-for="c in connectorOptions"
+              :key="c.binding_key"
+              :value="c.binding_key"
+              :label="c.display_name"
+            >
+              <a-space>
+                <a-tag :color="c.kind === 'platform_mcp' ? 'purple' : 'blue'" style="margin-right: 0">
+                  {{ c.kind === 'platform_mcp' ? 'MCP Server' : (c.catalog_label || c.catalog_key) }}
+                </a-tag>
+                <span>{{ c.display_name }}</span>
+              </a-space>
+            </a-select-option>
+          </a-select>
+          <span class="form-hint">
+            列表与「连接器」页一致。目录类按类型启用（当前用户已连接实例 ∩ Agent 配置）；平台 MCP Server 对所有用户直接可用。
+          </span>
+        </a-form-item>
+
+        <a-form-item
+          v-if="selectedCatalogKeys.length > 0"
+          label="连接器工具策略"
+          name="connector_tool_policies"
+        >
+          <div v-for="key in selectedCatalogKeys" :key="key" class="connector-policy-block">
+            <div class="connector-policy-title">
+              {{ optionLabel(key) }}
+            </div>
+            <a-table
+              :dataSource="connectorToolRows(key)"
+              :columns="connectorToolColumns"
+              rowKey="mcp_tool_name"
+              size="small"
+              :pagination="false"
+              style="margin-bottom: 12px"
+            >
+              <template #bodyCell="{ column, record }">
+                <template v-if="column.key === 'enabled'">
+                  <a-switch v-model:checked="record.enabled" />
+                </template>
+                <template v-else-if="column.key === 'require_approval'">
+                  <a-switch v-model:checked="record.require_approval" :disabled="!record.enabled" />
+                </template>
+              </template>
+            </a-table>
+          </div>
+          <span class="form-hint">可为每个 MCP 工具设置启用与人工审批；留空策略表示全部启用且不审批</span>
+        </a-form-item>
+
         <a-form-item label="工具加载策略">
           <a-space direction="vertical" style="width: 100%;">
             <a-switch
@@ -181,7 +239,7 @@
 <script setup>
 import { reactive, ref, computed, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { agentApi, providerApi, serviceApi, skillApi, knowledgeApi, toolApi } from '../../api'
+import { agentApi, providerApi, serviceApi, skillApi, knowledgeApi, toolApi, connectorApi, mcpServerApi } from '../../api'
 import { message } from 'ant-design-vue'
 
 const router = useRouter()
@@ -192,28 +250,188 @@ const services = ref([])
 const skills = ref([])
 const knowledgeBases = ref([])
 const toolList = ref([])
+const connectorCatalog = ref([])
+const connectorOptions = ref([])
+const selectedCatalogKeys = ref([])
+const connectorPolicies = reactive({})
 const selectedProviderId = ref('')
 const toolLoadingEnabled = ref(false)
 const toolLoadingMode = ref('deferred')
 
-const groupedTools = computed(() => {
-  const groups = new Map()
-  const others = []
-  for (const t of toolList.value) {
-    if (t.tool_type === 'mcp' && t.mcp_server_name) {
-      const label = `MCP · ${t.mcp_server_name}`
-      if (!groups.has(label)) groups.set(label, [])
-      groups.get(label).push(t)
-    } else {
-      others.push(t)
+const connectorToolColumns = [
+  { title: '工具', dataIndex: 'mcp_tool_name', key: 'mcp_tool_name', ellipsis: true },
+  { title: '说明', dataIndex: 'description', key: 'description', ellipsis: true },
+  { title: '启用', dataIndex: 'enabled', key: 'enabled', width: 80 },
+  { title: '需审批', dataIndex: 'require_approval', key: 'require_approval', width: 90 },
+]
+
+const CATALOG_LABELS = {
+  github: 'GitHub',
+  email: 'Email',
+  feishu_group: '飞书群',
+  dingtalk_group: '钉钉群',
+}
+
+function isPlatformMcpKey(key) {
+  return String(key || '').startsWith('mcp:')
+}
+
+function platformServerId(key) {
+  return String(key || '').slice(4)
+}
+
+function optionLabel(key) {
+  const item = connectorOptions.value.find((c) => c.binding_key === key)
+  return item?.display_name || key
+}
+
+function catalogLabel(key) {
+  if (isPlatformMcpKey(key)) return optionLabel(key)
+  const item = connectorCatalog.value.find((c) => c.catalog_key === key)
+  return item?.display_name || CATALOG_LABELS[key] || key
+}
+
+function defaultToolsForKey(key) {
+  if (isPlatformMcpKey(key)) {
+    const item = connectorOptions.value.find((c) => c.binding_key === key)
+    return item?.default_tools || []
+  }
+  const tmpl = connectorCatalog.value.find((c) => c.catalog_key === key)
+  return tmpl?.default_tools || []
+}
+
+async function loadPlatformMcpTools(serverId) {
+  try {
+    const res = await toolApi.list({ mcp_server_id: serverId, page_size: 100, status: 'ACTIVE' })
+    return (res.items || []).map((t) => ({
+      name: (t.config && t.config.mcp_tool_name) || t.display_name || t.name,
+      description: t.description || '',
+    }))
+  } catch {
+    return []
+  }
+}
+
+async function buildConnectorOptions(connectors, servers) {
+  const options = []
+  const seenCatalog = new Set()
+  for (const c of connectors || []) {
+    if (!c.catalog_key || c.catalog_key === 'custom') continue
+    // One selectable entry per catalog type (same runtime semantics as before).
+    if (seenCatalog.has(c.catalog_key)) continue
+    seenCatalog.add(c.catalog_key)
+    const tmpl = connectorCatalog.value.find((x) => x.catalog_key === c.catalog_key)
+    options.push({
+      binding_key: c.catalog_key,
+      kind: 'connector',
+      catalog_key: c.catalog_key,
+      catalog_label: CATALOG_LABELS[c.catalog_key] || c.catalog_key,
+      display_name: tmpl?.display_name || c.display_name || c.catalog_key,
+      default_tools: tmpl?.default_tools || [],
+    })
+  }
+  for (const s of servers || []) {
+    const bindingKey = `mcp:${s.server_id}`
+    const tools = await loadPlatformMcpTools(s.server_id)
+    options.push({
+      binding_key: bindingKey,
+      kind: 'platform_mcp',
+      catalog_key: bindingKey,
+      mcp_server_id: s.server_id,
+      catalog_label: 'MCP Server',
+      display_name: s.display_name || s.name,
+      default_tools: tools,
+    })
+  }
+  return options
+}
+
+function ensureConnectorPolicy(key) {
+  if (!connectorPolicies[key]) {
+    const defaults = defaultToolsForKey(key)
+    connectorPolicies[key] = defaults.map((t) => ({
+      mcp_tool_name: t.name,
+      description: t.description || '',
+      enabled: true,
+      require_approval: false,
+    }))
+  }
+  return connectorPolicies[key]
+}
+
+function connectorToolRows(key) {
+  return ensureConnectorPolicy(key)
+}
+
+async function onConnectorSelectionChange(keys) {
+  const next = keys || []
+  selectedCatalogKeys.value = next
+  for (const key of next) {
+    if (isPlatformMcpKey(key)) {
+      const opt = connectorOptions.value.find((c) => c.binding_key === key)
+      if (opt && (!opt.default_tools || !opt.default_tools.length)) {
+        opt.default_tools = await loadPlatformMcpTools(platformServerId(key))
+      }
+    }
+    ensureConnectorPolicy(key)
+  }
+  for (const key of Object.keys(connectorPolicies)) {
+    if (!next.includes(key)) {
+      delete connectorPolicies[key]
     }
   }
-  const result = []
-  for (const [label, items] of groups) {
-    result.push({ label, items })
+}
+
+function buildConnectorBindingsPayload() {
+  return (selectedCatalogKeys.value || []).map((key) => ({
+    catalog_key: key,
+    tools: (connectorPolicies[key] || []).map((t) => ({
+      mcp_tool_name: t.mcp_tool_name,
+      enabled: !!t.enabled,
+      require_approval: !!t.require_approval,
+    })),
+  }))
+}
+
+function loadConnectorBindingsFromAgent(bindings) {
+  selectedCatalogKeys.value = []
+  Object.keys(connectorPolicies).forEach((k) => delete connectorPolicies[k])
+  for (const b of bindings || []) {
+    const key = b.catalog_key
+    if (!key || key === 'custom') continue
+    // Keep orphan catalog/MCP bindings selectable even if not in current options.
+    if (!connectorOptions.value.find((c) => c.binding_key === key)) {
+      connectorOptions.value.push({
+        binding_key: key,
+        kind: isPlatformMcpKey(key) ? 'platform_mcp' : 'connector',
+        catalog_key: key,
+        catalog_label: isPlatformMcpKey(key) ? 'MCP Server' : (CATALOG_LABELS[key] || key),
+        display_name: b.display_name || catalogLabel(key),
+        default_tools: [],
+      })
+    }
+    selectedCatalogKeys.value.push(key)
+    const defaults = defaultToolsForKey(key)
+    const byName = new Map((b.tools || []).map((t) => [t.mcp_tool_name, t]))
+    const names = new Set([
+      ...defaults.map((t) => t.name),
+      ...[...byName.keys()],
+    ])
+    connectorPolicies[key] = [...names].sort().map((name) => {
+      const def = defaults.find((t) => t.name === name)
+      const saved = byName.get(name)
+      return {
+        mcp_tool_name: name,
+        description: def?.description || '',
+        enabled: saved ? saved.enabled !== false : true,
+        require_approval: !!(saved && saved.require_approval),
+      }
+    })
   }
-  if (others.length) result.push({ label: groups.size ? '其他工具' : '全部工具', items: others })
-  return result
+}
+
+const groupedTools = computed(() => {
+  return [{ label: '全部工具', items: toolList.value }]
 })
 const filteredServices = computed(() => {
   if (!selectedProviderId.value) return []
@@ -305,16 +523,21 @@ function ensureCurrentModelService(agent) {
 
 onMounted(async () => {
   try {
-    const [pv, sk, kb, tl] = await Promise.all([
+    const [pv, sk, kb, tl, cat, connRes, mcpRes] = await Promise.all([
       providerApi.list({ page_size: 100 }),
       skillApi.list({ page_size: 100 }),
       knowledgeApi.list({ page_size: 100 }),
       toolApi.list({ page_size: 100 }),
+      connectorApi.catalog(),
+      connectorApi.list(),
+      mcpServerApi.list(),
     ])
     providers.value = pv.items || []
     skills.value = sk.items
     knowledgeBases.value = kb.items
     toolList.value = tl.items
+    connectorCatalog.value = (cat.items || []).filter((c) => c.catalog_key !== 'custom')
+    connectorOptions.value = await buildConnectorOptions(connRes.items, mcpRes.items)
 
     if (isEdit.value) {
       const agent = await agentApi.get(agentId.value)
@@ -346,9 +569,9 @@ onMounted(async () => {
         agent_type: agent.agent_type || 'SINGLE',
         composition_config: agent.composition_config || {},
       })
-      const tl = (agent.composition_config || {}).tool_loading || {}
-      toolLoadingEnabled.value = tl.enabled === true || tl.mode === 'deferred' || tl.mode === 'eager'
-      toolLoadingMode.value = tl.mode === 'eager' ? 'eager' : 'deferred'
+      const tlCfg = (agent.composition_config || {}).tool_loading || {}
+      toolLoadingEnabled.value = tlCfg.enabled === true || tlCfg.mode === 'deferred' || tlCfg.mode === 'eager'
+      toolLoadingMode.value = tlCfg.mode === 'eager' ? 'eager' : 'deferred'
       // SGL-CFG-06: 回填工具审批配置
       const bindings = agent.tool_bindings || []
       selectedToolBindings.value = (agent.tool_ids || []).map(tid => {
@@ -360,6 +583,16 @@ onMounted(async () => {
           require_approval: !!(b && b.require_approval),
         }
       })
+      loadConnectorBindingsFromAgent(agent.connector_bindings || [])
+      for (const key of selectedCatalogKeys.value) {
+        if (isPlatformMcpKey(key)) {
+          const opt = connectorOptions.value.find((c) => c.binding_key === key)
+          if (opt) {
+            opt.default_tools = await loadPlatformMcpTools(platformServerId(key))
+          }
+          ensureConnectorPolicy(key)
+        }
+      }
     } else {
       services.value = []
     }
@@ -393,6 +626,7 @@ async function onSubmit() {
       }))
       delete payload.tool_ids
     }
+    payload.connector_bindings = buildConnectorBindingsPayload()
     if (isEdit.value) {
       await agentApi.update(agentId.value, payload)
       message.success('Agent 更新成功')
@@ -429,4 +663,6 @@ async function onSubmit() {
 .page-header { margin-bottom: 24px; }
 .page-title { font-family: 'Noto Serif SC', serif; font-size: 22px; font-weight: 700; color: #1a1714; margin: 0; }
 .form-hint { display: block; font-size: 12px; color: #999; margin-top: 2px; }
+.connector-policy-block { margin-bottom: 8px; }
+.connector-policy-title { font-weight: 600; margin-bottom: 6px; color: #1a1714; }
 </style>

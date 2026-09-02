@@ -3,21 +3,13 @@
     <div class="page-header">
       <h2 class="page-title">工具管理</h2>
       <a-space>
-        <a-button v-if="activeTab === 'tools'" type="primary" @click="openCreate">
+        <a-button type="primary" @click="openCreate">
           <PlusOutlined /> 创建工具
-        </a-button>
-        <a-button v-else type="primary" @click="openServerCreate">
-          <PlusOutlined /> 添加 MCP Server
         </a-button>
       </a-space>
     </div>
 
-    <a-tabs v-model:activeKey="activeTab">
-      <a-tab-pane key="tools" tab="工具" />
-      <a-tab-pane key="servers" tab="MCP 服务器" />
-    </a-tabs>
-
-    <a-card v-show="activeTab === 'tools'">
+    <a-card>
       <a-table :columns="columns" :data-source="allTools" :loading="loading" row-key="tool_id" :pagination="false">
         <template #bodyCell="{ column, record }">
           <template v-if="column.key === 'tool_type'">
@@ -46,44 +38,6 @@
                 </a-popconfirm>
               </a-space>
             </template>
-          </template>
-        </template>
-      </a-table>
-    </a-card>
-
-    <a-card v-show="activeTab === 'servers'">
-      <a-alert
-        v-if="oauthNotice"
-        :type="oauthNotice.type"
-        :message="oauthNotice.message"
-        show-icon
-        closable
-        style="margin-bottom: 16px"
-        @close="oauthNotice = null"
-      />
-      <a-table :columns="serverColumns" :data-source="servers" :loading="serversLoading" row-key="server_id" :pagination="false">
-        <template #bodyCell="{ column, record }">
-          <template v-if="column.key === 'transport'">
-            <a-tag color="purple">{{ transportLabelFromValue(record.transport) }}</a-tag>
-          </template>
-          <template v-if="column.key === 'auth'">
-            <a-tag :color="oauthTagColor(record)">{{ oauthLabel(record) }}</a-tag>
-          </template>
-          <template v-if="column.key === 'status'">
-            <a-tag :color="record.status === 'ACTIVE' ? 'green' : (record.status === 'ERROR' ? 'red' : 'default')">
-              {{ record.status }}
-            </a-tag>
-          </template>
-          <template v-if="column.key === 'action'">
-            <a-space>
-              <a @click="openServerEdit(record)">编辑</a>
-              <a @click="discoverServer(record)">发现</a>
-              <a @click="syncServer(record)">同步工具</a>
-              <a v-if="isRemoteTransport(record.transport)" @click="startOauth(record)">连接授权</a>
-              <a-popconfirm title="删除 Server 不会删除已同步工具，仅解除关联。确认？" @confirm="deleteServer(record.server_id)">
-                <a style="color: #b5341c">删除</a>
-              </a-popconfirm>
-            </a-space>
           </template>
         </template>
       </a-table>
@@ -118,7 +72,7 @@
                 {{ s.display_name || s.name }} ({{ transportLabelFromValue(s.transport) }})
               </a-select-option>
             </a-select>
-            <div class="field-hint">绑定后使用 Server 的传输与认证；也可在下方单独填写连接信息。</div>
+            <div class="field-hint">绑定「连接器」中已添加的平台 MCP Server；也可在下方单独填写连接信息。</div>
           </a-form-item>
           <a-form-item label="传输方式" required>
             <a-radio-group v-model:value="config.transport" :disabled="!!config.mcp_server_id" @change="onTransportChange">
@@ -167,7 +121,7 @@
               <a-select v-model:value="config.auth_type" :disabled="!!config.mcp_server_id">
                 <a-select-option value="none">无</a-select-option>
                 <a-select-option value="bearer">Bearer Token</a-select-option>
-                <a-select-option value="oauth" disabled>OAuth（请在 MCP 服务器页授权）</a-select-option>
+                <a-select-option value="oauth" disabled>OAuth（请在连接器页授权）</a-select-option>
               </a-select>
             </a-form-item>
             <a-form-item v-if="config.auth_type === 'bearer'" label="Bearer Token">
@@ -252,57 +206,6 @@
       </a-form>
     </a-modal>
 
-    <a-modal v-model:open="serverModalOpen" :title="editingServer ? '编辑 MCP Server' : '添加 MCP Server'" @ok="saveServer" :confirm-loading="serverSaving" width="720px">
-      <a-form :label-col="{ span: 6 }" :wrapper-col="{ span: 16 }">
-        <a-form-item label="名称" required>
-          <a-input v-model:value="serverForm.name" placeholder="唯一标识，如 github_mcp" :disabled="!!editingServer" />
-        </a-form-item>
-        <a-form-item label="显示名称">
-          <a-input v-model:value="serverForm.display_name" />
-        </a-form-item>
-        <a-form-item label="描述">
-          <a-textarea v-model:value="serverForm.description" :rows="2" />
-        </a-form-item>
-        <a-form-item label="传输方式" required>
-          <a-radio-group v-model:value="serverForm.transport">
-            <a-radio-button value="stdio">stdio</a-radio-button>
-            <a-radio-button value="sse">SSE</a-radio-button>
-            <a-radio-button value="streamable_http">Streamable HTTP</a-radio-button>
-          </a-radio-group>
-        </a-form-item>
-        <template v-if="serverForm.transport === 'stdio'">
-          <a-form-item label="命令">
-            <a-input v-model:value="serverForm.command" placeholder="npx" />
-          </a-form-item>
-          <a-form-item label="参数 JSON">
-            <a-textarea v-model:value="serverForm.args_text" :rows="2" placeholder='["-y", "@modelcontextprotocol/server-fetch"]' />
-          </a-form-item>
-          <a-form-item label="环境变量 JSON">
-            <a-textarea v-model:value="serverForm.env_text" :rows="2" placeholder="{}" />
-          </a-form-item>
-        </template>
-        <template v-else>
-          <a-form-item :label="serverForm.transport === 'sse' ? 'SSE URL' : 'HTTP URL'">
-            <a-input v-model:value="serverForm.url" placeholder="https://mcp.example.com/mcp" />
-          </a-form-item>
-          <a-form-item label="认证">
-            <a-select v-model:value="serverForm.auth_type">
-              <a-select-option value="none">无</a-select-option>
-              <a-select-option value="bearer">Bearer Token</a-select-option>
-              <a-select-option value="oauth">OAuth 2.1</a-select-option>
-            </a-select>
-          </a-form-item>
-          <a-form-item v-if="serverForm.auth_type === 'bearer'" label="Bearer Token">
-            <a-input-password v-model:value="serverForm.auth_token" />
-            <div class="field-hint">将写入自定义请求头 Authorization。</div>
-          </a-form-item>
-          <a-form-item label="请求头 JSON">
-            <a-textarea v-model:value="serverForm.headers_text" :rows="2" placeholder="{}" />
-          </a-form-item>
-        </template>
-      </a-form>
-    </a-modal>
-
     <a-modal v-model:open="schemaPreviewOpen" title="inputSchema" :footer="null">
       <pre class="result-pre">{{ schemaPreview }}</pre>
     </a-modal>
@@ -331,7 +234,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, watch } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { PlusOutlined } from '@ant-design/icons-vue'
 import { toolApi, mcpServerApi } from '../../api'
@@ -339,17 +242,14 @@ import { message } from 'ant-design-vue'
 
 const route = useRoute()
 const router = useRouter()
-const activeTab = ref(route.query.tab === 'servers' ? 'servers' : 'tools')
 const loading = ref(false)
 const tools = ref([])
 const builtinTools = ref([])
 const servers = ref([])
-const serversLoading = ref(false)
 const modalOpen = ref(false)
 const editing = ref(null)
 const saving = ref(false)
 const paramsSchemaText = ref('{}')
-const oauthNotice = ref(null)
 
 const testOpen = ref(false)
 const testing = ref(false)
@@ -366,23 +266,6 @@ const selectedDiscoveredNames = ref([])
 const schemaPreviewOpen = ref(false)
 const schemaPreview = ref('')
 
-const serverModalOpen = ref(false)
-const editingServer = ref(null)
-const serverSaving = ref(false)
-const serverForm = reactive({
-  name: '',
-  display_name: '',
-  description: '',
-  transport: 'stdio',
-  command: '',
-  args_text: '[]',
-  env_text: '{}',
-  url: '',
-  headers_text: '{}',
-  auth_type: 'none',
-  auth_token: '',
-})
-
 const mcpPresets = [
   { key: 'filesystem', label: 'Filesystem', command: 'npx', args: ['-y', '@modelcontextprotocol/server-filesystem', '/tmp'] },
   { key: 'fetch', label: 'Fetch', command: 'npx', args: ['-y', '@modelcontextprotocol/server-fetch'] },
@@ -398,17 +281,6 @@ const columns = [
   { title: '描述', dataIndex: 'description', ellipsis: true },
   { title: '状态', key: 'status', width: 80 },
   { title: '操作', key: 'action', width: 150 },
-]
-
-const serverColumns = [
-  { title: '名称', dataIndex: 'name', width: 140 },
-  { title: '显示名称', dataIndex: 'display_name', width: 140 },
-  { title: '传输', key: 'transport', width: 150 },
-  { title: '来源', dataIndex: 'source', ellipsis: true },
-  { title: '认证', key: 'auth', width: 120 },
-  { title: '工具数', dataIndex: 'tool_count', width: 80 },
-  { title: '状态', key: 'status', width: 90 },
-  { title: '操作', key: 'action', width: 280 },
 ]
 
 const discoverColumns = [
@@ -624,13 +496,6 @@ function buildTestParams(record, mcpToolName = '') {
   return { ...schemaMock, ...catalogMock }
 }
 
-watch(activeTab, (val) => {
-  router.replace({ query: { ...route.query, tab: val } })
-})
-
-function isRemoteTransport(t) {
-  return t === 'sse' || t === 'streamable_http'
-}
 function typeColor(t) {
   const m = { mcp: 'purple', restful: 'blue', local_python: 'orange', builtin: 'cyan' }
   return m[t] || 'default'
@@ -655,18 +520,6 @@ function mcpSource(record) {
   const parts = [cfg.mcp_command, ...(cfg.mcp_args || [])].filter(Boolean)
   return parts.join(' ') || '—'
 }
-function oauthLabel(record) {
-  if (record.auth_type === 'oauth') {
-    return record.oauth_status === 'authorized' ? 'OAuth 已授权' : 'OAuth 未授权'
-  }
-  if (record.auth_type === 'bearer') return 'Bearer'
-  return '无'
-}
-function oauthTagColor(record) {
-  if (record.auth_type === 'oauth') return record.oauth_status === 'authorized' ? 'green' : 'orange'
-  if (record.auth_type === 'bearer') return 'blue'
-  return 'default'
-}
 
 const allTools = computed(() => [...builtinTools.value, ...tools.value])
 
@@ -687,14 +540,11 @@ async function fetchTools() {
 }
 
 async function fetchServers() {
-  serversLoading.value = true
   try {
     const res = await mcpServerApi.list()
     servers.value = res.items || []
   } catch (e) {
     message.error(e.message)
-  } finally {
-    serversLoading.value = false
   }
 }
 
@@ -1047,142 +897,22 @@ async function handleTest() {
   }
 }
 
-function resetServerForm() {
-  Object.assign(serverForm, {
-    name: '',
-    display_name: '',
-    description: '',
-    transport: 'stdio',
-    command: '',
-    args_text: '[]',
-    env_text: '{}',
-    url: '',
-    headers_text: '{}',
-    auth_type: 'none',
-    auth_token: '',
-  })
-}
-function openServerCreate() {
-  editingServer.value = null
-  resetServerForm()
-  serverModalOpen.value = true
-}
-function openServerEdit(record) {
-  editingServer.value = record
-  Object.assign(serverForm, {
-    name: record.name,
-    display_name: record.display_name,
-    description: record.description,
-    transport: record.transport || 'stdio',
-    command: record.command || '',
-    args_text: JSON.stringify(record.args || [], null, 2),
-    env_text: JSON.stringify(record.env || {}, null, 2),
-    url: record.url || '',
-    headers_text: JSON.stringify(record.headers || {}, null, 2),
-    auth_type: record.auth_type || 'none',
-    auth_token: '',
-  })
-  serverModalOpen.value = true
-}
-function parseServerPayload() {
-  let args = []
-  let env = {}
-  let headers = {}
-  try { args = JSON.parse(serverForm.args_text || '[]') } catch { args = [] }
-  try { env = JSON.parse(serverForm.env_text || '{}') } catch { env = {} }
-  try { headers = JSON.parse(serverForm.headers_text || '{}') } catch { headers = {} }
-  if (serverForm.auth_type === 'bearer' && serverForm.auth_token) {
-    headers.Authorization = `Bearer ${serverForm.auth_token}`
-  }
-  return {
-    name: serverForm.name,
-    display_name: serverForm.display_name || serverForm.name,
-    description: serverForm.description,
-    transport: serverForm.transport,
-    command: serverForm.command,
-    args,
-    env,
-    url: serverForm.url,
-    headers,
-    auth_type: serverForm.auth_type,
-  }
-}
-async function saveServer() {
-  serverSaving.value = true
-  try {
-    const data = parseServerPayload()
-    if (editingServer.value) {
-      await mcpServerApi.update(editingServer.value.server_id, data)
-      message.success('Server 已更新')
-    } else {
-      await mcpServerApi.create(data)
-      message.success('Server 已创建')
-    }
-    serverModalOpen.value = false
-    fetchServers()
-  } catch (e) {
-    message.error(e.message)
-  } finally {
-    serverSaving.value = false
-  }
-}
-async function deleteServer(id) {
-  try {
-    await mcpServerApi.delete(id)
-    message.success('已删除')
-    fetchServers()
-    fetchTools()
-  } catch (e) {
-    message.error(e.message)
-  }
-}
-async function discoverServer(record) {
-  try {
-    const res = await mcpServerApi.discover(record.server_id)
-    if (res.success) message.success(`发现 ${res.total || (res.tools || []).length} 个工具`)
-    else message.error(res.error || '发现失败')
-  } catch (e) {
-    message.error(e.message)
-  }
-}
-async function syncServer(record) {
-  try {
-    const res = await mcpServerApi.sync(record.server_id)
-    if (res.success) {
-      message.success(`同步完成：新增 ${res.created}，更新 ${res.updated}，停用 ${res.deactivated}`)
-      fetchServers()
-      fetchTools()
-    } else {
-      message.error(res.error || '同步失败')
-    }
-  } catch (e) {
-    message.error(e.message)
-  }
-}
-async function startOauth(record) {
-  try {
-    const frontend = `${window.location.origin}/tools?tab=servers&mcp_oauth=ok&server_id=${record.server_id}`
-    const res = await mcpServerApi.startOauth(record.server_id, { frontend_redirect: frontend })
-    if (res.authorization_url) {
-      window.location.href = res.authorization_url
-    } else {
-      message.error('未返回授权地址')
-    }
-  } catch (e) {
-    message.error(e.message)
-  }
-}
 
 onMounted(() => {
+  // Legacy MCP Server management lived under Tools; redirect to Connectors.
+  if (route.query.tab === 'servers' || route.query.mcp_oauth) {
+    router.replace({
+      path: '/connectors',
+      query: {
+        ...(route.query.mcp_oauth ? { mcp_oauth: route.query.mcp_oauth } : {}),
+        ...(route.query.server_id ? { server_id: route.query.server_id } : {}),
+        ...(route.query.message ? { message: route.query.message } : {}),
+      },
+    })
+    return
+  }
   fetchTools()
   fetchServers()
-  if (route.query.mcp_oauth === 'ok') {
-    oauthNotice.value = { type: 'success', message: 'OAuth 授权成功，可以同步工具了' }
-    activeTab.value = 'servers'
-  } else if (route.query.mcp_oauth === 'error') {
-    oauthNotice.value = { type: 'error', message: route.query.message || 'OAuth 授权失败' }
-    activeTab.value = 'servers'
-  }
 })
 </script>
 

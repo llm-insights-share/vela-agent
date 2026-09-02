@@ -97,6 +97,10 @@
               · {{ msg.runMetrics.elapsed_ms ? Math.round(msg.runMetrics.elapsed_ms / 1000) + 's' : '' }}
               <template v-if="msg.runMetrics.forced_synthesis"> · 强制合成</template>
             </span>
+            <a-space v-if="msg.role === 'assistant' && msg.content" size="small" style="margin-left: 8px">
+              <a-button type="text" size="small" @click="submitFeedback(i, 1)">👍</a-button>
+              <a-button type="text" size="small" @click="submitFeedback(i, -1)">👎</a-button>
+            </a-space>
           </template>
         </div>
 
@@ -172,7 +176,7 @@
             <span class="user-skill-prefix">/{{ msg.activeSkill }}&nbsp;&nbsp;</span><span class="user-msg-text">{{ msg.content }}</span>
           </template>
           <template v-else-if="msg.content">
-            <span v-html="renderMarkdown(msg.content)"></span>
+            <div class="chat-markdown-body" v-html="renderMarkdown(msg.content)"></div>
           </template>
         </div>
 
@@ -201,9 +205,20 @@
               模型输出在生成文件时被截断，当前文件内容可能缺失尾部。请尝试简化请求、增加超时时间，或让 Agent 继续补全。
             </template>
           </a-alert>
-          <div class="chat-files-title">生成的文件：</div>
+          <div v-if="nonImageFiles(msg.files).length" class="chat-files-title">生成的文件：</div>
+          <div v-if="imageFiles(msg.files).length" class="chat-image-grid">
+            <img
+              v-for="f in imageFiles(msg.files)"
+              :key="f.url"
+              :src="f.url"
+              :alt="f.name"
+              class="chat-image-thumb"
+              loading="lazy"
+              @click="previewFile(f)"
+            />
+          </div>
           <div
-            v-for="f in msg.files"
+            v-for="f in nonImageFiles(msg.files)"
             :key="f.url"
             class="chat-file-item"
           >
@@ -752,7 +767,7 @@ import {
   FileOutlined, CloseOutlined, LoadingOutlined, StopOutlined, PaperClipOutlined,
   CopyOutlined,
 } from '@ant-design/icons-vue'
-import { agentApi, sessionApi, hitlApi, skillApi, inboxApi } from '../../api'
+import { agentApi, sessionApi, hitlApi, skillApi, inboxApi, monitorApi } from '../../api'
 import { useAuthStore } from '../../stores/auth'
 import { message } from 'ant-design-vue'
 import { marked } from 'marked'
@@ -1079,6 +1094,21 @@ watch(isRunning, () => {
     }
   }
 })
+
+async function submitFeedback(messageIndex, rating) {
+  if (!sessionId.value) return
+  try {
+    await monitorApi.submitFeedback({
+      session_id: sessionId.value,
+      agent_id: agentId.value,
+      message_index: messageIndex,
+      rating,
+    })
+    message.success(rating > 0 ? '感谢反馈' : '已记录差评')
+  } catch (e) {
+    message.error(e.message || '反馈失败')
+  }
+}
 
 async function abortCurrentSession() {
   if (!sessionId.value || !canAbort.value || aborting.value) return
@@ -1771,6 +1801,50 @@ function hasTruncatedFiles(files) {
   return Array.isArray(files) && files.some(f => f.truncated)
 }
 
+function isImageFile(file) {
+  if (!file?.name && !file?.url) return false
+  const name = (file.name || file.url || '').toLowerCase()
+  const dot = name.lastIndexOf('.')
+  const ext = dot >= 0 ? name.slice(dot) : ''
+  return IMAGE_EXTENSIONS.has(ext)
+}
+
+function imageFiles(files) {
+  return (files || []).filter(isImageFile)
+}
+
+function nonImageFiles(files) {
+  return (files || []).filter((f) => !isImageFile(f))
+}
+
+function wrapMarkdownImages(html) {
+  if (!html || !/<img[\s>]/i.test(html)) return html
+
+  // marked 常把「正文 + 多张图」放在同一个 <p> 内，需拆出图片区
+  let out = html.replace(/<p>([\s\S]*?)<\/p>/gi, (match, inner) => {
+    const imgs = inner.match(/<img[^>]*>/gi) || []
+    if (!imgs.length) return match
+    const textOnly = inner.replace(/<img[^>]*>/gi, '').trim()
+    if (!textOnly) {
+      return `<div class="chat-image-grid">${imgs.join('')}</div>`
+    }
+    return `<p>${textOnly}</p><div class="chat-image-grid">${imgs.join('')}</div>`
+  })
+
+  // 连续「仅含图片」的段落
+  out = out.replace(
+    /((?:<p>\s*<img[^>]*>\s*<\/p>\s*)+)/gi,
+    (block) => {
+      const imgs = block.match(/<img[^>]*>/gi) || []
+      return `<div class="chat-image-grid">${imgs.join('')}</div>`
+    },
+  )
+
+  out = out.replace(/<img(?![^>]*class=)/gi, '<img class="chat-inline-image"')
+
+  return out
+}
+
 async function previewFile(file) {
   previewVisible.value = true
   previewFileName.value = file.name
@@ -2135,7 +2209,7 @@ function copySessionId() {
 
 function renderMarkdown(text) {
   if (!text) return ''
-  return marked.parse(text)
+  return wrapMarkdownImages(marked.parse(text))
 }
 </script>
 
@@ -2389,6 +2463,32 @@ function renderMarkdown(text) {
   color: #6b6560;
   margin-bottom: 6px;
   font-weight: 500;
+}
+.chat-files .chat-image-grid,
+.chat-msg-content :deep(.chat-image-grid),
+.chat-markdown-body :deep(.chat-image-grid) {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.chat-image-thumb,
+.chat-msg-content :deep(.chat-image-grid img),
+.chat-markdown-body :deep(.chat-image-grid img) {
+  width: 100%;
+  height: auto;
+  max-height: 220px;
+  object-fit: contain;
+  border-radius: 6px;
+  border: 1px solid #e8e4dc;
+  background: #fff;
+  cursor: pointer;
+  display: block;
+}
+.chat-markdown-body :deep(.chat-inline-image) {
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
 }
 .chat-hitl-actions {
   margin-top: 8px;

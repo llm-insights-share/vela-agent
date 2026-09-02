@@ -41,11 +41,21 @@ def list_builtin_tools():
 def list_tools(
     tool_type: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
+    mcp_server_id: Optional[str] = Query(None, description="按 MCP Server 列出工具（含已同步工具）"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
 ):
-    query = db.query(Tool).options(joinedload(Tool.mcp_server))
+    query = (
+        db.query(Tool)
+        .options(joinedload(Tool.mcp_server))
+    )
+    if mcp_server_id:
+        # Explicit server scope: used by Agent connector policy UI.
+        query = query.filter(Tool.mcp_server_id == mcp_server_id)
+    else:
+        # Tools management: hide all tools synced/owned by MCP servers (connectors + platform).
+        query = query.filter(Tool.mcp_server_id.is_(None))
     if tool_type:
         query = query.filter(Tool.tool_type == tool_type)
     if status:
