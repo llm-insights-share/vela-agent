@@ -13,7 +13,7 @@ from croniter import croniter
 from sqlalchemy.orm import Session
 
 from database import SessionLocal
-from models import Agent, AgentStatus, AgentType, Session as SessionModel, gen_uuid
+from models import Agent, AgentStatus, AgentType, Session as SessionModel, gen_uuid, gen_trace_id
 from services.workflow_compiler import WorkflowCompiler
 from services.workflow_engine import WorkflowEngine
 
@@ -126,7 +126,7 @@ class WorkflowCronScheduler:
             caller_type="CRON",
             caller_id=cron_node_id,
             token_budget=agent.token_budget,
-            trace_id=gen_uuid(),
+            trace_id=gen_trace_id(),
         )
         db.add(session)
         db.commit()

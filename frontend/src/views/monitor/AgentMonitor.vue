@@ -122,11 +122,14 @@
 
       <a-tab-pane key="observations" tab="Observations">
         <a-space style="margin-bottom: 12px">
-          <a-select v-model:value="obsKind" allow-clear placeholder="类型" style="width: 140px" @change="fetchObservations">
-            <a-select-option value="chat">chat</a-select-option>
-            <a-select-option value="execute_tool">execute_tool</a-select-option>
-            <a-select-option value="guard_decision">guard_decision</a-select-option>
-            <a-select-option value="internal">internal</a-select-option>
+          <a-select v-model:value="obsKind" allow-clear placeholder="类型" style="width: 160px" @change="fetchObservations">
+            <a-select-option value="chat">chat / LLM</a-select-option>
+            <a-select-option value="execute_tool">execute_tool / TOOL</a-select-option>
+            <a-select-option value="guard_decision">guard_decision / GUARDRAIL</a-select-option>
+            <a-select-option value="agent">agent / AGENT</a-select-option>
+            <a-select-option value="retriever">retriever / RETRIEVER</a-select-option>
+            <a-select-option value="evaluator">evaluator / EVALUATOR</a-select-option>
+            <a-select-option value="internal">internal / CHAIN</a-select-option>
           </a-select>
           <a-button @click="fetchObservations">刷新</a-button>
         </a-space>
@@ -692,6 +695,9 @@ onMounted(async () => {
 .graph-node.chat { border-left: 3px solid #4a6741; }
 .graph-node.execute_tool { border-left: 3px solid #c45c26; }
 .graph-node.guard_decision { border-left: 3px solid #b5341c; }
+.graph-node.agent { border-left: 3px solid #2c5f8a; }
+.graph-node.retriever { border-left: 3px solid #6b5b95; }
+.graph-node.evaluator { border-left: 3px solid #7a8b5a; }
 .graph-name { font-size: 12px; font-weight: 600; }
 .graph-meta { font-size: 10px; color: #8a847c; }
 </style>

@@ -166,6 +166,12 @@ async def on_startup():
     init_db()
     seed_admin()
     _recover_stale_running_sessions()
+    try:
+        from services.monitor.otel_setup import setup_tracer_provider
+
+        setup_tracer_provider()
+    except Exception as e:
+        print(f"[startup] OpenTelemetry init skipped: {e}")
     from services.workflow_cron_scheduler import cron_scheduler
     from services.schedule.scheduler import schedule_scheduler
 
@@ -204,6 +210,12 @@ async def on_startup():
 
 @app.on_event("shutdown")
 async def on_shutdown():
+    try:
+        from services.monitor.otel_setup import shutdown_tracer_provider
+
+        shutdown_tracer_provider()
+    except Exception:
+        pass
     try:
         from services.screenpilot.session_manager import shutdown_browser_pool
 

@@ -120,6 +120,10 @@ def test_record_agent_run_creates_spans():
         assert run.status == AgentRunStatus.SUCCESS.value
         spans = db.query(AgentSpan).filter(AgentSpan.run_id == run_id).all()
         assert len(spans) >= 2
+        llm_spans = [s for s in spans if s.kind == "chat"]
+        assert llm_spans
+        assert (llm_spans[0].attrs_json or {}).get("openinference.span.kind") == "LLM"
+        assert (llm_spans[0].attrs_json or {}).get("llm.model_name") == "test"
     finally:
         db.close()
 

@@ -16,6 +16,7 @@ from models import (
     SessionStatus,
     Session as SessionModel,
     gen_uuid,
+    gen_trace_id,
     now_utc,
 )
 from services.agent_service import agent_service
@@ -177,7 +178,7 @@ async def execute_schedule_run(
         caller_type="SCHEDULE",
         caller_id=schedule.schedule_id,
         token_budget=agent.token_budget,
-        trace_id=gen_uuid(),
+        trace_id=gen_trace_id(),
         messages=[],
     )
     db.add(session)

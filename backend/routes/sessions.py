@@ -7,7 +7,7 @@ import asyncio
 import os
 import traceback
 from database import get_db, SessionLocal
-from models import Session as SessionModel, SessionStatus, gen_uuid, now_utc
+from models import Session as SessionModel, SessionStatus, gen_uuid, gen_trace_id, now_utc
 from schemas import (
     SessionCreate,
     SessionChatRequest,
@@ -153,7 +153,7 @@ def create_session(
         title="",
         messages=[],
         pending_context={},
-        trace_id=gen_uuid(),
+        trace_id=gen_trace_id(),
     )
     db.add(session)
     db.commit()

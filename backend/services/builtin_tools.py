@@ -167,16 +167,16 @@ BUILTIN_DDG_SEARCH_TOOL = BuiltinTool(
 BUILTIN_TOOL_SEARCH = BuiltinTool(
     name="tool_search",
     description=(
-        "在 Agent 已授权的工具目录中搜索并激活工具。"
-        "当需要 MCP、数据库、文件操作等非核心能力时，先调用本工具再使用命中工具。"
-        "核心工具（web 搜索、网页提取、代码执行）无需搜索即可直接调用。"
+        "在 Agent 已授权的用户安装工具（MCP / REST / 本地脚本等）目录中搜索并激活工具。"
+        "平台内置工具已全部直接可用，无需通过本工具搜索。"
+        "仅当需要尚未加载的用户/第三方工具时调用；命中后工具会加入本会话可用列表。"
     ),
     parameters={
         "type": "object",
         "properties": {
             "query": {
                 "type": "string",
-                "description": "搜索关键词或任务描述，如「SQL 查询」「ScreenPilot 点击」",
+                "description": "搜索关键词或任务描述，如「SQL 查询」「发送飞书消息」",
             },
             "max_results": {
                 "type": "integer",
@@ -184,8 +184,8 @@ BUILTIN_TOOL_SEARCH = BuiltinTool(
             },
             "tool_types": {
                 "type": "array",
-                "items": {"type": "string", "enum": ["mcp", "restful", "local_python", "builtin"]},
-                "description": "可选，按工具类型过滤",
+                "items": {"type": "string", "enum": ["mcp", "restful", "local_python"]},
+                "description": "可选，按工具类型过滤（不含平台内置）",
             },
             "activate": {
                 "type": "boolean",

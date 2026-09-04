@@ -11,11 +11,9 @@ from services.builtin_tools import get_active_web_search_tool_name
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "vela.yaml")
 
-DEFAULT_ALWAYS_LOADED = (
-    "tool_search",
-    "web_extract",
-    "execute_code",
-)
+# Extra user/MCP tools to always expose in deferred mode.
+# Platform builtins are always core via resolve_core_tool_names — do not list them here.
+DEFAULT_ALWAYS_LOADED: tuple = ()
 
 
 @dataclass
@@ -32,6 +30,7 @@ class ToolSearchConfig:
 
 
 def _normalize_always_loaded(names: List[str]) -> List[str]:
+    """Normalize extra always-loaded user tool names (web search aliases → active provider)."""
     out: List[str] = []
     seen: Set[str] = set()
     active_web = get_active_web_search_tool_name()
@@ -43,9 +42,6 @@ def _normalize_always_loaded(names: List[str]) -> List[str]:
             name = active_web
         seen.add(name)
         out.append(name)
-    if active_web not in seen:
-        # Ensure one web search tool in core when defaults used
-        pass
     return out
 
 
@@ -59,14 +55,10 @@ def load_tool_search_config() -> ToolSearchConfig:
         return ToolSearchConfig()
 
     ts = (cfg.get("tools") or {}).get("tool_search") or {}
-    active_web = get_active_web_search_tool_name()
-    default_core = list(DEFAULT_ALWAYS_LOADED)
-    if active_web not in default_core:
-        default_core.insert(1, active_web)
 
     always = ts.get("always_loaded")
-    if not isinstance(always, list) or not always:
-        always = default_core
+    if not isinstance(always, list):
+        always = list(DEFAULT_ALWAYS_LOADED)
     else:
         always = _normalize_always_loaded(always)
 
@@ -106,7 +98,7 @@ def resolve_tool_loading_for_agent(agent: Any, base: Optional[ToolSearchConfig] 
         cfg.enabled = bool(tl.get("enabled"))
 
     always = tl.get("always_loaded")
-    if isinstance(always, list) and always:
+    if isinstance(always, list):
         cfg.always_loaded = _normalize_always_loaded(always)
 
     if tl.get("search_backend") is not None:
@@ -123,19 +115,40 @@ def resolve_core_tool_names(
     memory_enabled: bool = False,
     has_kb: bool = False,
     available_tool_names: Optional[Set[str]] = None,
+    builtin_tool_names: Optional[Set[str]] = None,
 ) -> Set[str]:
-    """Core tools always exposed to LLM in deferred mode."""
-    names = set(_normalize_always_loaded(list(cfg.always_loaded)))
-    if "tool_search" not in names and cfg.enabled:
+    """Tools always exposed to LLM in deferred mode.
+
+    Platform builtins are always core. ``always_loaded`` adds extra user/MCP tools only.
+    """
+    avail = available_tool_names
+    names: Set[str] = set()
+
+    if builtin_tool_names is None:
+        from services.builtin_tools import get_builtin_tools_for_runtime
+
+        builtin_tool_names = {t.name for t in get_builtin_tools_for_runtime()}
+
+    for n in builtin_tool_names or set():
+        if avail is None or n in avail:
+            names.add(n)
+
+    # Extra user tools from config (builtins already covered above)
+    for n in _normalize_always_loaded(list(cfg.always_loaded or [])):
+        if avail is None or n in avail:
+            names.add(n)
+
+    if cfg.enabled and (avail is None or "tool_search" in avail or "tool_search" in (builtin_tool_names or set())):
         names.add("tool_search")
 
-    avail = available_tool_names or set()
-    if memory_enabled and "memory" in avail:
-        names.add("memory")
-    if has_kb and "kb_search" in avail:
-        names.add("kb_search")
-    if "cu_search_skills" in avail:
-        names.add("cu_search_skills")
-    if "ui_search_skills" in avail:
-        names.add("ui_search_skills")
+    if avail:
+        if memory_enabled and "memory" in avail:
+            names.add("memory")
+        if has_kb and "kb_search" in avail:
+            names.add("kb_search")
+        # ScreenPilot skill search tools may be MCP-bound, not platform builtins
+        if "cu_search_skills" in avail:
+            names.add("cu_search_skills")
+        if "ui_search_skills" in avail:
+            names.add("ui_search_skills")
     return names

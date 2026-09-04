@@ -100,4 +100,9 @@ class ToolCatalog:
         return self._by_name.get(name)
 
     def deferred_entries(self, core_names: Set[str]) -> List[ToolCatalogEntry]:
-        return [e for e in self.entries if e.name not in core_names]
+        """User/MCP tools eligible for tool_search (excludes platform builtins)."""
+        return [
+            e
+            for e in self.entries
+            if e.name not in core_names and not e.is_builtin and e.name != "tool_search"
+        ]

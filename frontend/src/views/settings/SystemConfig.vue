@@ -96,19 +96,19 @@
         <a-divider style="margin: 20px 0 16px;" />
 
         <div class="field-hint" style="margin-bottom: 12px;">
-          <strong>Tool Search（延迟加载）</strong>：开启后 Agent 默认只向 LLM 暴露少量核心工具与
-          <code>tool_search</code>；其余绑定工具需搜索激活后再注入 context。
+          <strong>Tool Search（延迟加载）</strong>：开启 deferred 后，平台内置工具始终进入 LLM 可用列表；
+          <code>tool_search</code> 只搜索并激活用户安装的 MCP/自定义工具。
         </div>
         <a-form :model="toolSearchForm" :label-col="{ span: 4 }" :wrapper-col="{ span: 16 }">
           <a-form-item label="启用 Tool Search">
             <a-switch v-model:checked="toolSearchForm.enabled" />
-            <div class="field-hint">默认关闭；开启后可在下方选择 eager（全量）或 deferred（延迟）模式。</div>
+            <div class="field-hint">默认关闭；开启后可选择 eager（用户工具也全量注入）或 deferred（用户工具按需搜索）。</div>
           </a-form-item>
           <template v-if="toolSearchForm.enabled">
             <a-form-item label="加载模式">
               <a-radio-group v-model:value="toolSearchForm.mode">
                 <a-radio-button value="eager">Eager（全量注入）</a-radio-button>
-                <a-radio-button value="deferred">Deferred（延迟加载）</a-radio-button>
+                <a-radio-button value="deferred">Deferred（用户工具延迟加载）</a-radio-button>
               </a-radio-group>
             </a-form-item>
             <a-form-item label="搜索后端">
@@ -123,22 +123,77 @@
             <a-form-item label="会话加载上限">
               <a-input-number v-model:value="toolSearchForm.max_loaded_per_session" :min="1" :max="50" style="width: 120px;" />
             </a-form-item>
-            <a-form-item label="常驻工具">
+            <a-form-item label="额外常驻用户工具">
               <a-select
                 v-model:value="toolSearchForm.always_loaded"
-                mode="multiple"
-                placeholder="选择始终暴露给 LLM 的工具"
+                mode="tags"
+                placeholder="输入用户/MCP 工具名，使其无需搜索即可用（可选）"
                 style="width: 100%;"
               >
                 <a-select-option v-for="opt in toolSearchCoreOptions" :key="opt" :value="opt">{{ opt }}</a-select-option>
               </a-select>
               <div class="field-hint">
-                当前 Web Search 工具：<code>{{ toolSearchMeta.active_web_search || '—' }}</code>
+                平台内置工具无需配置。当前 Web Search：<code>{{ toolSearchMeta.active_web_search || '—' }}</code>
               </div>
             </a-form-item>
           </template>
           <a-form-item :wrapper-col="{ offset: 4, span: 16 }">
             <a-button type="primary" :loading="toolSearchSaving" @click="saveToolSearch">保存 Tool Search</a-button>
+          </a-form-item>
+        </a-form>
+
+        <a-divider style="margin: 20px 0 16px;" />
+
+        <div class="field-hint" style="margin-bottom: 12px;">
+          <strong>可观测性（OpenInference / Phoenix）</strong>：开启后按 OpenInference 语义打点并双写本地 Monitor；
+          填写 Phoenix OTLP 地址后可同步导出到 Phoenix UI（默认
+          <code>http://127.0.0.1:6006</code>）。
+        </div>
+        <a-form :model="observabilityForm" :label-col="{ span: 4 }" :wrapper-col="{ span: 16 }">
+          <a-form-item label="启用 OTEL">
+            <a-switch v-model:checked="observabilityForm.otel_enabled" />
+            <div class="field-hint">关闭后不再创建 OpenInference span（本地投影走 fallback）。</div>
+          </a-form-item>
+          <a-form-item label="Phoenix / OTLP">
+            <a-input
+              v-model:value="observabilityForm.otlp_endpoint"
+              placeholder="http://127.0.0.1:6006"
+              allow-clear
+              :disabled="!observabilityForm.otel_enabled"
+            />
+            <div class="field-hint">
+              填 Phoenix 根地址即可，后端会自动追加 <code>/v1/traces</code>。留空则仅本地 Monitor 双写。
+            </div>
+          </a-form-item>
+          <a-form-item label="成功采样率">
+            <a-input-number
+              v-model:value="observabilityForm.success_sample_rate"
+              :min="0"
+              :max="1"
+              :step="0.1"
+              style="width: 120px;"
+              :disabled="!observabilityForm.otel_enabled"
+            />
+            <div class="field-hint">成功 run 正文保留比例（0–1）；失败/护栏仍全量保留。</div>
+          </a-form-item>
+          <a-alert
+            v-if="observabilityMeta.endpoint_from_env || observabilityMeta.sdk_disabled_by_env"
+            type="info"
+            show-icon
+            style="margin-bottom: 12px;"
+            :message="observabilityEnvHint"
+          />
+          <a-form-item :wrapper-col="{ offset: 4, span: 16 }">
+            <a-space>
+              <a-button type="primary" :loading="observabilitySaving" @click="saveObservability">
+                保存可观测性
+              </a-button>
+              <a-tag v-if="observabilityMeta.runtime_otel_enabled" color="green">运行中</a-tag>
+              <a-tag v-else color="default">已关闭</a-tag>
+              <a-tag v-if="observabilityMeta.effective_otlp_endpoint" color="blue">
+                导出: {{ observabilityMeta.effective_otlp_endpoint }}
+              </a-tag>
+            </a-space>
           </a-form-item>
         </a-form>
       </div>
@@ -458,7 +513,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { UpOutlined, DownOutlined } from '@ant-design/icons-vue'
 import { configApi, serviceApi, memoryApi } from '../../api'
 import { message } from 'ant-design-vue'
@@ -477,14 +532,32 @@ const webSearchProvider = ref('tavily')
 const webSearchSaving = ref(false)
 const toolSearchSaving = ref(false)
 const toolSearchMeta = reactive({ active_web_search: '' })
+
+const observabilityForm = reactive({
+  otel_enabled: true,
+  otlp_endpoint: '',
+  success_sample_rate: 1.0,
+})
+const observabilityMeta = reactive({
+  effective_otlp_endpoint: '',
+  endpoint_from_env: false,
+  sdk_disabled_by_env: false,
+  runtime_otel_enabled: true,
+})
+const observabilitySaving = ref(false)
+const observabilityEnvHint = computed(() => {
+  const parts = []
+  if (observabilityMeta.sdk_disabled_by_env) {
+    parts.push('环境变量 OTEL_SDK_DISABLED 已关闭 SDK，会覆盖下方开关。')
+  }
+  if (observabilityMeta.endpoint_from_env) {
+    parts.push(
+      `环境变量 OTEL_EXPORTER_OTLP_ENDPOINT 优先生效（当前有效: ${observabilityMeta.effective_otlp_endpoint || '—'}）。`
+    )
+  }
+  return parts.join(' ')
+})
 const toolSearchCoreOptions = [
-  'tool_search',
-  'tavily_web_search',
-  'duckduckgo_web_search',
-  'web_extract',
-  'execute_code',
-  'memory',
-  'kb_search',
   'cu_search_skills',
   'ui_search_skills',
 ]
@@ -906,9 +979,43 @@ async function saveToolSearch() {
   }
 }
 
+async function fetchObservability() {
+  try {
+    const res = await configApi.getObservability()
+    observabilityForm.otel_enabled = res.otel_enabled !== false
+    observabilityForm.otlp_endpoint = res.otlp_endpoint || ''
+    observabilityForm.success_sample_rate =
+      typeof res.success_sample_rate === 'number' ? res.success_sample_rate : 1.0
+    observabilityMeta.effective_otlp_endpoint = res.effective_otlp_endpoint || ''
+    observabilityMeta.endpoint_from_env = !!res.endpoint_from_env
+    observabilityMeta.sdk_disabled_by_env = !!res.sdk_disabled_by_env
+    observabilityMeta.runtime_otel_enabled = !!res.runtime_otel_enabled
+  } catch (_) {
+    // ignore
+  }
+}
+
+async function saveObservability() {
+  observabilitySaving.value = true
+  try {
+    const res = await configApi.updateObservability({
+      otel_enabled: !!observabilityForm.otel_enabled,
+      otlp_endpoint: (observabilityForm.otlp_endpoint || '').trim(),
+      success_sample_rate: Number(observabilityForm.success_sample_rate ?? 1),
+    })
+    message.success(res.message || '可观测性配置已保存')
+    await fetchObservability()
+  } catch (e) {
+    message.error(e.message)
+  } finally {
+    observabilitySaving.value = false
+  }
+}
+
 onMounted(async () => {
   await fetchConfig()
   await fetchToolSearch()
+  await fetchObservability()
   await fetchCodeExecConfig()
   await fetchContextualConfig()
   await fetchScreenpilot()

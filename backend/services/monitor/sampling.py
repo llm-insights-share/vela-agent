@@ -24,13 +24,27 @@ def redact_span_attrs(attrs: Dict[str, Any], *, keep_full: bool) -> Dict[str, An
     if keep_full or not attrs:
         return dict(attrs or {})
     out = dict(attrs)
-    for key in ("input", "output", "messages", "content", "thinking"):
+    for key in (
+        "input",
+        "output",
+        "messages",
+        "content",
+        "thinking",
+        "input.value",
+        "output.value",
+    ):
         val = out.get(key)
         if isinstance(val, str) and len(val) > 500:
             out[key] = val[:500] + "…[truncated]"
         elif isinstance(val, list) and len(val) > 5:
             out[key] = val[:5]
             out[f"{key}_truncated"] = True
+    # Truncate flattened OpenInference message contents
+    for key in list(out.keys()):
+        if "message.content" in key or key.endswith(".document.content"):
+            val = out.get(key)
+            if isinstance(val, str) and len(val) > 500:
+                out[key] = val[:500] + "…[truncated]"
     return out
 
 

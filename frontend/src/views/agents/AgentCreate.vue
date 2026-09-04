@@ -176,8 +176,8 @@
               <a-radio-button value="eager">Eager（全量注入）</a-radio-button>
             </a-radio-group>
             <span class="form-hint">
-              需在系统配置中启用 Tool Search。绑定工具仍全部授权，但 deferred 模式下运行时仅核心工具 +
-              <code>tool_search</code> 直接进入 LLM context，其余工具需搜索后激活。
+              需在系统配置中启用 Tool Search。deferred 模式下平台内置工具始终可用；
+              绑定的用户/MCP 工具需经 <code>tool_search</code> 搜索激活后进入 LLM context（可配置额外常驻）。
             </span>
           </a-space>
         </a-form-item>

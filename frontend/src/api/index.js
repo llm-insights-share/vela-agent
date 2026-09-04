@@ -254,6 +254,8 @@ export const configApi = {
   updateQueryRewriteAgents: (items) => api.put('/config/query-rewrite/agents', { items }),
   getContextualRetrieval: () => api.get('/config/knowledge/contextual-retrieval'),
   updateContextualRetrieval: (data) => api.put('/config/knowledge/contextual-retrieval', data),
+  getObservability: () => api.get('/config/observability'),
+  updateObservability: (data) => api.put('/config/observability', data),
 }
 
 export const queryRewriteApi = {

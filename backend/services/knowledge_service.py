@@ -638,40 +638,53 @@ class KnowledgeService:
 
         results: List[Dict[str, Any]] = []
 
-        if mode == "vector":
-            for cid, sc in self._search_vector(kb_id, query, top_k, allowed_doc_ids):
-                item = _pack(cid, sc, ["vector"])
+        from services.monitor.oi_tracing import mark_span_ok, oi_span, set_span_attrs
+        from services.monitor.openinference_attrs import attrs_for_retriever
+
+        with oi_span(
+            "retrieve.knowledge",
+            attrs_for_retriever(query=query or "", documents=[]),
+        ) as span:
+            if mode == "vector":
+                for cid, sc in self._search_vector(kb_id, query, top_k, allowed_doc_ids):
+                    item = _pack(cid, sc, ["vector"])
+                    if item:
+                        results.append(item)
+                set_span_attrs(span, attrs_for_retriever(query=query or "", documents=results))
+                mark_span_ok(span)
+                return results
+
+            if mode == "bm25":
+                for cid, sc in self._search_bm25(kb_id, query, top_k, allowed_doc_ids):
+                    item = _pack(cid, sc, ["bm25"])
+                    if item:
+                        results.append(item)
+                if results:
+                    scores = [r["score"] for r in results]
+                    min_s, max_s = min(scores), max(scores)
+                    if max_s == min_s:
+                        for r in results:
+                            r["score"] = 1.0
+                    else:
+                        span_score = max_s - min_s
+                        for r in results:
+                            r["score"] = (r["score"] - min_s) / span_score
+                set_span_attrs(span, attrs_for_retriever(query=query or "", documents=results))
+                mark_span_ok(span)
+                return results
+
+            vec = self._search_vector(kb_id, query, fetch_n, allowed_doc_ids)
+            bm = self._search_bm25(kb_id, query, fetch_n, allowed_doc_ids)
+            fused = self._rrf_fuse([vec, bm], k=self.RRF_K)
+            for cid, sc, srcs in fused:
+                item = _pack(cid, sc, srcs)
                 if item:
                     results.append(item)
+                if len(results) >= top_k:
+                    break
+            set_span_attrs(span, attrs_for_retriever(query=query or "", documents=results))
+            mark_span_ok(span)
             return results
-
-        if mode == "bm25":
-            for cid, sc in self._search_bm25(kb_id, query, top_k, allowed_doc_ids):
-                item = _pack(cid, sc, ["bm25"])
-                if item:
-                    results.append(item)
-            if results:
-                scores = [r["score"] for r in results]
-                min_s, max_s = min(scores), max(scores)
-                if max_s == min_s:
-                    for r in results:
-                        r["score"] = 1.0
-                else:
-                    span = max_s - min_s
-                    for r in results:
-                        r["score"] = (r["score"] - min_s) / span
-            return results
-
-        vec = self._search_vector(kb_id, query, fetch_n, allowed_doc_ids)
-        bm = self._search_bm25(kb_id, query, fetch_n, allowed_doc_ids)
-        fused = self._rrf_fuse([vec, bm], k=self.RRF_K)
-        for cid, sc, srcs in fused:
-            item = _pack(cid, sc, srcs)
-            if item:
-                results.append(item)
-            if len(results) >= top_k:
-                break
-        return results
 
     def _docs_matching_tag_filters(
         self,

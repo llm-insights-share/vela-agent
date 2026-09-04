@@ -56,6 +56,8 @@ class ModelProviderService:
         source: Optional[str] = None,
     ) -> Dict[str, Any]:
         from services.llm_call_recorder import get_active_context, record_call
+        from services.monitor.oi_tracing import mark_span_error, mark_span_ok, oi_span, set_span_attrs
+        from services.monitor.openinference_attrs import attrs_for_llm_call
 
         headers = {"Authorization": f"Bearer {provider.api_key}", "Content-Type": "application/json"}
         if provider.extra_headers:
@@ -82,91 +84,158 @@ class ModelProviderService:
 
         record_enabled = get_active_context() is not None
         started = time.monotonic()
+        span_name = f"chat.{source or 'llm'}"
 
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            try:
-                url = provider.base_url.rstrip("/") + "/chat/completions"
-                response = await client.post(url, headers=headers, json=payload)
-                if response.status_code >= 400:
-                    detail = response.text[:1000]
-                    print(f"[ModelProviderService] chat error body: {detail}")
-                    err_msg = detail
-                    try:
-                        err_obj = response.json().get("error", {})
-                        if isinstance(err_obj, dict) and err_obj.get("message"):
-                            err_msg = err_obj["message"]
-                    except Exception:
-                        pass
-                    raise ValueError(f"模型 API 错误 ({response.status_code}): {err_msg}") from None
-                data = response.json()
+        with oi_span(
+            span_name,
+            attrs_for_llm_call(
+                model_name=model_name,
+                messages=messages,
+                tools=tools,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                source=source,
+            ),
+        ) as span:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                try:
+                    url = provider.base_url.rstrip("/") + "/chat/completions"
+                    response = await client.post(url, headers=headers, json=payload)
+                    if response.status_code >= 400:
+                        detail = response.text[:1000]
+                        print(f"[ModelProviderService] chat error body: {detail}")
+                        err_msg = detail
+                        try:
+                            err_obj = response.json().get("error", {})
+                            if isinstance(err_obj, dict) and err_obj.get("message"):
+                                err_msg = err_obj["message"]
+                        except Exception:
+                            pass
+                        raise ValueError(f"模型 API 错误 ({response.status_code}): {err_msg}") from None
+                    data = response.json()
 
-                result = dict(data)
-                choices = data.get("choices", [])
-                if choices:
-                    msg = choices[0].get("message", {})
-                    if msg.get("reasoning_content"):
-                        result["reasoning_content"] = msg["reasoning_content"]
-                    elif msg.get("thinking"):
-                        result["reasoning_content"] = msg["thinking"]
-                if record_enabled:
-                    record_call(
-                        model_name=model_name,
-                        messages=messages,
-                        tools=tools,
-                        max_tokens=max_tokens,
-                        temperature=temperature,
-                        completion=result,
-                        duration_ms=int((time.monotonic() - started) * 1000),
-                        source=source,
+                    result = dict(data)
+                    choices = data.get("choices", [])
+                    msg = {}
+                    if choices:
+                        msg = choices[0].get("message", {})
+                        if msg.get("reasoning_content"):
+                            result["reasoning_content"] = msg["reasoning_content"]
+                        elif msg.get("thinking"):
+                            result["reasoning_content"] = msg["thinking"]
+                    set_span_attrs(
+                        span,
+                        attrs_for_llm_call(
+                            model_name=model_name,
+                            messages=messages,
+                            tools=tools,
+                            max_tokens=max_tokens,
+                            temperature=temperature,
+                            output_content=msg.get("content"),
+                            output_tool_calls=msg.get("tool_calls"),
+                            usage=result.get("usage") or {},
+                            source=source,
+                        ),
                     )
-                return result
-            except httpx.ReadTimeout:
-                err = ValueError(
-                    f"模型服务响应超时（{read_timeout}s），请尝试简化 Skill 内容或增加超时时间"
-                )
-                if record_enabled:
-                    record_call(
-                        model_name=model_name,
-                        messages=messages,
-                        tools=tools,
-                        max_tokens=max_tokens,
-                        temperature=temperature,
-                        duration_ms=int((time.monotonic() - started) * 1000),
-                        source=source,
-                        raw_error=str(err),
+                    mark_span_ok(span)
+                    if record_enabled:
+                        record_call(
+                            model_name=model_name,
+                            messages=messages,
+                            tools=tools,
+                            max_tokens=max_tokens,
+                            temperature=temperature,
+                            completion=result,
+                            duration_ms=int((time.monotonic() - started) * 1000),
+                            source=source,
+                        )
+                    return result
+                except httpx.ReadTimeout:
+                    err = ValueError(
+                        f"模型服务响应超时（{read_timeout}s），请尝试简化 Skill 内容或增加超时时间"
                     )
-                raise err
-            except (httpx.ConnectTimeout, httpx.ConnectError) as e:
-                err = ValueError(
-                    f"无法连接模型服务（{type(e).__name__}），请检查网络或稍后重试"
-                )
-                print(f"[ModelProviderService] chat error for {provider.provider_code}: {err}")
-                if record_enabled:
-                    record_call(
-                        model_name=model_name,
-                        messages=messages,
-                        tools=tools,
-                        max_tokens=max_tokens,
-                        temperature=temperature,
-                        duration_ms=int((time.monotonic() - started) * 1000),
-                        source=source,
-                        raw_error=str(err),
+                    mark_span_error(span, str(err))
+                    set_span_attrs(
+                        span,
+                        attrs_for_llm_call(
+                            model_name=model_name,
+                            messages=messages,
+                            tools=tools,
+                            max_tokens=max_tokens,
+                            temperature=temperature,
+                            raw_error=str(err),
+                            source=source,
+                        ),
                     )
-                raise err
-            except Exception as e:
-                print(f"[ModelProviderService] chat error for {provider.provider_code}: {e}")
-                if record_enabled:
-                    record_call(
-                        model_name=model_name,
-                        messages=messages,
-                        tools=tools,
-                        max_tokens=max_tokens,
-                        temperature=temperature,
-                        duration_ms=int((time.monotonic() - started) * 1000),
-                        source=source,
-                        raw_error=str(e),
+                    if record_enabled:
+                        record_call(
+                            model_name=model_name,
+                            messages=messages,
+                            tools=tools,
+                            max_tokens=max_tokens,
+                            temperature=temperature,
+                            duration_ms=int((time.monotonic() - started) * 1000),
+                            source=source,
+                            raw_error=str(err),
+                        )
+                    raise err
+                except (httpx.ConnectTimeout, httpx.ConnectError) as e:
+                    err = ValueError(
+                        f"无法连接模型服务（{type(e).__name__}），请检查网络或稍后重试"
                     )
-                raise
+                    print(f"[ModelProviderService] chat error for {provider.provider_code}: {err}")
+                    mark_span_error(span, str(err))
+                    set_span_attrs(
+                        span,
+                        attrs_for_llm_call(
+                            model_name=model_name,
+                            messages=messages,
+                            tools=tools,
+                            max_tokens=max_tokens,
+                            temperature=temperature,
+                            raw_error=str(err),
+                            source=source,
+                        ),
+                    )
+                    if record_enabled:
+                        record_call(
+                            model_name=model_name,
+                            messages=messages,
+                            tools=tools,
+                            max_tokens=max_tokens,
+                            temperature=temperature,
+                            duration_ms=int((time.monotonic() - started) * 1000),
+                            source=source,
+                            raw_error=str(err),
+                        )
+                    raise err
+                except Exception as e:
+                    print(f"[ModelProviderService] chat error for {provider.provider_code}: {e}")
+                    mark_span_error(span, str(e))
+                    set_span_attrs(
+                        span,
+                        attrs_for_llm_call(
+                            model_name=model_name,
+                            messages=messages,
+                            tools=tools,
+                            max_tokens=max_tokens,
+                            temperature=temperature,
+                            raw_error=str(e),
+                            source=source,
+                        ),
+                    )
+                    if record_enabled:
+                        record_call(
+                            model_name=model_name,
+                            messages=messages,
+                            tools=tools,
+                            max_tokens=max_tokens,
+                            temperature=temperature,
+                            duration_ms=int((time.monotonic() - started) * 1000),
+                            source=source,
+                            raw_error=str(e),
+                        )
+                    raise
 
     @staticmethod
     async def health_check(provider: ModelProvider) -> bool:

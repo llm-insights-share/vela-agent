@@ -1316,11 +1316,15 @@ class AgentLoop:
         avail_names = {
             (getattr(t, "name", "") or "") for t in (available_tools or [])
         }
+        from services.builtin_tools import get_builtin_tools_for_runtime
+
+        builtin_names = {t.name for t in get_builtin_tools_for_runtime()}
         self.core_tool_names = resolve_core_tool_names(
             self.tool_loading_cfg,
             memory_enabled=self.memory_enabled,
             has_kb=has_kb,
             available_tool_names=avail_names,
+            builtin_tool_names=builtin_names,
         )
         # Session/agent-enabled connectors must be immediately callable (not deferred).
         self.core_tool_names |= {
@@ -1399,9 +1403,34 @@ class AgentLoop:
             self.story.add_memory(f"检索失败: {e}", hit=False)
 
     async def run(self, mode: str) -> Dict[str, Any]:
+        from models import gen_uuid
+        from services.monitor.oi_tracing import mark_span_error, mark_span_ok, oi_span, set_span_attrs
+        from services.monitor.openinference_attrs import attrs_for_agent
+        from services.monitor.otel_setup import is_otel_enabled
+        from services.monitor.span_buffer import end_turn_context, start_turn_context
+
         self._current_mode = mode
         self._run_metrics["execution_mode"] = mode
         intent_text = self._content_to_str(self.original_user_message or self.user_message)
+        run_id = gen_uuid()
+        start_turn_context(
+            run_id=run_id,
+            session_id=getattr(self.session, "session_id", "") or "",
+            agent_id=getattr(self.agent, "agent_id", "") or "",
+            user_id=getattr(self.session, "caller_id", "") or "",
+            otel_enabled=is_otel_enabled(),
+        )
+        agent_attrs = attrs_for_agent(
+            session_id=getattr(self.session, "session_id", "") or "",
+            user_id=getattr(self.session, "caller_id", "") or "",
+            agent_id=getattr(self.agent, "agent_id", "") or "",
+            input_text=intent_text[:4000],
+            metadata={
+                "version_id": getattr(self.session, "version_id", None),
+                "execution_mode": mode,
+                "vela.run_id": run_id,
+            },
+        )
         self.story.add_intent(intent_text[:400], skill=self.active_skill_name)
         if self.active_skill_name:
             self.story.add_skill_match(self.active_skill_name, self._run_metrics.get("skill_relevance"))
@@ -1416,26 +1445,74 @@ class AgentLoop:
             total_timeout = max(total_timeout, float(self.timeout_seconds))
         if self.active_skill_name:
             total_timeout = max(total_timeout, float(self.skill_budget.min_timeout_seconds))
-        try:
-            result = await asyncio.wait_for(
-                self._run_inner(mode),
-                timeout=total_timeout,
-            )
-            self._sync_run_metrics()
-            if isinstance(result.get("run_metrics"), dict):
-                result["run_metrics"] = dict(self._run_metrics)
-            return result
-        except asyncio.TimeoutError:
-            self._run_metrics["timed_out"] = True
-            self._sync_run_metrics()
-            self.thinking_log.append(f"[TIMEOUT] 整体执行超时（{total_timeout}s）")
-            self.story.add_error(f"整体执行超时（{total_timeout}s）")
-            return self._build_result(
-                f"任务执行超时（{total_timeout}s）。请尝试简化 Skill 内容或增加超时时间。",
-                "\n".join(self.thinking_log),
-                mode,
-                story_status="error",
-            )
+        result: Dict[str, Any]
+        with oi_span("agent.run", agent_attrs) as span:
+            try:
+                result = await asyncio.wait_for(
+                    self._run_inner(mode),
+                    timeout=total_timeout,
+                )
+                self._sync_run_metrics()
+                if isinstance(result.get("run_metrics"), dict):
+                    result["run_metrics"] = dict(self._run_metrics)
+                set_span_attrs(
+                    span,
+                    attrs_for_agent(
+                        session_id=getattr(self.session, "session_id", "") or "",
+                        user_id=getattr(self.session, "caller_id", "") or "",
+                        agent_id=getattr(self.agent, "agent_id", "") or "",
+                        input_text=intent_text[:4000],
+                        output_text=(result.get("content") or "")[:4000],
+                        metadata={
+                            "version_id": getattr(self.session, "version_id", None),
+                            "execution_mode": mode,
+                            "vela.run_id": run_id,
+                        },
+                    ),
+                )
+                if result.get("run_metrics", {}).get("timed_out") or (
+                    (result.get("execution_story") or {}).get("status") == "error"
+                ):
+                    mark_span_error(span, "agent run error")
+                else:
+                    mark_span_ok(span)
+            except asyncio.TimeoutError:
+                self._run_metrics["timed_out"] = True
+                self._sync_run_metrics()
+                self.thinking_log.append(f"[TIMEOUT] 整体执行超时（{total_timeout}s）")
+                self.story.add_error(f"整体执行超时（{total_timeout}s）")
+                mark_span_error(span, f"timeout {total_timeout}s")
+                result = self._build_result(
+                    f"任务执行超时（{total_timeout}s）。请尝试简化 Skill 内容或增加超时时间。",
+                    "\n".join(self.thinking_log),
+                    mode,
+                    story_status="error",
+                )
+        # AGENT span has ended and been buffered; persist if _build_result did not run yet
+        # (timeout path already persisted). end_turn_context is invoked inside record_agent_run.
+        if not result.get("monitor_run_id"):
+            try:
+                from services.monitor.trace_sink import record_agent_run
+                from services.llm_call_recorder import flush_to_session
+
+                flush_to_session(self.db, self.session)
+                rid = record_agent_run(
+                    self.db,
+                    session=self.session,
+                    agent=self.agent,
+                    result=result,
+                    story_status=(result.get("execution_story") or {}).get("status") or "done",
+                    success=(result.get("execution_story") or {}).get("status") != "error",
+                    started_at=getattr(self, "_run_wall_started_at", None),
+                    guard_events=list(getattr(self, "_guard_events", []) or []),
+                )
+                if rid:
+                    result["monitor_run_id"] = rid
+            except Exception:
+                end_turn_context()
+        else:
+            end_turn_context()
+        return result
 
     def _sync_run_metrics(self) -> None:
         """Fill elapsed/tool counters before result snapshot or Trace persist."""
@@ -1565,12 +1642,11 @@ class AgentLoop:
                 "5. 缺少依赖时用 install_packages 安装白名单内的包。\n"
             )
         if self.tool_loading_cfg.is_deferred() and self._deferred_tool_names():
-            core_list = ", ".join(sorted(self.core_tool_names))
             system_prompt += (
                 "\n\n【工具延迟加载 / Tool Search】\n"
-                f"当前可直接调用的核心工具：{core_list}。\n"
-                "其他已授权工具需先调用 tool_search(query=关键词) 搜索并激活后再使用。\n"
-                "不要猜测未激活工具的名称；若无命中请换关键词或使用 execute_code。\n"
+                "平台内置工具已全部出现在可用工具列表中，可直接调用，无需 tool_search。\n"
+                "tool_search 仅用于查找并激活用户安装（MCP/自定义）且尚未加载的工具。"
+                "不要猜测未激活工具的名称；若无命中请换关键词。\n"
                 "已激活的工具会在下一轮对话中出现在可用工具列表中。\n"
             )
         return system_prompt
@@ -2535,11 +2611,26 @@ class AgentLoop:
 
         result: Dict[str, Any]
         if isinstance(tool, BuiltinTool):
+            from services.monitor.oi_tracing import mark_span_error, mark_span_ok, oi_span, set_span_attrs
+            from services.monitor.openinference_attrs import attrs_for_tool
+
             if tool.name == "create_schedule_task":
-                try:
-                    result = await self._execute_create_schedule_task(args)
-                except Exception as e:
-                    result = {"success": False, "error": f"创建定时任务失败: {str(e)}"}
+                with oi_span(
+                    f"execute_tool.{tool.name}",
+                    attrs_for_tool(tool_name=tool.name, parameters=args),
+                ) as span:
+                    try:
+                        result = await self._execute_create_schedule_task(args)
+                    except Exception as e:
+                        result = {"success": False, "error": f"创建定时任务失败: {str(e)}"}
+                    set_span_attrs(
+                        span,
+                        attrs_for_tool(tool_name=tool.name, parameters=args, output=result),
+                    )
+                    if result.get("success") is False:
+                        mark_span_error(span, str(result.get("error") or ""))
+                    else:
+                        mark_span_ok(span)
                 self._memory_record_tool(tool.name, args, result)
                 return result
             if tool.name == "execute_code":
@@ -2549,10 +2640,22 @@ class AgentLoop:
                         "success": False,
                         "error": "同一段代码已连续失败 3 次。请换思路、简化问题，或检查数据与逻辑。",
                     }
-            try:
-                result = await execute_builtin_tool(tool.name, args, self.output_dir)
-            except Exception as e:
-                result = {"success": False, "error": f"内置工具执行失败: {str(e)}"}
+            with oi_span(
+                f"execute_tool.{tool.name}",
+                attrs_for_tool(tool_name=tool.name, parameters=args),
+            ) as span:
+                try:
+                    result = await execute_builtin_tool(tool.name, args, self.output_dir)
+                except Exception as e:
+                    result = {"success": False, "error": f"内置工具执行失败: {str(e)}"}
+                set_span_attrs(
+                    span,
+                    attrs_for_tool(tool_name=tool.name, parameters=args, output=result),
+                )
+                if result.get("success") is False:
+                    mark_span_error(span, str(result.get("error") or ""))
+                else:
+                    mark_span_ok(span)
             if tool.name == "execute_code":
                 if not result.get("success") and args.get("code"):
                     self._record_code_failure(args["code"])
@@ -2918,7 +3021,16 @@ class AgentLoop:
         ]
 
     def _deferred_tool_names(self) -> set:
-        return self.tool_catalog.all_names() - set(self.core_tool_names)
+        """User/MCP tools not in core — searchable via tool_search (excludes platform builtins)."""
+        deferred = set()
+        for name in self.tool_catalog.all_names():
+            if name in self.core_tool_names or name == "tool_search":
+                continue
+            entry = self.tool_catalog.get(name)
+            if entry is not None and entry.is_builtin:
+                continue
+            deferred.add(name)
+        return deferred
 
     async def _execute_tool_search(self, args: Dict[str, Any]) -> Dict[str, Any]:
         query = (args.get("query") or "").strip()
@@ -2936,6 +3048,11 @@ class AgentLoop:
         tool_types = args.get("tool_types")
         if isinstance(tool_types, str):
             tool_types = [tool_types]
+        # Platform builtins are never searchable; strip builtin filter if present
+        if isinstance(tool_types, list):
+            tool_types = [t for t in tool_types if str(t).lower() != "builtin"]
+            if not tool_types:
+                tool_types = None
 
         searchable = self._deferred_tool_names()
         matches = search_tools(
@@ -3763,27 +3880,36 @@ class AgentLoop:
                 pass
 
         try:
+            from services.monitor.span_buffer import get_turn_context
             from services.monitor.trace_sink import record_agent_run
             from services.llm_call_recorder import flush_to_session
 
-            # llm_calls live in recorder buffer until scope exit; flush before Trace persist
-            try:
-                flush_to_session(self.db, self.session)
-            except Exception:
-                pass
+            # When OpenInference turn context is active, defer persist to AgentLoop.run()
+            # after the AGENT root span ends (so the root span is buffered first).
+            turn = get_turn_context()
+            if turn is not None and turn.otel_enabled:
+                try:
+                    flush_to_session(self.db, self.session)
+                except Exception:
+                    pass
+            else:
+                try:
+                    flush_to_session(self.db, self.session)
+                except Exception:
+                    pass
 
-            run_id = record_agent_run(
-                self.db,
-                session=self.session,
-                agent=self.agent,
-                result=result,
-                story_status=story_status,
-                success=story_status != "error",
-                started_at=getattr(self, "_run_wall_started_at", None),
-                guard_events=list(self._guard_events),
-            )
-            if run_id:
-                result["monitor_run_id"] = run_id
+                run_id = record_agent_run(
+                    self.db,
+                    session=self.session,
+                    agent=self.agent,
+                    result=result,
+                    story_status=story_status,
+                    success=story_status != "error",
+                    started_at=getattr(self, "_run_wall_started_at", None),
+                    guard_events=list(self._guard_events),
+                )
+                if run_id:
+                    result["monitor_run_id"] = run_id
         except Exception:
             pass
 

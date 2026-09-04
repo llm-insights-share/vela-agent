@@ -98,23 +98,42 @@ async def maybe_run_judge(
         reply=run.summary or "",
         rubric="Quality, accuracy, helpfulness",
     )
-    try:
-        resp = await ModelProviderService.chat_completion(
-            provider,
-            model_svc.model_name,
-            [{"role": "user", "content": prompt}],
-            max_tokens=32,
-            temperature=0.0,
-            source="eval_judge",
-        )
-        content = (resp.get("choices") or [{}])[0].get("message", {}).get("content", "")
-        if not content:
-            content = resp.get("content") or ""
-        score_val = _parse_score(content)
-        if score_val is None:
+    from services.monitor.oi_tracing import mark_span_error, mark_span_ok, oi_span, set_span_attrs
+    from services.monitor.openinference_attrs import attrs_for_evaluator
+
+    with oi_span(
+        f"evaluator.{ev.name or 'llm_judge'}",
+        attrs_for_evaluator(name="llm_judge", input_text=prompt[:2000]),
+    ) as span:
+        try:
+            resp = await ModelProviderService.chat_completion(
+                provider,
+                model_svc.model_name,
+                [{"role": "user", "content": prompt}],
+                max_tokens=32,
+                temperature=0.0,
+                source="eval_judge",
+            )
+            content = (resp.get("choices") or [{}])[0].get("message", {}).get("content", "")
+            if not content:
+                content = resp.get("content") or ""
+            score_val = _parse_score(content)
+            if score_val is None:
+                mark_span_error(span, "parse score failed")
+                return None
+            set_span_attrs(
+                span,
+                attrs_for_evaluator(
+                    name="llm_judge",
+                    score=score_val,
+                    explanation=f"evaluator={ev.name}",
+                    input_text=prompt[:2000],
+                ),
+            )
+            mark_span_ok(span)
+        except Exception:
+            mark_span_error(span, "judge failed")
             return None
-    except Exception:
-        return None
 
     row = AgentScore(
         score_id=gen_uuid(),
@@ -126,6 +145,15 @@ async def maybe_run_judge(
         comment=f"evaluator={ev.name}",
     )
     db.add(row)
+    # Attach OpenInference evaluations.* onto run attrs for export
+    try:
+        attrs = dict(run.attrs_json or {})
+        attrs["evaluations.0.evaluation.name"] = "llm_judge"
+        attrs["evaluations.0.evaluation.score"] = float(score_val)
+        attrs["evaluations.0.evaluation.explanation"] = f"evaluator={ev.name}"
+        run.attrs_json = attrs
+    except Exception:
+        pass
     db.commit()
     return row
 

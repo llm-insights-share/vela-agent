@@ -11,6 +11,11 @@ def gen_uuid():
     return str(uuid.uuid4())
 
 
+def gen_trace_id() -> str:
+    """W3C-compatible 32-char lowercase hex trace id."""
+    return uuid.uuid4().hex
+
+
 def now_utc():
     return datetime.now(timezone.utc)
 

@@ -1,4 +1,4 @@
-"""Optional export adapters (OTel / Langfuse stub)."""
+"""Export adapters: OpenInference-compliant JSON + optional Langfuse stub."""
 
 from __future__ import annotations
 
@@ -6,9 +6,15 @@ import json
 import os
 from typing import Any, Dict, List
 
+from services.monitor.openinference_attrs import oi_kind_from_legacy
+
 
 def export_run_otel_json(run: Dict[str, Any], spans: List[Dict[str, Any]]) -> str:
-    """Minimal OTel-compatible JSON for external collectors."""
+    """OpenInference-oriented JSON (debug download; not OTLP protobuf).
+
+    Each span includes `openinference.span.kind` and flattened semantic attributes.
+    Runtime OTLP export (if configured) goes through the SDK BatchSpanProcessor.
+    """
     resource = {
         "service.name": "vela-agent",
         "agent.id": run.get("agent_id"),
@@ -16,28 +22,56 @@ def export_run_otel_json(run: Dict[str, Any], spans: List[Dict[str, Any]]) -> st
     }
     otel_spans = []
     for s in spans:
+        attrs = dict(s.get("attrs_json") or {})
+        oi_kind = (
+            s.get("openinference_span_kind")
+            or attrs.get("openinference.span.kind")
+            or oi_kind_from_legacy(s.get("kind") or "")
+        )
+        attrs["openinference.span.kind"] = oi_kind
+        # Promote session/user from run when missing on span
+        if run.get("session_id") and "session.id" not in attrs:
+            attrs["session.id"] = run["session_id"]
+        if run.get("caller_id") and "user.id" not in attrs:
+            attrs["user.id"] = run["caller_id"]
+        # Merge run-level evaluations if present
+        run_attrs = run.get("attrs_json") or {}
+        for k, v in run_attrs.items():
+            if str(k).startswith("evaluations.") and k not in attrs:
+                attrs[k] = v
+
         otel_spans.append(
             {
                 "trace_id": run.get("trace_id") or run.get("run_id"),
                 "span_id": s.get("span_id"),
                 "parent_span_id": s.get("parent_span_id") or None,
                 "name": s.get("name"),
-                "kind": s.get("kind"),
+                "openinference.span.kind": oi_kind,
+                "kind": s.get("kind"),  # legacy UI column
                 "start_time": s.get("started_at"),
                 "duration_ms": s.get("duration_ms"),
-                "attributes": s.get("attrs_json") or {},
+                "attributes": attrs,
                 "status": s.get("status"),
             }
         )
-    payload = {"resource": resource, "spans": otel_spans, "run": run}
+    payload = {
+        "format": "openinference-json",
+        "note": "Semantic OpenInference attributes; use OTLP exporter for collector ingest.",
+        "resource": resource,
+        "spans": otel_spans,
+        "run": run,
+    }
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
 def maybe_dual_write_langfuse(run: Dict[str, Any], spans: List[Dict[str, Any]]) -> None:
-    """No-op unless LANGFUSE_PUBLIC_KEY is configured."""
+    """No-op unless LANGFUSE_PUBLIC_KEY is configured.
+
+    Prefer configuring OTEL_EXPORTER_OTLP_ENDPOINT to a Langfuse/Phoenix OTLP
+    endpoint instead of a proprietary SDK dual-write.
+    """
     if not os.getenv("LANGFUSE_PUBLIC_KEY"):
         return
-    # Placeholder: integrate Langfuse SDK when credentials present.
     _ = export_run_otel_json(run, spans)
 
 

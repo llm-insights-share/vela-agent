@@ -170,6 +170,78 @@ def update_tool_search_config(data: ToolSearchConfigUpdate):
     return {"message": "Tool Search 配置已保存", **config["tools"]["tool_search"]}
 
 
+class ObservabilityConfigUpdate(BaseModel):
+    otel_enabled: bool = True
+    otlp_endpoint: str = ""
+    success_sample_rate: float = 1.0
+
+
+@router.get("/observability")
+def get_observability_config():
+    from services.monitor.otel_setup import _load_observability_config
+
+    cfg = _load_observability_config()
+    env_endpoint = (os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT") or "").strip()
+    env_disabled = os.getenv("OTEL_SDK_DISABLED", "").lower() in ("1", "true", "yes")
+    # Prefer values stored in yaml for the form (env may override at runtime)
+    stored = _load_config().get("observability") or {}
+    return {
+        "otel_enabled": bool(stored.get("otel_enabled", cfg.get("otel_enabled", True))),
+        "otlp_endpoint": str(stored.get("otlp_endpoint") or ""),
+        "success_sample_rate": float(
+            stored.get("success_sample_rate", cfg.get("success_sample_rate", 1.0))
+        ),
+        "effective_otlp_endpoint": cfg.get("otlp_endpoint") or "",
+        "endpoint_from_env": bool(env_endpoint),
+        "sdk_disabled_by_env": env_disabled,
+        "runtime_otel_enabled": bool(cfg.get("otel_enabled", True)) and not env_disabled,
+    }
+
+
+@router.put("/observability")
+def update_observability_config(data: ObservabilityConfigUpdate):
+    endpoint = (data.otlp_endpoint or "").strip()
+    rate = float(data.success_sample_rate if data.success_sample_rate is not None else 1.0)
+    rate = max(0.0, min(rate, 1.0))
+
+    config = _load_config()
+    config["observability"] = {
+        "otel_enabled": bool(data.otel_enabled),
+        "otlp_endpoint": endpoint,
+        "success_sample_rate": rate,
+    }
+    _save_config(config)
+
+    # Hot-reload TracerProvider so Phoenix endpoint takes effect without full process restart
+    reload_ok = True
+    reload_error = ""
+    try:
+        from services.monitor.otel_setup import setup_tracer_provider
+
+        setup_tracer_provider(force=True)
+    except Exception as e:
+        reload_ok = False
+        reload_error = str(e)
+
+    msg = "可观测性配置已保存"
+    if endpoint and data.otel_enabled:
+        msg += "；OTLP 已热加载指向 Phoenix/Collector"
+    elif not data.otel_enabled:
+        msg += "；OpenTelemetry 埋点已关闭"
+    else:
+        msg += "；未配置 OTLP 时仅本地双写 Monitor"
+    if not reload_ok:
+        msg += f"（热加载失败，请重启后端: {reload_error}）"
+
+    return {
+        "message": msg,
+        "otel_enabled": bool(data.otel_enabled),
+        "otlp_endpoint": endpoint,
+        "success_sample_rate": rate,
+        "reload_ok": reload_ok,
+    }
+
+
 @router.get("/code-exec", response_model=CodeExecConfigResponse)
 def get_code_exec_config():
     from services.code_exec.config import load_code_exec_config

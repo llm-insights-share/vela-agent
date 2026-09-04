@@ -41,14 +41,15 @@ memory:
     gateway_base: http://127.0.0.1:8000
     gateway_token: vela-local-gateway
     password: vela-letta-dev
+observability:
+  otel_enabled: true
+  otlp_endpoint: http://127.0.0.1:6006
+  success_sample_rate: 1.0
 tools:
   tavily:
     api_key: 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
   tool_search:
-    always_loaded:
-    - tool_search
-    - web_extract
-    - execute_code
+    always_loaded: []
     enabled: true
     max_loaded_per_session: 12
     max_results: 3

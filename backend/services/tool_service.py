@@ -34,20 +34,53 @@ class ToolExecutionService:
     async def execute_tool(
         self, tool: Tool, parameters: Dict[str, Any], timeout_seconds: int = 60
     ) -> Dict[str, Any]:
-        try:
-            config = tool.config or {}
-            if self._is_dataquery_tool(tool, config):
-                return await self._execute_dataquery_agent(tool, parameters)
-            if tool.tool_type == ToolType.MCP:
-                return await self._execute_mcp(tool, parameters, timeout_seconds)
-            elif tool.tool_type == ToolType.RESTFUL:
-                return await self._execute_restful(tool, parameters, timeout_seconds)
-            elif tool.tool_type == ToolType.LOCAL_PYTHON:
-                return await self._execute_local_python(tool, parameters, timeout_seconds)
-            else:
-                return {"success": False, "error": f"不支持的工具类型: {tool.tool_type}"}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+        from services.monitor.oi_tracing import mark_span_error, mark_span_ok, oi_span, set_span_attrs
+        from services.monitor.openinference_attrs import attrs_for_tool
+
+        tool_name = getattr(tool, "name", "") or "unknown"
+        desc = getattr(tool, "description", "") or ""
+        with oi_span(
+            f"execute_tool.{tool_name}",
+            attrs_for_tool(tool_name=tool_name, tool_description=desc, parameters=parameters),
+        ) as span:
+            try:
+                config = tool.config or {}
+                if self._is_dataquery_tool(tool, config):
+                    result = await self._execute_dataquery_agent(tool, parameters)
+                elif tool.tool_type == ToolType.MCP:
+                    result = await self._execute_mcp(tool, parameters, timeout_seconds)
+                elif tool.tool_type == ToolType.RESTFUL:
+                    result = await self._execute_restful(tool, parameters, timeout_seconds)
+                elif tool.tool_type == ToolType.LOCAL_PYTHON:
+                    result = await self._execute_local_python(tool, parameters, timeout_seconds)
+                else:
+                    result = {"success": False, "error": f"不支持的工具类型: {tool.tool_type}"}
+                set_span_attrs(
+                    span,
+                    attrs_for_tool(
+                        tool_name=tool_name,
+                        tool_description=desc,
+                        parameters=parameters,
+                        output=result,
+                    ),
+                )
+                if isinstance(result, dict) and result.get("success") is False:
+                    mark_span_error(span, str(result.get("error") or "tool failed"))
+                else:
+                    mark_span_ok(span)
+                return result
+            except Exception as e:
+                mark_span_error(span, str(e))
+                set_span_attrs(
+                    span,
+                    attrs_for_tool(
+                        tool_name=tool_name,
+                        tool_description=desc,
+                        parameters=parameters,
+                        output={"success": False, "error": str(e)},
+                    ),
+                )
+                return {"success": False, "error": str(e)}
 
     @staticmethod
     def _is_dataquery_tool(tool: Tool, config: Dict[str, Any]) -> bool:
