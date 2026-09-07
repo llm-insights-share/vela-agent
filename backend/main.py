@@ -207,6 +207,15 @@ async def on_startup():
     finally:
         db.close()
 
+    if os.environ.get("VELA_SEED_DEMO", "").strip() in ("1", "true", "TRUE", "yes", "YES"):
+        try:
+            from scripts.seed_demo import seed_all
+
+            summary = seed_all()
+            print(f"[startup] demo seed ok: agents={list((summary.get('agents') or {}).keys())}")
+        except Exception as e:
+            print(f"[startup] demo seed skipped/failed: {e}")
+
 
 @app.on_event("shutdown")
 async def on_shutdown():

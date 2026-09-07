@@ -57,3 +57,5 @@ backend/letta/.letta/
 *.bin
 *.safetensors
 *.onnx
+demos/**/outbox/*
+!.gitkeep
