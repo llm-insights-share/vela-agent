@@ -112,6 +112,7 @@ export const serviceApi = {
   create: (data) => api.post('/model-services', data),
   update: (id, data) => api.put(`/model-services/${id}`, data),
   delete: (id) => api.delete(`/model-services/${id}`),
+  test: (id) => api.post(`/model-services/${id}/test`),
 }
 
 export const skillApi = {

@@ -16,7 +16,10 @@
                 <div class="dq-agent-row">
                   <div><strong>{{ item.name }}</strong></div>
                   <div class="meta-line">{{ item.status }} · {{ item.model_service_id }}</div>
-                  <a class="dq-chat-test-link" @click.stop="openChatTest(item)">对话测试</a>
+                  <div class="dq-agent-actions">
+                    <a class="dq-chat-test-link" @click.stop="openChatTest(item)">对话测试</a>
+                    <a class="dq-delete-link" @click.stop="deleteAgent(item)">删除</a>
+                  </div>
                 </div>
               </a-list-item>
             </template>
@@ -486,6 +489,23 @@ async function loadAgents() {
   if (!currentAgentId.value && agents.value.length) {
     selectAgent(agents.value[0])
   }
+}
+
+function deleteAgent(item) {
+  Modal.confirm({
+    title: '确认删除该 DataQueryAgent？',
+    content: item.name,
+    okType: 'danger',
+    onOk: async () => {
+      await dataQueryApi.deleteAgent(item.dq_agent_id)
+      message.success('已删除')
+      if (currentAgentId.value === item.dq_agent_id) {
+        currentAgentId.value = ''
+        currentAgent.value = null
+      }
+      await loadAgents()
+    },
+  })
 }
 
 async function selectAgent(agent) {
@@ -1269,9 +1289,18 @@ onMounted(async () => {
   flex-direction: column;
   align-items: flex-start;
 }
-.dq-chat-test-link {
+.dq-agent-actions {
   margin-top: 6px;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+.dq-chat-test-link {
   font-size: 13px;
+}
+.dq-delete-link {
+  font-size: 13px;
+  color: #b5341c;
 }
 .active {
   background: #f0f5ff;

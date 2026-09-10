@@ -111,11 +111,9 @@ def update_dataquery_agent(dq_agent_id: str, payload: DataQueryAgentUpdate, db: 
 
 @router.delete("/{dq_agent_id}")
 def delete_dataquery_agent(dq_agent_id: str, db: Session = Depends(get_db)):
-    item = db.query(DataQueryAgent).filter(DataQueryAgent.dq_agent_id == dq_agent_id).first()
-    if not item:
+    deleted = dataquery_service.delete_agent_cascade(db, dq_agent_id)
+    if not deleted:
         raise HTTPException(status_code=404, detail="DataQueryAgent 不存在")
-    db.delete(item)
-    db.commit()
     return {"success": True, "message": "已删除"}
 
 

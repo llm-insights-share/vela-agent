@@ -302,6 +302,21 @@ def _migrate_db():
             )
 
     cursor.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='model_services'"
+    )
+    if cursor.fetchone():
+        cursor.execute("PRAGMA table_info(model_services)")
+        ms_cols = {row[1] for row in cursor.fetchall()}
+        if "last_test_ok" not in ms_cols:
+            cursor.execute("ALTER TABLE model_services ADD COLUMN last_test_ok BOOLEAN")
+        if "last_tested_at" not in ms_cols:
+            cursor.execute("ALTER TABLE model_services ADD COLUMN last_tested_at DATETIME")
+        if "last_test_error" not in ms_cols:
+            cursor.execute(
+                "ALTER TABLE model_services ADD COLUMN last_test_error TEXT DEFAULT ''"
+            )
+
+    cursor.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='agent_connector_bindings'"
     )
     if not cursor.fetchone():

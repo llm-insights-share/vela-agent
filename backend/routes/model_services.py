@@ -215,6 +215,62 @@ def update_model_service(model_service_id: str, data: ModelServiceUpdate, db: Se
     return ModelServiceResponse.model_validate(svc)
 
 
+@router.post("/model-services/{model_service_id}/test")
+async def test_model_service(model_service_id: str, db: Session = Depends(get_db)):
+    import time
+
+    svc = db.query(ModelService).filter(
+        ModelService.model_service_id == model_service_id
+    ).first()
+    if not svc:
+        raise HTTPException(status_code=404, detail="模型服务不存在")
+    provider = db.query(ModelProvider).filter(
+        ModelProvider.provider_id == svc.provider_id
+    ).first()
+    if not provider:
+        raise HTTPException(status_code=404, detail="供应商不存在")
+
+    started = time.monotonic()
+    try:
+        completion = await model_provider_service.chat_completion(
+            provider,
+            svc.model_name,
+            messages=[{"role": "user", "content": "你好"}],
+            max_tokens=32,
+            temperature=0,
+            timeout_seconds=30,
+            source="model_service_test",
+        )
+        latency_ms = int((time.monotonic() - started) * 1000)
+        reply = ""
+        choices = completion.get("choices") or []
+        if choices:
+            reply = (choices[0].get("message") or {}).get("content") or ""
+        svc.last_test_ok = True
+        svc.last_tested_at = now_utc()
+        svc.last_test_error = ""
+        db.commit()
+        return {
+            "success": True,
+            "reply": reply,
+            "latency_ms": latency_ms,
+            "model_name": svc.model_name,
+        }
+    except Exception as e:
+        latency_ms = int((time.monotonic() - started) * 1000)
+        err = str(e) or type(e).__name__
+        svc.last_test_ok = False
+        svc.last_tested_at = now_utc()
+        svc.last_test_error = err
+        db.commit()
+        return {
+            "success": False,
+            "error": err,
+            "latency_ms": latency_ms,
+            "model_name": svc.model_name,
+        }
+
+
 @router.delete("/model-services/{model_service_id}")
 def delete_model_service(model_service_id: str, db: Session = Depends(get_db)):
     svc = db.query(ModelService).filter(

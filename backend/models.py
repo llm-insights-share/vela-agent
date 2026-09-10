@@ -125,6 +125,9 @@ class ModelService(Base):
     max_tokens = Column(Integer, default=4096)
     capabilities = Column(JSON, default=list)
     status = Column(SAEnum(ModelServiceStatus), default=ModelServiceStatus.ACTIVE)
+    last_test_ok = Column(Boolean, nullable=True)
+    last_tested_at = Column(DateTime, nullable=True)
+    last_test_error = Column(Text, default="")
     created_at = Column(DateTime, default=now_utc)
     updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)
 

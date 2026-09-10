@@ -36,9 +36,22 @@
           <template v-if="column.key === 'capabilities'">
             <a-tag v-for="c in record.capabilities || []" :key="c" color="blue">{{ c }}</a-tag>
           </template>
+          <template v-if="column.key === 'connection'">
+            <a-tooltip v-if="record.last_test_ok === true" title="连接正常">
+              <CheckOutlined style="color: #52c41a; font-size: 16px" />
+            </a-tooltip>
+            <a-tooltip v-else-if="record.last_test_ok === false" :title="record.last_test_error || '连接失败'">
+              <CloseOutlined style="color: #ff4d4f; font-size: 16px" />
+            </a-tooltip>
+            <span v-else style="color: #bfbfbf; font-size: 16px; font-weight: 600">-</span>
+          </template>
           <template v-if="column.key === 'action'">
             <a-space>
               <a @click="openEdit(record)">编辑</a>
+              <a
+                :style="{ color: testingId === record.model_service_id ? '#999' : undefined, pointerEvents: testingId === record.model_service_id ? 'none' : 'auto' }"
+                @click="handleTestConnection(record)"
+              >{{ testingId === record.model_service_id ? '测试中…' : '连接测试' }}</a>
               <a-popconfirm title="确认删除?" @confirm="handleDelete(record.model_service_id)">
                 <a style="color: #b5341c">删除</a>
               </a-popconfirm>
@@ -71,11 +84,12 @@
 
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
-import { PlusOutlined } from '@ant-design/icons-vue'
+import { PlusOutlined, CheckOutlined, CloseOutlined } from '@ant-design/icons-vue'
 import { serviceApi, providerApi } from '../../api'
 import { message } from 'ant-design-vue'
 
 const loading = ref(false)
+const testingId = ref('')
 const services = ref([])
 const providers = ref([])
 const filterProviderId = ref('')
@@ -91,7 +105,8 @@ const columns = [
   { title: '最大 Token', dataIndex: 'max_tokens' },
   { title: '能力', key: 'capabilities' },
   { title: '状态', key: 'status', width: 100 },
-  { title: '操作', key: 'action', width: 150 },
+  { title: '连接', key: 'connection', width: 80 },
+  { title: '操作', key: 'action', width: 220 },
 ]
 
 const form = reactive({
@@ -187,6 +202,25 @@ async function handleDelete(id) {
     await fetchServices()
   } catch (e) {
     message.error(e.message)
+  }
+}
+
+async function handleTestConnection(record) {
+  if (testingId.value) return
+  testingId.value = record.model_service_id
+  try {
+    const res = await serviceApi.test(record.model_service_id)
+    if (res.success) {
+      message.success(`连接成功${res.latency_ms != null ? `（${res.latency_ms}ms）` : ''}`)
+    } else {
+      message.error(res.error || '连接失败')
+    }
+    await fetchServices()
+  } catch (e) {
+    message.error(e.message)
+    await fetchServices()
+  } finally {
+    testingId.value = ''
   }
 }
 </script>

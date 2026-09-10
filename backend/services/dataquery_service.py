@@ -308,6 +308,37 @@ class DataQueryService:
         dataquery_example_index.invalidate(dq_agent_id)
 
     @staticmethod
+    def delete_agent_cascade(db: Session, dq_agent_id: str) -> bool:
+        """Delete DataQueryAgent and all child rows. Returns False if not found."""
+        item = db.query(DataQueryAgent).filter(DataQueryAgent.dq_agent_id == dq_agent_id).first()
+        if not item:
+            return False
+
+        # Feedback references execution logs; delete first.
+        db.query(DataQueryFeedback).filter(DataQueryFeedback.dq_agent_id == dq_agent_id).delete(
+            synchronize_session=False
+        )
+        db.query(DataQueryExecutionLog).filter(DataQueryExecutionLog.dq_agent_id == dq_agent_id).delete(
+            synchronize_session=False
+        )
+        for model in (
+            DataQueryDatasourceBinding,
+            DataTableDictionary,
+            DataDictionaryItem,
+            DataCodeMapping,
+            DataQueryExample,
+            DataTermMapping,
+            DataQueryQualityStats,
+        ):
+            db.query(model).filter(model.dq_agent_id == dq_agent_id).delete(synchronize_session=False)
+
+        db.delete(item)
+        db.commit()
+        DataQueryService.invalidate_schema_cache(dq_agent_id)
+        DataQueryService.invalidate_example_index(dq_agent_id)
+        return True
+
+    @staticmethod
     def _build_schema_snapshot(
         db: Session,
         dq_agent_id: str,

@@ -38,39 +38,51 @@
             <pre class="prompt-pre">{{ agent.system_prompt || '(空)' }}</pre>
           </a-card>
           <a-card title="技能与知识库" style="margin-bottom: 16px">
-            <a-descriptions :column="1" size="small">
-              <a-descriptions-item label="Skill 包">
-                <a-tag v-for="(name, i) in (agent.skill_pack_names || [])" :key="(agent.skill_pack_ids || [])[i] || i" color="blue">{{ name }}</a-tag>
-                <span v-if="!agent.skill_pack_names?.length" style="color: #9e9590">无</span>
-              </a-descriptions-item>
-              <a-descriptions-item label="知识库">
-                <a-tag v-for="(name, i) in (agent.knowledge_base_names || [])" :key="(agent.knowledge_base_ids || [])[i] || i" color="green">{{ name }}</a-tag>
-                <span v-if="!agent.knowledge_base_names?.length" style="color: #9e9590">无</span>
-              </a-descriptions-item>
-              <a-descriptions-item label="工具">
-                <a-tag v-for="(name, i) in (agent.tool_names || [])" :key="(agent.tool_ids || [])[i] || i" color="orange">{{ name }}</a-tag>
-                <span v-if="!agent.tool_names?.length" style="color: #9e9590">无</span>
-              </a-descriptions-item>
-              <a-descriptions-item label="连接器">
-                <template v-if="(agent.connector_bindings || []).length">
-                  <div v-for="b in agent.connector_bindings" :key="b.catalog_key" style="margin-bottom: 6px;">
-                    <a-tag :color="String(b.catalog_key || '').startsWith('mcp:') ? 'purple' : 'blue'">
-                      {{ b.display_name || b.catalog_key }}
-                    </a-tag>
-                    <span style="font-size: 12px; color: #666;">
-                      审批:
-                      {{
-                        (b.tools || [])
-                          .filter((t) => t.require_approval)
-                          .map((t) => t.mcp_tool_name)
-                          .join(', ') || '无'
-                      }}
-                    </span>
-                  </div>
-                </template>
-                <span v-else style="color: #9e9590">无</span>
-              </a-descriptions-item>
-            </a-descriptions>
+            <div class="binding-list">
+              <div class="binding-row">
+                <div class="binding-label">Skill 包</div>
+                <div class="binding-tags">
+                  <a-tag v-for="(name, i) in (agent.skill_pack_names || [])" :key="(agent.skill_pack_ids || [])[i] || i" color="blue">{{ name }}</a-tag>
+                  <span v-if="!agent.skill_pack_names?.length" class="binding-empty">无</span>
+                </div>
+              </div>
+              <div class="binding-row">
+                <div class="binding-label">知识库</div>
+                <div class="binding-tags">
+                  <a-tag v-for="(name, i) in (agent.knowledge_base_names || [])" :key="(agent.knowledge_base_ids || [])[i] || i" color="green">{{ name }}</a-tag>
+                  <span v-if="!agent.knowledge_base_names?.length" class="binding-empty">无</span>
+                </div>
+              </div>
+              <div class="binding-row">
+                <div class="binding-label">工具</div>
+                <div class="binding-tags">
+                  <a-tag v-for="(name, i) in (agent.tool_names || [])" :key="(agent.tool_ids || [])[i] || i" color="orange">{{ name }}</a-tag>
+                  <span v-if="!agent.tool_names?.length" class="binding-empty">无</span>
+                </div>
+              </div>
+              <div class="binding-row">
+                <div class="binding-label">连接器</div>
+                <div class="binding-tags">
+                  <template v-if="(agent.connector_bindings || []).length">
+                    <div v-for="b in agent.connector_bindings" :key="b.catalog_key" class="binding-connector-item">
+                      <a-tag :color="String(b.catalog_key || '').startsWith('mcp:') ? 'purple' : 'blue'">
+                        {{ b.display_name || b.catalog_key }}
+                      </a-tag>
+                      <span class="binding-connector-meta">
+                        审批:
+                        {{
+                          (b.tools || [])
+                            .filter((t) => t.require_approval)
+                            .map((t) => t.mcp_tool_name)
+                            .join(', ') || '无'
+                        }}
+                      </span>
+                    </div>
+                  </template>
+                  <span v-else class="binding-empty">无</span>
+                </div>
+              </div>
+            </div>
           </a-card>
           <a-card title="标签" style="margin-bottom: 16px">
             <a-tag v-for="t in agent.tags || []" :key="t">{{ t }}</a-tag>
@@ -244,4 +256,43 @@ onMounted(fetchAgent)
 .page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
 .page-title { font-family: 'Noto Serif SC', serif; font-size: 22px; font-weight: 700; color: #1a1714; margin: 0; }
 .prompt-pre { white-space: pre-wrap; font-size: 12px; color: #3a342e; background: #f3f0e8; padding: 12px; border-radius: 6px; max-height: 200px; overflow-y: auto; }
+.binding-list { display: flex; flex-direction: column; gap: 10px; }
+.binding-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  min-width: 0;
+}
+.binding-label {
+  flex: 0 0 64px;
+  width: 64px;
+  color: rgba(0, 0, 0, 0.45);
+  font-size: 14px;
+  line-height: 22px;
+  text-align: right;
+}
+.binding-tags {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  overflow: hidden;
+}
+.binding-tags :deep(.ant-tag) {
+  margin-inline-end: 0;
+  max-width: 100%;
+  white-space: normal;
+  word-break: break-all;
+}
+.binding-empty { color: #9e9590; }
+.binding-connector-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+}
+.binding-connector-meta { font-size: 12px; color: #666; }
 </style>

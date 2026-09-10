@@ -64,6 +64,9 @@ class ModelServiceResponse(BaseModel):
     max_tokens: int = 4096
     capabilities: List[str] = []
     status: str = "ACTIVE"
+    last_test_ok: Optional[bool] = None
+    last_tested_at: Optional[datetime] = None
+    last_test_error: str = ""
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
