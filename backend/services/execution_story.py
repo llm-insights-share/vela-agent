@@ -221,6 +221,28 @@ class ExecutionStoryBuilder:
         self.add_step("deliver", "thought", note, status="ok")
         self.complete_phase("deliver", note)
 
+    def snapshot(self) -> Dict[str, Any]:
+        """Mid-run snapshot without mutating phase status."""
+        elapsed_ms = int((time.monotonic() - self._started) * 1000)
+        return {
+            "version": 1,
+            "status": self.status or "running",
+            "summary": self.summary or self._auto_summary() or "进行中",
+            "phases": [
+                {
+                    **self.phases[pid],
+                    "steps": list(self.phases[pid].get("steps") or []),
+                }
+                for pid, _ in PHASE_DEFS
+                if self.phases[pid]["status"] != "skipped" or self.phases[pid]["steps"]
+            ],
+            "metrics": {
+                "elapsed_ms": elapsed_ms,
+                "tool_calls": self._tool_count,
+                "iterations": self._iteration,
+            },
+        }
+
     def finalize(
         self,
         *,
@@ -257,7 +279,6 @@ class ExecutionStoryBuilder:
             "phases": [self.phases[pid] for pid, _ in PHASE_DEFS if self.phases[pid]["status"] != "skipped" or self.phases[pid]["steps"]],
             "metrics": m,
         }
-
     def _auto_summary(self) -> str:
         parts: List[str] = []
         for pid, title in PHASE_DEFS:
@@ -319,3 +340,138 @@ class ExecutionStoryBuilder:
         if status == "done" and builder.status == "running":
             builder.add_deliver()
         return builder.finalize(status=status if builder.status == "running" else builder.status)
+
+    @classmethod
+    def from_coordinator(
+        cls,
+        audit_trail: Optional[List[Dict[str, Any]]] = None,
+        thinking_log: Optional[List[str]] = None,
+        *,
+        user_message: str = "",
+        status: str = "done",
+        hitl: bool = False,
+        metrics: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Build a multi-agent story: understand → act (dispatch/roles) → verify/deliver."""
+        builder = cls()
+        if user_message:
+            builder.add_intent(user_message[:200])
+        else:
+            for line in thinking_log or []:
+                if line.startswith("[Coordinator] 开始处理用户任务:"):
+                    builder.add_intent(line.split(":", 1)[-1].strip()[:200])
+                    break
+            if not builder.phases["understand"]["steps"]:
+                builder.add_step("understand", "intent", "多 Agent 协作任务", status="ok")
+                builder.complete_phase("understand", "已启动协调")
+
+        # Role roster from thinking log
+        for line in thinking_log or []:
+            if "可用子 Agent:" in line:
+                builder.add_step(
+                    "understand",
+                    "thought",
+                    "可用角色",
+                    detail=line,
+                    status="ok",
+                )
+                break
+
+        trail = audit_trail or []
+        if trail:
+            builder.ensure_phase("act", active=True)
+            for i, entry in enumerate(trail):
+                role = (
+                    entry.get("role_name")
+                    or entry.get("receiver_name")
+                    or entry.get("receiver")
+                    or "子 Agent"
+                )
+                if isinstance(role, str) and len(role) > 36 and "-" in role:
+                    # likely a raw agent_id — keep short
+                    role_label = role[:8] + "…"
+                else:
+                    role_label = str(role)
+                rnd = entry.get("round")
+                ok = bool(entry.get("success", True))
+                task = (entry.get("task") or "").strip()
+                title = f"第 {rnd} 轮 · {role_label}" if rnd else role_label
+                if not ok:
+                    title = f"{title}（失败）"
+                detail_parts = []
+                if task:
+                    detail_parts.append(f"任务: {task}")
+                if entry.get("duration_ms") is not None:
+                    detail_parts.append(f"耗时 {entry['duration_ms']}ms")
+                if entry.get("tokens"):
+                    detail_parts.append(f"Token {entry['tokens']}")
+                err = entry.get("error") or entry.get("result_preview")
+                if err:
+                    detail_parts.append(str(err)[:500])
+                step = builder.add_step(
+                    "act",
+                    "tool" if ok else "error",
+                    title,
+                    detail="\n".join(detail_parts),
+                    tool_name=role_label,
+                    status="ok" if ok else "fail",
+                    duration_ms=entry.get("duration_ms"),
+                )
+                step["role_name"] = role_label
+                step["round"] = rnd
+                step["kind"] = "dispatch"
+            builder.complete_phase(
+                "act",
+                f"已调度 {len(trail)} 次子 Agent 调用",
+            )
+        else:
+            # Fallback: parse coordinator thinking lines for dispatch hints
+            for line in thinking_log or []:
+                if line.startswith("[Coordinator] 调度轮次"):
+                    builder.add_step("act", "thought", line[:100], detail=line, status="ok")
+                elif "分派" in line or "执行子" in line:
+                    builder.add_step("act", "dispatch", line[:80], detail=line, status="ok")
+
+        if hitl or status == "hitl_wait":
+            builder.add_step(
+                "verify",
+                "hitl",
+                "交付物等待审批",
+                detail="多 Agent 汇总结果待人工确认后交付",
+                tool_name="__delivery__",
+                status="pending",
+            )
+            builder.status = "hitl_wait"
+            builder.summary = "已完成协作 · 待交付审批"
+            builder.phases["verify"]["status"] = "hitl"
+            builder.phases["verify"]["summary"] = "待交付审批"
+        else:
+            # Summarize / deliver markers from thinking
+            for line in thinking_log or []:
+                if "汇总" in line or "任务完成" in line or "直接回复" in line:
+                    builder.add_step("deliver", "thought", line[:100], detail=line, status="ok")
+            if not builder.phases["deliver"]["steps"]:
+                builder.add_deliver("已汇总多 Agent 结果")
+            else:
+                builder.complete_phase("deliver", "已汇总交付")
+
+        m = dict(metrics or {})
+        if trail:
+            m.setdefault("tool_calls", len(trail))
+            m.setdefault(
+                "elapsed_ms",
+                sum(int(e.get("duration_ms") or 0) for e in trail),
+            )
+        final_status = "hitl_wait" if (hitl or status == "hitl_wait") else status
+        story = builder.finalize(status=final_status, metrics=m)
+        title_map = {
+            "understand": "调度与理解",
+            "act": "角色执行",
+            "verify": "核对与审批",
+            "deliver": "汇总交付",
+        }
+        for phase in story.get("phases") or []:
+            pid = phase.get("id")
+            if pid in title_map:
+                phase["title"] = title_map[pid]
+        return story

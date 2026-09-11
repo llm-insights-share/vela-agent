@@ -175,6 +175,8 @@ class Agent(Base):
     memory_enabled = Column(Boolean, default=False)
     # Query 改写引擎：是否在检索/工具前按需改写用户输入
     query_rewrite_enabled = Column(Boolean, default=False)
+    # SelfOpt：None=跟随全局；False=强制关闭；True=全局开启时可参与
+    selfopt_enabled = Column(Boolean, nullable=True, default=None)
     created_at = Column(DateTime, default=now_utc)
     updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)
 
@@ -270,6 +272,9 @@ class Session(Base):
     # SGL-CFG-06 / MA-IMP-09: HITL 挂起上下文（pending_tool_call / pending_delivery）
     pending_context = Column(JSON, default=dict)
     trace_id = Column(String(128), default="")
+    # SelfOpt A/B（会话粘滞）
+    ab_experiment_id = Column(String, nullable=True, index=True)
+    ab_arm = Column(String(16), nullable=True)
     created_at = Column(DateTime, default=now_utc)
     last_active_at = Column(DateTime, default=now_utc)
 
@@ -931,6 +936,8 @@ class AgentRun(Base):
     message_index = Column(Integer, default=-1)
     attrs_json = Column(JSON, default=dict)
     content_sampled = Column(Boolean, default=True)
+    ab_experiment_id = Column(String, nullable=True, index=True)
+    ab_arm = Column(String(16), nullable=True)
     created_at = Column(DateTime, default=now_utc)
 
 
@@ -1121,4 +1128,65 @@ class MonitorSavedView(Base):
     path = Column(String(64), default="runs")
     filters_json = Column(JSON, default=dict)
     user_id = Column(String, default="")
+    created_at = Column(DateTime, default=now_utc)
+
+
+# ─── SelfOpt Gateway ─────────────────────────────────────────────────────────
+
+
+class SelfOptJob(Base):
+    __tablename__ = "selfopt_jobs"
+
+    job_id = Column(String, primary_key=True, default=gen_uuid)
+    agent_id = Column(String, ForeignKey("agents.agent_id"), nullable=False, index=True)
+    job_label = Column(String(256), nullable=True, index=True)  # e.g. 客服助手-20260910-01
+    window_start = Column(DateTime, nullable=True)
+    window_end = Column(DateTime, nullable=True)
+    status = Column(String(32), default="pending")  # pending/running/done/failed
+    stats_json = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=now_utc)
+    updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)
+
+
+class SelfOptProposal(Base):
+    __tablename__ = "selfopt_proposals"
+
+    proposal_id = Column(String, primary_key=True, default=gen_uuid)
+    job_id = Column(String, ForeignKey("selfopt_jobs.job_id"), nullable=True, index=True)
+    agent_id = Column(String, ForeignKey("agents.agent_id"), nullable=False, index=True)
+    base_version_id = Column(String, nullable=True)
+    candidate_version_id = Column(String, nullable=True)
+    change_kind = Column(String(64), default="prompt_fewshot")
+    risk_tier = Column(String(16), default="T1")
+    diff_json = Column(JSON, default=dict)
+    rationale = Column(Text, default="")
+    evidence_run_ids = Column(JSON, default=list)
+    eval_before_job_id = Column(String, default="")
+    eval_after_job_id = Column(String, default="")
+    eval_report_json = Column(JSON, default=dict)
+    # drafted → evaluated → pending_review → ab_running → promoted|rejected|aborted
+    status = Column(String(32), default="drafted", index=True)
+    created_at = Column(DateTime, default=now_utc)
+    updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)
+
+
+class SelfOptABExperiment(Base):
+    __tablename__ = "selfopt_ab_experiments"
+
+    experiment_id = Column(String, primary_key=True, default=gen_uuid)
+    agent_id = Column(String, ForeignKey("agents.agent_id"), nullable=False, index=True)
+    proposal_id = Column(String, ForeignKey("selfopt_proposals.proposal_id"), nullable=True)
+    control_version_id = Column(String, nullable=False)
+    treatment_version_id = Column(String, nullable=False)
+    strategy = Column(String(32), default="round_robin")
+    rr_counter = Column(Integer, default=0)
+    status = Column(String(32), default="running", index=True)  # running/completed/aborted
+    started_at = Column(DateTime, default=now_utc)
+    ended_at = Column(DateTime, nullable=True)
+    min_sessions = Column(Integer, default=10)
+    target_sessions = Column(Integer, default=40)
+    decision = Column(String(32), default="pending")  # pending/promote/keep_control
+    decided_by = Column(String(128), default="")
+    decided_at = Column(DateTime, nullable=True)
+    decision_note = Column(Text, default="")
     created_at = Column(DateTime, default=now_utc)

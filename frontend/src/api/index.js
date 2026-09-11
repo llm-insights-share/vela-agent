@@ -179,6 +179,65 @@ export const sessionApi = {
     return api.post(`/sessions/${id}/chat`, data, { timeout: reqTimeout })
   },
   chatAsync: (id, data) => api.post(`/sessions/${id}/chat/async`, data, { timeout: 10000 }),
+  /**
+   * Subscribe to session SSE events (thinking_delta, story_patch, status, done, error, hitl).
+   * Uses fetch + ReadableStream so Authorization header works.
+   * Returns an abort controller; call controller.abort() to disconnect.
+   */
+  events: (id, { onEvent, onError, signal } = {}) => {
+    const token = getToken()
+    const controller = new AbortController()
+    if (signal) {
+      if (signal.aborted) controller.abort()
+      else signal.addEventListener('abort', () => controller.abort(), { once: true })
+    }
+    const url = `/api/v1/sessions/${encodeURIComponent(id)}/events`
+    ;(async () => {
+      try {
+        const res = await fetch(url, {
+          method: 'GET',
+          headers: {
+            Accept: 'text/event-stream',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          signal: controller.signal,
+        })
+        if (!res.ok) {
+          throw new Error(`SSE ${res.status}`)
+        }
+        const reader = res.body?.getReader()
+        if (!reader) throw new Error('No SSE body')
+        const decoder = new TextDecoder()
+        let buffer = ''
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buffer += decoder.decode(value, { stream: true })
+          const parts = buffer.split('\n\n')
+          buffer = parts.pop() || ''
+          for (const block of parts) {
+            const dataLine = block
+              .split('\n')
+              .find((l) => l.startsWith('data:'))
+            if (!dataLine) continue
+            const raw = dataLine.slice(5).trim()
+            if (!raw) continue
+            try {
+              const evt = JSON.parse(raw)
+              onEvent?.(evt)
+            } catch (e) {
+              /* ignore malformed */
+            }
+          }
+        }
+      } catch (err) {
+        if (err?.name === 'AbortError') return
+        onError?.(err)
+      }
+    })()
+    return controller
+  },
+  mutateMessages: (id, data) => api.post(`/sessions/${id}/messages/mutate`, data),
   uploadAttachment: (id, formData) => api.post(`/sessions/${id}/attachments`, formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
     timeout: 60000,
@@ -257,6 +316,29 @@ export const configApi = {
   updateContextualRetrieval: (data) => api.put('/config/knowledge/contextual-retrieval', data),
   getObservability: () => api.get('/config/observability'),
   updateObservability: (data) => api.put('/config/observability', data),
+  getSelfopt: () => api.get('/config/selfopt'),
+  updateSelfopt: (data) => api.put('/config/selfopt', data),
+}
+
+export const selfoptApi = {
+  status: () => api.get('/selfopt/status'),
+  overview: (params) => api.get('/selfopt/overview', { params }),
+  createJob: (data) => api.post('/selfopt/jobs', data, { timeout: 180000 }),
+  listJobs: (params) => api.get('/selfopt/jobs', { params }),
+  getJob: (id) => api.get(`/selfopt/jobs/${id}`),
+  getJobDetail: (id) => api.get(`/selfopt/jobs/${id}/detail`),
+  listProposals: (params) => api.get('/selfopt/proposals', { params }),
+  getProposal: (id) => api.get(`/selfopt/proposals/${id}`),
+  startAb: (id, data) => api.post(`/selfopt/proposals/${id}/start-ab`, data || {}),
+  rejectProposal: (id, data) => api.post(`/selfopt/proposals/${id}/reject`, data || {}),
+  listAb: (params) => api.get('/selfopt/ab', { params }),
+  getAb: (id) => api.get(`/selfopt/ab/${id}`),
+  abReport: (id) => api.get(`/selfopt/ab/${id}/report`),
+  promote: (id, data) => api.post(`/selfopt/ab/${id}/promote`, data || {}),
+  keepControl: (id, data) => api.post(`/selfopt/ab/${id}/keep-control`, data || {}),
+  abort: (id, data) => api.post(`/selfopt/ab/${id}/abort`, data || {}),
+  getAgentPolicy: (agentId) => api.get(`/selfopt/agents/${agentId}/policy`),
+  updateAgentPolicy: (agentId, data) => api.put(`/selfopt/agents/${agentId}/policy`, data),
 }
 
 export const queryRewriteApi = {
@@ -405,6 +487,8 @@ export const dataQueryApi = {
 }
 
 export const hitlApi = {
+  list: (params) => api.get('/approvals', { params }),
+  get: (approvalId) => api.get(`/approvals/${approvalId}`),
   getPending: (sessionId) => api.get(`/sessions/${sessionId}/pending-approvals`),
   approve: (sessionId, approvalId, data) => api.post(`/sessions/${sessionId}/approvals/${approvalId}/approve`, data),
   reject: (sessionId, approvalId, data) => api.post(`/sessions/${sessionId}/approvals/${approvalId}/reject`, data),

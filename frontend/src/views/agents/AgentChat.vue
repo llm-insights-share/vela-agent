@@ -70,11 +70,19 @@
         </div>
       </div>
 
-    <div class="chat-messages" ref="msgContainer">
+    <div class="chat-messages" ref="msgContainer" @scroll.passive="onMsgContainerScroll">
       <div
         v-for="(msg, i) in messages"
-        :key="i"
-        :class="['chat-msg', msg.role === 'user' ? 'chat-msg-user' : 'chat-msg-assistant']"
+        :key="msg.sourceIndex != null ? `src-${msg.sourceIndex}` : `i-${i}`"
+        :class="[
+          'chat-msg',
+          msg.role === 'user' ? 'chat-msg-user' : 'chat-msg-assistant',
+          msg.role === 'user' && (hoveredUserMsgKey === userMsgKey(msg, i) || editingUserMsgKey === userMsgKey(msg, i))
+            ? 'chat-msg-user-focused'
+            : '',
+        ]"
+        @mouseenter="msg.role === 'user' && onUserMsgEnter(msg, i)"
+        @mouseleave="msg.role === 'user' && onUserMsgLeave(msg, i)"
       >
         <div class="chat-msg-role">
           <template v-if="msg.role === 'user'">你</template>
@@ -86,40 +94,29 @@
             <a-tag v-if="msg.executionMode && msg.executionMode !== 'direct'" color="blue" style="margin-left: 4px; font-size: 10px;">
               {{ executionModeOptions.find(o => o.value === msg.executionMode)?.label || msg.executionMode }}
             </a-tag>
-            <span v-if="msg.runMetrics" class="run-metrics-hint" style="margin-left: 6px; font-size: 10px; color: #888;">
-              搜索 {{ msg.runMetrics.web_search_calls || 0 }} 次
-              <template v-if="msg.runMetrics.tool_search_calls">
-                · 工具检索 {{ msg.runMetrics.tool_search_calls }} 次
-              </template>
-              <template v-if="msg.runMetrics.loaded_tool_count">
-                · 已加载 {{ msg.runMetrics.loaded_tool_count }} 工具
-              </template>
-              · {{ msg.runMetrics.elapsed_ms ? Math.round(msg.runMetrics.elapsed_ms / 1000) + 's' : '' }}
-              <template v-if="msg.runMetrics.forced_synthesis"> · 强制合成</template>
-            </span>
-            <a-space v-if="msg.role === 'assistant' && msg.content" size="small" style="margin-left: 8px">
+            <a-space v-if="msg.role === 'assistant' && msg.content && !isHitlGateOnlyContent(msg)" size="small" style="margin-left: 8px">
               <a-button type="text" size="small" @click="submitFeedback(i, 1)">👍</a-button>
               <a-button type="text" size="small" @click="submitFeedback(i, -1)">👎</a-button>
             </a-space>
           </template>
         </div>
 
-        <LlmTurnCards
-          v-if="msg.role === 'assistant' && msg._llmTurns?.length"
-          :turns="msg._llmTurns"
-          :code-executions="msg.codeExecutions"
-          :default-expanded="!msg.content || currentSessionStatus === 'RUNNING' || currentSessionStatus === 'HITL_WAIT'"
-        />
-
+        <!-- 1) Process story -->
         <ExecutionStoryPanel
-          v-else-if="msg.role === 'assistant' && msg._executionStory"
-          :story="msg._executionStory"
-          :default-expanded="msg._executionStory.status === 'running' || msg._executionStory.status === 'hitl_wait'"
+          v-if="msg.role === 'assistant' && (msg._executionStory || (isLiveAssistantMsg(msg, i) && liveThinkingText))"
+          :story="msg._executionStory || livePlaceholderStory"
+          :default-expanded="shouldExpandProcess(msg) || isLiveAssistantMsg(msg, i)"
+          :extra-summary="processExtraSummary(msg)"
+          :live-thinking="isLiveAssistantMsg(msg, i) ? liveThinkingText : ''"
+          @expand-change="(v) => rememberProcessExpand(msg, 'story', v)"
         />
 
-        <!-- Legacy flat timeline fallback when no structured story -->
-        <div v-else-if="msg._thinkingSteps && msg._thinkingSteps.length" class="chat-thinking">
-          <div class="chat-thinking-header" @click="msg.thinkingExpanded = !msg.thinkingExpanded">
+        <!-- Legacy flat timeline only when no story -->
+        <div
+          v-else-if="msg.role === 'assistant' && msg._thinkingSteps?.length"
+          class="chat-thinking"
+        >
+          <div class="chat-thinking-header" @click="toggleLegacyThinking(msg)">
             <CaretRightOutlined v-if="!msg.thinkingExpanded" style="font-size: 10px;" />
             <CaretDownOutlined v-else style="font-size: 10px;" />
             <span style="margin-left: 4px;">思考与执行过程</span>
@@ -171,85 +168,20 @@
           </div>
         </div>
 
-        <div class="chat-msg-content" v-if="msg.content || (msg.role === 'user' && msg.activeSkill)">
-          <template v-if="msg.role === 'user' && msg.activeSkill">
-            <span class="user-skill-prefix">/{{ msg.activeSkill }}&nbsp;&nbsp;</span><span class="user-msg-text">{{ msg.content }}</span>
-          </template>
-          <template v-else-if="msg.content">
-            <div class="chat-markdown-body" v-html="renderMarkdown(msg.content)"></div>
-          </template>
-        </div>
-
-        <div v-if="msg.attachments && msg.attachments.length" class="chat-attachments">
-          <a-tag v-for="att in msg.attachments" :key="att.id" color="blue">
-            <PaperClipOutlined /> {{ att.filename }}
-          </a-tag>
-        </div>
-        <div v-if="msg.codeExecutions && msg.codeExecutions.length && !msg._llmTurns?.length" class="chat-code-execs">
-          <CodeExecutionCard
-            v-for="(cex, ci) in msg.codeExecutions"
-            :key="ci"
-            :exec="cex"
-            :default-expanded="ci === msg.codeExecutions.length - 1"
-          />
-        </div>
-        <div v-if="msg.files && msg.files.length > 0" class="chat-files">
-          <a-alert
-            v-if="msg.filesTruncated || hasTruncatedFiles(msg.files)"
-            type="warning"
-            show-icon
+        <!-- 2) Pending HITL actions -->
+        <div
+          v-if="msg.role === 'assistant' && msg.pendingApprovalId && !msg.approvalStatus"
+          class="chat-hitl-actions chat-hitl-emphasis"
+        >
+          <div
+            v-if="msg.pendingDelivery && (msg.hitlGateNotice || msg.content)"
+            class="chat-hitl-notice"
             style="margin-bottom: 8px;"
           >
-            <template #message>文件可能不完整</template>
-            <template #description>
-              模型输出在生成文件时被截断，当前文件内容可能缺失尾部。请尝试简化请求、增加超时时间，或让 Agent 继续补全。
-            </template>
-          </a-alert>
-          <div v-if="nonImageFiles(msg.files).length" class="chat-files-title">生成的文件：</div>
-          <div v-if="imageFiles(msg.files).length" class="chat-image-grid">
-            <img
-              v-for="f in imageFiles(msg.files)"
-              :key="f.url"
-              :src="f.url"
-              :alt="f.name"
-              class="chat-image-thumb"
-              loading="lazy"
-              @click="previewFile(f)"
-            />
+            <div class="chat-markdown-body" v-html="renderMarkdown(msg.hitlGateNotice || msg.content)"></div>
           </div>
-          <div
-            v-for="f in nonImageFiles(msg.files)"
-            :key="f.url"
-            class="chat-file-item"
-          >
-            <span class="chat-file-link" @click="previewFile(f)">
-              <FileOutlined />
-              <span class="chat-file-name">{{ f.name }}</span>
-              <span class="chat-file-size">({{ f.size_display }})</span>
-              <a-tag v-if="f.truncated" color="warning" class="chat-file-truncated-tag">可能不完整</a-tag>
-            </span>
-          </div>
-        </div>
-
-        <div v-if="msg.executionTrace && msg.executionTrace.length" class="chat-trace">
-          <div class="chat-thinking-header" @click="msg.traceExpanded = !msg.traceExpanded">
-            <CaretRightOutlined v-if="!msg.traceExpanded" style="font-size: 10px;" />
-            <CaretDownOutlined v-else style="font-size: 10px;" />
-            <span style="margin-left: 4px;">工作流执行轨迹 ({{ msg.executionTrace.length }} 步)</span>
-          </div>
-          <div v-if="msg.traceExpanded" class="chat-trace-body">
-            <div v-for="(step, si) in msg.executionTrace" :key="si" class="trace-step">
-              <a-tag :color="step.status === 'success' ? 'green' : step.status === 'hitl_wait' ? 'orange' : 'red'" size="small">
-                {{ step.node_type }}
-              </a-tag>
-              <span class="trace-label">{{ step.label || step.node_id }}</span>
-              <span class="trace-duration" v-if="step.duration_ms">{{ step.duration_ms }}ms</span>
-            </div>
-          </div>
-        </div>
-
-        <div v-if="msg.pendingApprovalId && !msg.approvalStatus" class="chat-hitl-actions">
           <a-alert
+            v-else
             :message="msg.pendingOtp || msg.previewPayload?.flow_kind === 'otp_wait'
               ? (msg.previewPayload?.prompt || '请输入短信验证码')
               : (msg.pendingSkillParams || msg.previewPayload?.flow_kind === 'skill_params')
@@ -328,14 +260,21 @@
           </a-space>
         </div>
 
-        <div v-if="msg.approvalStatus === 'approved' && msg.pendingWorkflow && msg.approvalFinalResult" class="chat-hitl-result">
-          <a-alert message="工作流审批已通过 - 执行结果" type="success" show-icon style="margin-bottom: 8px;" />
-          <div class="chat-msg-content" v-html="renderMarkdown(msg.approvalFinalResult)"></div>
+        <!-- 3) Post-approve delivery gate notice (read-only) -->
+        <div
+          v-if="msg.role === 'assistant' && msg.hitlGateNotice && msg.approvalStatus && msg.pendingDelivery"
+          class="chat-hitl-notice"
+        >
+          <div class="chat-markdown-body" v-html="renderMarkdown(msg.hitlGateNotice)"></div>
         </div>
 
-        <div v-if="msg.approvalStatus === 'approved' && msg.pendingDelivery && msg.approvalFinalResult" class="chat-hitl-result">
+        <!-- 4) Approval banners (alert only; body is chat-msg-content) -->
+        <div v-if="msg.approvalStatus === 'approved' && msg.pendingWorkflow" class="chat-hitl-result">
+          <a-alert message="工作流审批已通过 - 执行结果" type="success" show-icon style="margin-bottom: 8px;" />
+        </div>
+
+        <div v-if="msg.approvalStatus === 'approved' && msg.pendingDelivery" class="chat-hitl-result">
           <a-alert message="审批已通过 - 交付物" type="success" show-icon style="margin-bottom: 8px;" />
-          <div class="chat-msg-content" v-html="renderMarkdown(msg.approvalFinalResult)"></div>
         </div>
 
         <div v-if="msg.approvalStatus === 'approved' && !msg.pendingDelivery && !msg.pendingWorkflow" class="chat-hitl-result">
@@ -344,6 +283,152 @@
 
         <div v-if="msg.approvalStatus === 'rejected'" class="chat-hitl-result">
           <a-alert :message="msg.pendingWorkflow ? '工作流审批已拒绝' : msg.pendingDelivery ? '交付物审批已拒绝' : '工具审批已拒绝，已通知 Agent。'" type="error" show-icon />
+        </div>
+
+        <!-- 5) Formal answer / deliverable -->
+        <div
+          v-if="msg.role === 'user' && editingUserMsgKey === userMsgKey(msg, i)"
+          class="chat-msg-edit"
+        >
+          <a-textarea
+            v-model:value="editDraft"
+            :auto-size="{ minRows: 2, maxRows: 8 }"
+            @mousedown.stop
+          />
+          <div class="chat-msg-edit-actions">
+            <a-button size="small" @mousedown.prevent @click="cancelEditUserMsg">
+              <CloseOutlined /> 取消
+            </a-button>
+            <a-button
+              type="primary"
+              size="small"
+              :disabled="userMsgActionsLocked || !editDraft.trim()"
+              :loading="mutatingMessages"
+              @mousedown.prevent
+              @click="confirmEditUserMsg(msg)"
+            >
+              <CheckOutlined /> 确认
+            </a-button>
+          </div>
+        </div>
+        <div
+          class="chat-msg-content"
+          v-else-if="displayMsgContent(msg)"
+        >
+          <template v-if="msg.role === 'user' && msg.activeSkill">
+            <span class="user-skill-prefix">/{{ msg.activeSkill }}&nbsp;&nbsp;</span><span class="user-msg-text">{{ msg.content }}</span>
+          </template>
+          <template v-else-if="displayMsgContent(msg)">
+            <div class="chat-markdown-body" v-html="renderMarkdown(displayMsgContent(msg))"></div>
+          </template>
+        </div>
+
+        <div
+          v-if="msg.role === 'user' && msg.sourceIndex != null && (hoveredUserMsgKey === userMsgKey(msg, i) || editingUserMsgKey === userMsgKey(msg, i))"
+          class="user-msg-actions"
+        >
+          <a-tooltip title="编辑">
+            <a-button
+              type="text"
+              size="small"
+              class="user-msg-action-btn"
+              :disabled="userMsgActionsLocked"
+              @mousedown.prevent
+              @click="startEditUserMsg(msg, i)"
+            >
+              <EditOutlined />
+            </a-button>
+          </a-tooltip>
+          <a-popconfirm
+            title="重做该条消息？将删除其后所有回复并重新生成。"
+            ok-text="重做"
+            cancel-text="取消"
+            :disabled="userMsgActionsLocked"
+            @confirm="redoUserMsg(msg)"
+          >
+            <a-tooltip title="重做">
+              <a-button
+                type="text"
+                size="small"
+                class="user-msg-action-btn"
+                :disabled="userMsgActionsLocked"
+                @mousedown.prevent
+              >
+                <RedoOutlined />
+              </a-button>
+            </a-tooltip>
+          </a-popconfirm>
+          <a-popconfirm
+            title="删除该条消息及其后所有内容？"
+            ok-text="删除"
+            ok-type="danger"
+            cancel-text="取消"
+            :disabled="userMsgActionsLocked"
+            @confirm="deleteUserMsg(msg)"
+          >
+            <a-tooltip title="删除">
+              <a-button
+                type="text"
+                size="small"
+                class="user-msg-action-btn"
+                :disabled="userMsgActionsLocked"
+                @mousedown.prevent
+              >
+                <DeleteOutlined />
+              </a-button>
+            </a-tooltip>
+          </a-popconfirm>
+        </div>
+
+        <div v-if="msg.attachments && msg.attachments.length" class="chat-attachments">
+          <a-tag v-for="att in msg.attachments" :key="att.id" color="blue">
+            <PaperClipOutlined /> {{ att.filename }}
+          </a-tag>
+        </div>
+        <div v-if="msg.codeExecutions && msg.codeExecutions.length" class="chat-code-execs">
+          <CodeExecutionCard
+            v-for="(cex, ci) in msg.codeExecutions"
+            :key="ci"
+            :exec="cex"
+            :default-expanded="ci === msg.codeExecutions.length - 1"
+          />
+        </div>
+        <div v-if="msg.files && msg.files.length > 0" class="chat-files">
+          <a-alert
+            v-if="msg.filesTruncated || hasTruncatedFiles(msg.files)"
+            type="warning"
+            show-icon
+            style="margin-bottom: 8px;"
+          >
+            <template #message>文件可能不完整</template>
+            <template #description>
+              模型输出在生成文件时被截断，当前文件内容可能缺失尾部。请尝试简化请求、增加超时时间，或让 Agent 继续补全。
+            </template>
+          </a-alert>
+          <div v-if="nonImageFiles(msg.files).length" class="chat-files-title">生成的文件：</div>
+          <div v-if="imageFiles(msg.files).length" class="chat-image-grid">
+            <img
+              v-for="f in imageFiles(msg.files)"
+              :key="f.url"
+              :src="f.url"
+              :alt="f.name"
+              class="chat-image-thumb"
+              loading="lazy"
+              @click="previewFile(f)"
+            />
+          </div>
+          <div
+            v-for="f in nonImageFiles(msg.files)"
+            :key="f.url"
+            class="chat-file-item"
+          >
+            <span class="chat-file-link" @click="previewFile(f)">
+              <FileOutlined />
+              <span class="chat-file-name">{{ f.name }}</span>
+              <span class="chat-file-size">({{ f.size_display }})</span>
+              <a-tag v-if="f.truncated" color="warning" class="chat-file-truncated-tag">可能不完整</a-tag>
+            </span>
+          </div>
         </div>
       </div>
 
@@ -355,9 +440,11 @@
           </a-tag>
           <a-spin size="small" style="margin-left: 8px;" />
         </div>
-        <LlmTurnCards
-          :turns="liveLlmTurns.length ? liveLlmTurns : livePlaceholderTurns"
+        <ExecutionStoryPanel
+          :story="livePlaceholderStory"
           :default-expanded="true"
+          :live-thinking="liveThinkingText"
+          :extra-summary="liveProgressExtra"
         />
       </div>
     </div>
@@ -765,7 +852,7 @@ import {
   ArrowLeftOutlined, CaretRightOutlined, CaretDownOutlined,
   ThunderboltOutlined, SendOutlined, PlusOutlined, DownloadOutlined,
   FileOutlined, CloseOutlined, LoadingOutlined, StopOutlined, PaperClipOutlined,
-  CopyOutlined,
+  CopyOutlined, EditOutlined, RedoOutlined, DeleteOutlined, CheckOutlined,
 } from '@ant-design/icons-vue'
 import { agentApi, sessionApi, hitlApi, skillApi, inboxApi, monitorApi } from '../../api'
 import { useAuthStore } from '../../stores/auth'
@@ -777,7 +864,6 @@ import javascript from 'highlight.js/lib/languages/javascript'
 import bash from 'highlight.js/lib/languages/bash'
 import json from 'highlight.js/lib/languages/json'
 import CodeExecutionCard from '../../components/CodeExecutionCard.vue'
-import LlmTurnCards from '../../components/LlmTurnCards.vue'
 import ExecutionStoryPanel from '../../components/ExecutionStoryPanel.vue'
 import 'highlight.js/styles/github-dark.css'
 import {
@@ -786,8 +872,15 @@ import {
   unwatchBackgroundSession,
 } from '../../composables/useBackgroundSessions'
 import { formatRelativeTime, formatLocaleString } from '../../utils/datetime'
-import { normalizeExecutionStory, synthesizeStoryFromSteps } from '../../utils/executionStory'
-import { normalizeLlmTurns, turnsFromLlmCalls, turnsFromThinkingSteps, enrichTurnsWithCodeExecutions } from '../../utils/llmTurns'
+import {
+  normalizeExecutionStory,
+  synthesizeStoryFromSteps,
+  synthesizeStoryFromTurns,
+  synthesizeCoordinatorStory,
+  mergeWorkflowTraceIntoStory,
+  processSummaryLine,
+} from '../../utils/executionStory'
+import { normalizeLlmTurns, turnsFromLlmCalls, enrichTurnsWithCodeExecutions } from '../../utils/llmTurns'
 
 hljs.registerLanguage('python', python)
 hljs.registerLanguage('javascript', javascript)
@@ -821,6 +914,11 @@ const inputText = ref('')
 const sending = ref(false)
 const thinkingExpanded = ref(false)
 const msgContainer = ref(null)
+/** When false, poll/refresh must not yank the viewport back to the bottom. */
+const stickToBottom = ref(true)
+const SCROLL_STICK_THRESHOLD_PX = 120
+/** Remember process / debug expand across poll remaps: key → { story, debug } */
+const processExpandPrefs = new Map()
 const inputRef = ref(null)
 const inputWrapper = ref(null)
 const skillMenuRef = ref(null)
@@ -850,6 +948,127 @@ const creatingSession = ref(false)
 const sessions = ref([])
 const loadingSessions = ref(false)
 const currentSessionStatus = ref('ACTIVE')
+const hoveredUserMsgKey = ref(null)
+const editingUserMsgKey = ref(null)
+const editDraft = ref('')
+const mutatingMessages = ref(false)
+
+const userMsgActionsLocked = computed(() =>
+  sending.value
+  || mutatingMessages.value
+  || currentSessionStatus.value === 'RUNNING'
+  || currentSessionStatus.value === 'HITL_WAIT'
+)
+
+function userMsgKey(msg, i) {
+  return msg.sourceIndex != null ? `src-${msg.sourceIndex}` : `i-${i}`
+}
+
+function onUserMsgEnter(msg, i) {
+  hoveredUserMsgKey.value = userMsgKey(msg, i)
+}
+
+function onUserMsgLeave(msg, i) {
+  const key = userMsgKey(msg, i)
+  if (editingUserMsgKey.value === key) return
+  if (hoveredUserMsgKey.value === key) {
+    hoveredUserMsgKey.value = null
+  }
+}
+
+function startEditUserMsg(msg, i) {
+  if (userMsgActionsLocked.value || msg.sourceIndex == null) return
+  const key = userMsgKey(msg, i)
+  editingUserMsgKey.value = key
+  hoveredUserMsgKey.value = key
+  editDraft.value = msg.content || ''
+}
+
+function cancelEditUserMsg() {
+  editingUserMsgKey.value = null
+  editDraft.value = ''
+}
+
+async function refreshAfterMutate(session) {
+  currentSessionStatus.value = session.status || 'ACTIVE'
+  messages.value = mapSessionMessages(session.messages)
+  enrichMessagesWithSessionLlmCalls(session)
+  hoveredUserMsgKey.value = null
+  editingUserMsgKey.value = null
+  editDraft.value = ''
+  await nextTick()
+  scrollToBottom({ force: true })
+}
+
+async function rerunFromLastUser(content) {
+  await sessionApi.chatAsync(sessionId.value, {
+    message: content,
+    timeout_seconds: timeoutSeconds.value,
+    execution_mode: executionMode.value,
+    skip_history: skipHistory.value,
+    append_user_message: false,
+  })
+  currentSessionStatus.value = 'RUNNING'
+  watchBackgroundSession(sessionId.value, agentId, agent.name)
+  startSessionEvents(sessionId.value)
+  startSessionPollIfNeeded()
+  await fetchSessions()
+}
+
+async function confirmEditUserMsg(msg) {
+  const content = (editDraft.value || '').trim()
+  if (!content || msg.sourceIndex == null || userMsgActionsLocked.value) return
+  mutatingMessages.value = true
+  try {
+    const session = await sessionApi.mutateMessages(sessionId.value, {
+      action: 'edit',
+      message_index: msg.sourceIndex,
+      content,
+    })
+    await refreshAfterMutate(session)
+    await rerunFromLastUser(content)
+  } catch (e) {
+    message.error(e.message || '编辑失败')
+  } finally {
+    mutatingMessages.value = false
+  }
+}
+
+async function redoUserMsg(msg) {
+  if (msg.sourceIndex == null || userMsgActionsLocked.value) return
+  mutatingMessages.value = true
+  try {
+    const content = msg.content || ''
+    const session = await sessionApi.mutateMessages(sessionId.value, {
+      action: 'redo',
+      message_index: msg.sourceIndex,
+    })
+    await refreshAfterMutate(session)
+    await rerunFromLastUser(content)
+  } catch (e) {
+    message.error(e.message || '重做失败')
+  } finally {
+    mutatingMessages.value = false
+  }
+}
+
+async function deleteUserMsg(msg) {
+  if (msg.sourceIndex == null || userMsgActionsLocked.value) return
+  mutatingMessages.value = true
+  try {
+    const session = await sessionApi.mutateMessages(sessionId.value, {
+      action: 'delete',
+      message_index: msg.sourceIndex,
+    })
+    await refreshAfterMutate(session)
+    await fetchSessions()
+  } catch (e) {
+    message.error(e.message || '删除失败')
+  } finally {
+    mutatingMessages.value = false
+  }
+}
+
 const aborting = ref(false)
 let sessionPollTimer = null
 
@@ -870,7 +1089,16 @@ const sourceLabelMap = {
 }
 
 function sourceLabel(source) {
-  return sourceLabelMap[source] || source || '未知'
+  if (!source) return '未知'
+  if (sourceLabelMap[source]) return sourceLabelMap[source]
+  // Nested multi-agent: sub:demo-audit-risk/react
+  if (String(source).startsWith('sub:')) {
+    const rest = String(source).slice(4)
+    const [agentName, inner] = rest.split('/')
+    const innerLabel = sourceLabelMap[inner] || inner || '调用'
+    return agentName ? `${agentName} · ${innerLabel}` : `子Agent · ${innerLabel}`
+  }
+  return source
 }
 
 function roleLabel(role) {
@@ -1041,42 +1269,174 @@ const canAbort = computed(() => isRunning.value || isHitlWait.value)
 const isSending = computed(() => sending.value || isRunning.value)
 
 const liveTurnsPreview = ref([])
-const liveLlmTurns = computed(() => normalizeLlmTurns(liveTurnsPreview.value) || [])
+const liveThinkingText = ref('')
+const liveStoryPatch = ref(null)
+const liveThinkingTurn = ref(null)
+let sessionEventsController = null
+let sessionEventsActive = false
+let sessionEventsFallbackPoll = false
 
-/** Placeholder turn while waiting for first LLM call to flush */
-const livePlaceholderTurns = computed(() => {
-  const modeLabel = executionModeOptions.find(o => o.value === executionMode.value)?.label || executionMode.value
-  return [{
-    turn_id: 'live_pending',
-    seq: 1,
-    source: executionMode.value === 'direct' ? 'direct' : 'react',
-    input: {
-      messages: [{ role: 'user', content: (inputText.value || '').trim().slice(0, 200) || '…' }],
-      summary: '等待模型响应…',
-      has_system: true,
-      tools_count: 0,
-    },
-    thinking: null,
-    response: { content: `执行模式: ${modeLabel} · 正在调用大模型…`, tool_calls: null },
-    tool_results: [],
-  }]
+const livePlaceholderStory = computed(() => {
+  if (liveStoryPatch.value) return liveStoryPatch.value
+  return {
+    version: 1,
+    status: 'running',
+    summary: '进行中',
+    phases: [],
+    metrics: {},
+  }
+})
+
+const liveProgressExtra = computed(() => {
+  if (liveThinkingText.value) return '模型思考中…'
+  if (liveTurnsPreview.value?.length) return `已 ${liveTurnsPreview.value.length} 轮`
+  return '正在调用大模型…'
 })
 
 const showLiveProgress = computed(() => {
   if (!isSending.value) return false
   const last = messages.value[messages.value.length - 1]
-  // Final/in-progress assistant bubble already has turn cards
-  if (last?.role === 'assistant' && last._llmTurns?.length) return false
-  if (liveLlmTurns.value.length) return true
+  // In-progress assistant bubble already shows process / stream
   if (
     last?.role === 'assistant'
-    && !last.content
-    && (last._executionStory || last._thinkingSteps?.length)
+    && (
+      last._executionStory
+      || last._thinkingSteps?.length
+      || liveThinkingText.value
+      || liveStoryPatch.value
+    )
   ) {
     return false
   }
   return true
 })
+
+function isLiveAssistantMsg(msg, index) {
+  if (!isSending.value || msg?.role !== 'assistant') return false
+  const lastIdx = messages.value.length - 1
+  return index === lastIdx && currentSessionStatus.value === 'RUNNING'
+}
+
+function stopSessionEvents() {
+  if (sessionEventsController) {
+    try {
+      sessionEventsController.abort()
+    } catch (_) { /* ignore */ }
+    sessionEventsController = null
+  }
+  sessionEventsActive = false
+}
+
+function startSessionEvents(sid = sessionId.value) {
+  if (!sid) return
+  stopSessionEvents()
+  sessionEventsActive = true
+  sessionEventsFallbackPoll = false
+  sessionEventsController = sessionApi.events(sid, {
+    onEvent: (evt) => handleSessionEvent(evt),
+    onError: () => {
+      sessionEventsActive = false
+      sessionEventsFallbackPoll = true
+      startSessionPollIfNeeded()
+    },
+  })
+}
+
+function handleSessionEvent(evt) {
+  if (!evt || typeof evt !== 'object') return
+  const type = evt.type
+  if (type === 'thinking_delta') {
+    const turn = evt.turn
+    if (turn != null && liveThinkingTurn.value != null && turn !== liveThinkingTurn.value) {
+      liveThinkingText.value = ''
+    }
+    if (turn != null) liveThinkingTurn.value = turn
+    const chunk = evt.text || ''
+    if (chunk) {
+      liveThinkingText.value = (liveThinkingText.value || '') + chunk
+      if (stickToBottom.value) nextTick(() => scrollToBottom())
+    }
+    return
+  }
+  if (type === 'story_patch' && evt.story) {
+    liveStoryPatch.value = evt.story
+    const last = messages.value[messages.value.length - 1]
+    if (last?.role === 'assistant') {
+      last._executionStory = evt.story
+    }
+    return
+  }
+  if (type === 'hitl' || (type === 'status' && evt.status === 'HITL_WAIT')) {
+    currentSessionStatus.value = 'HITL_WAIT'
+    liveThinkingText.value = ''
+    liveThinkingTurn.value = null
+    stopSessionEvents()
+    refreshCurrentSession()
+    startSessionPollIfNeeded()
+    return
+  }
+  if (type === 'done' || type === 'error' || (type === 'status' && ['ACTIVE', 'ERROR', 'CLOSED'].includes(evt.status))) {
+    if (type === 'error' || evt.status === 'ERROR') {
+      currentSessionStatus.value = 'ERROR'
+    } else if (evt.status === 'CLOSED') {
+      currentSessionStatus.value = 'CLOSED'
+    } else {
+      currentSessionStatus.value = 'ACTIVE'
+    }
+    liveThinkingText.value = ''
+    liveThinkingTurn.value = null
+    liveStoryPatch.value = null
+    stopSessionEvents()
+    refreshCurrentSession()
+    stopSessionPoll()
+    return
+  }
+}
+
+function processExpandKey(msg) {
+  if (msg?.pendingApprovalId) return `appr:${msg.pendingApprovalId}`
+  if (msg?.sourceIndex != null) return `idx:${msg.sourceIndex}`
+  const fp = `${(msg?.content || '').slice(0, 40)}|${(msg?.thinking || '').slice(0, 40)}`
+  return `fp:${fp}`
+}
+
+function rememberProcessExpand(msg, which, expanded) {
+  const key = processExpandKey(msg)
+  const cur = processExpandPrefs.get(key) || {}
+  cur[which] = expanded
+  processExpandPrefs.set(key, cur)
+  if (which === 'story') msg._storyExpanded = expanded
+  if (which === 'debug') msg._debugExpanded = expanded
+  if (which === 'legacy') msg.thinkingExpanded = expanded
+}
+
+function shouldExpandProcess(msg) {
+  const key = processExpandKey(msg)
+  const pref = processExpandPrefs.get(key)
+  if (pref && typeof pref.story === 'boolean') return pref.story
+  // HITL: keep process collapsed so approval stays primary
+  if (msg.pendingApprovalId && !msg.approvalStatus) return false
+  // Running without final answer: expand
+  if (!msg.content && (currentSessionStatus.value === 'RUNNING' || msg._executionStory?.status === 'running')) {
+    return true
+  }
+  return false
+}
+
+function processExtraSummary(msg) {
+  return processSummaryLine({
+    story: null,
+    turns: msg._llmTurns,
+    steps: msg._thinkingSteps,
+    runMetrics: msg.runMetrics,
+  })
+}
+
+function toggleLegacyThinking(msg) {
+  const next = !msg.thinkingExpanded
+  msg.thinkingExpanded = next
+  rememberProcessExpand(msg, 'legacy', next)
+}
 
 watch(debugOpen, (open) => {
   if (open) {
@@ -1413,41 +1773,87 @@ function normalizeMessage(msg, intermediateSteps) {
   const enrichedSteps = attachSearchCards(steps)
 
   let llmTurns = normalizeLlmTurns(msg.llmTurns || msg.llm_turns)
-  if (!llmTurns?.length) {
-    llmTurns = turnsFromThinkingSteps(enrichedSteps)
-  }
+  // Only surface native LLM turns in「调试详情」; do not synthesize noisy cards from thinking text.
   const codeExecutions = msg.codeExecutions || msg.code_executions || []
   if (llmTurns?.length) {
     llmTurns = enrichTurnsWithCodeExecutions(llmTurns, codeExecutions)
+  } else {
+    llmTurns = null
   }
 
+  const pendingApprovalId = msg.pendingApprovalId || msg.pending_approval_id || null
+  const approvalStatus = msg.approvalStatus
+    || (msg.meta && msg.meta.approved === true && 'approved')
+    || (msg.meta && msg.meta.approved === false && 'rejected')
+    || null
+
+  const executionMode = msg.executionMode || msg.execution_mode || ''
+  const auditTrail = msg.auditTrail || msg.audit_trail || null
+  const runMetrics = msg.runMetrics || msg.run_metrics || null
+  const executionTrace = msg.executionTrace || msg.execution_trace || []
+
+  let storyStatus = pendingApprovalId && !approvalStatus
+    ? 'hitl_wait'
+    : (msg.content ? 'done' : 'running')
+
   let executionStory = normalizeExecutionStory(msg.executionStory || msg.execution_story)
-  if (!executionStory && !llmTurns?.length && enrichedSteps.length) {
-    const status = msg.pendingApprovalId || msg.pending_approval_id
-      ? 'hitl_wait'
-      : (msg.content ? 'done' : 'running')
-    executionStory = synthesizeStoryFromSteps(enrichedSteps, {
-      status,
-      metrics: msg.runMetrics || msg.run_metrics || null,
+  if (!executionStory && (executionMode === 'multi_agent' || auditTrail?.length || /\[Coordinator\]/.test(thinking))) {
+    executionStory = synthesizeCoordinatorStory(auditTrail, thinking, {
+      status: storyStatus,
+      metrics: runMetrics,
     })
   }
+  if (!executionStory && enrichedSteps.length) {
+    executionStory = synthesizeStoryFromSteps(enrichedSteps, {
+      status: storyStatus,
+      metrics: runMetrics,
+    })
+  }
+  if (!executionStory && llmTurns?.length) {
+    executionStory = synthesizeStoryFromTurns(llmTurns, {
+      status: storyStatus,
+      metrics: runMetrics,
+    })
+  }
+  if (executionTrace.length) {
+    executionStory = mergeWorkflowTraceIntoStory(executionStory, executionTrace)
+  }
+
+  // Tool HITL approved/rejected: hide process. Delivery keeps story for single-bubble flow.
+  const hideProcess = (approvalStatus === 'approved' || approvalStatus === 'rejected')
+    && !(msg.pendingDelivery || msg.pending_delivery)
+  const displaySteps = hideProcess ? [] : (executionStory ? [] : enrichedSteps)
+  const displayTurns = hideProcess ? [] : (llmTurns || [])
+  const displayStory = hideProcess ? null : executionStory
+
+  const expandKey = pendingApprovalId
+    ? `appr:${pendingApprovalId}`
+    : (msg.sourceIndex != null ? `idx:${msg.sourceIndex}` : null)
+  const prefs = expandKey ? processExpandPrefs.get(expandKey) : null
+  const legacyExpanded = prefs?.legacy === true
+    ? true
+    : (prefs?.legacy === false ? false : false)
 
   return {
     ...msg,
-    thinking,
-    thinkingExpanded: false,
-    _thinkingSteps: enrichedSteps,
-    _llmTurns: llmTurns,
-    _executionStory: executionStory,
-    traceExpanded: true,
-    executionTrace: msg.executionTrace || msg.execution_trace || [],
-    executionMode: msg.executionMode || msg.execution_mode || '',
+    thinking: hideProcess ? '' : thinking,
+    thinkingExpanded: legacyExpanded,
+    _thinkingSteps: displaySteps,
+    _llmTurns: displayTurns,
+    _executionStory: displayStory,
+    _debugExpanded: prefs?.debug === true,
+    _storyExpanded: prefs?.story,
+    sourceIndex: msg.sourceIndex,
+    traceExpanded: false,
+    executionTrace: [], // merged into story; avoid dual rails
+    executionMode,
     activeSkill: msg.activeSkill || msg.active_skill || null,
-    runMetrics: msg.runMetrics || msg.run_metrics || null,
+    runMetrics,
+    auditTrail,
     files: msg.files || [],
     filesTruncated: msg.filesTruncated || msg.files_truncated || false,
     codeExecutions,
-    pendingApprovalId: msg.pendingApprovalId || msg.pending_approval_id || null,
+    pendingApprovalId,
     pendingDelivery: msg.pendingDelivery || msg.pending_delivery || false,
     pendingWorkflow: msg.pendingWorkflow || msg.pending_workflow || false,
     pendingToolName: msg.pendingToolName || msg.pending_tool_name || '',
@@ -1464,12 +1870,138 @@ function normalizeMessage(msg, intermediateSteps) {
       missing.forEach((k) => { init[k] = filled[k] || '' })
       return init
     })(),
-    approvalStatus: msg.approvalStatus || null,
+    approvalStatus,
     approvalFinalResult: msg.approvalFinalResult || '',
+    hitlGateNotice: msg.hitlGateNotice || msg.hitl_gate_notice || '',
   }
 }
 
+function isHitlGateOnlyContent(msg) {
+  if (!msg || msg.role !== 'assistant') return false
+  if (msg.pendingApprovalId && !msg.approvalStatus && msg.pendingDelivery) return true
+  const notice = (msg.hitlGateNotice || '').trim()
+  const content = (msg.content || '').trim()
+  return !!(notice && content && notice === content)
+}
+
+function displayMsgContent(msg) {
+  if (!msg) return ''
+  if (msg.role === 'user') {
+    if (msg.activeSkill || msg.content) return msg.content || ''
+    return ''
+  }
+  // Waiting delivery: notice shown in HITL block, not as main body
+  if (msg.pendingApprovalId && !msg.approvalStatus && msg.pendingDelivery) {
+    return ''
+  }
+  const content = (msg.content || '').trim()
+  const notice = (msg.hitlGateNotice || '').trim()
+  if (notice && content && notice === content) {
+    // Still waiting-shaped content without approvalStatus edge case
+    if (msg.pendingDelivery && !msg.approvalStatus) return ''
+  }
+  // Prefer formal body; if only approvalFinalResult (legacy), use it once
+  if (content) return content
+  if (msg.pendingDelivery && msg.approvalStatus === 'approved' && msg.approvalFinalResult) {
+    return msg.approvalFinalResult
+  }
+  if (msg.pendingWorkflow && msg.approvalStatus === 'approved' && msg.approvalFinalResult) {
+    return msg.approvalFinalResult
+  }
+  return ''
+}
+
 function mapSessionMessages(msgs) {
+  // Heal historical sessions where delivery approve appended a separate result message
+  // and stripped thinking from the gate bubble.
+  const approvedIds = new Set()
+  const rejectedIds = new Set()
+  const finalByApproval = {}
+  for (const m of msgs || []) {
+    const meta = m.meta || {}
+    const aid = meta.approval_id
+    if (!aid) continue
+    if (meta.approved === true) {
+      approvedIds.add(aid)
+      if ((m.content || '').trim()) finalByApproval[aid] = m.content
+    } else if (meta.approved === false) {
+      rejectedIds.add(aid)
+      if ((m.content || '').trim()) finalByApproval[aid] = m.content
+    }
+  }
+
+  const skipIndexes = new Set()
+  const healedMsgs = (msgs || []).map((m, idx) => {
+    const meta = m.meta || {}
+    const aid = meta.approval_id
+    // Pure result bubbles (legacy append) — fold into gate and skip
+    if (aid && (meta.approved === true || meta.approved === false) && !m.pendingApprovalId && !m.pending_approval_id) {
+      skipIndexes.add(idx)
+      return m
+    }
+
+    const pid = m.pendingApprovalId || m.pending_approval_id
+    if (!pid) return m
+
+    // Already-approved delivery on gate with leftover notice as content + approvalFinalResult
+    if (
+      (m.approvalStatus === 'approved' || m.approval_status === 'approved')
+      && (m.pendingDelivery || m.pending_delivery)
+      && (m.approvalFinalResult || finalByApproval[pid])
+    ) {
+      const prevContent = (m.content || '').trim()
+      const finalBody = finalByApproval[pid] || m.approvalFinalResult || prevContent
+      const looksLikeNotice = /HITL Gate|审批工单|交付前/.test(prevContent)
+      const notice = m.hitlGateNotice || m.hitl_gate_notice
+        || (looksLikeNotice ? prevContent : '')
+        || (prevContent && prevContent !== finalBody ? prevContent : '')
+      return {
+        ...m,
+        approvalStatus: 'approved',
+        pendingDelivery: true,
+        hitlGateNotice: notice || undefined,
+        content: finalBody,
+      }
+    }
+
+    if (approvedIds.has(pid)) {
+      const prevContent = (m.content || '').trim()
+      const finalBody = finalByApproval[pid] || m.approvalFinalResult || prevContent
+      const notice = m.hitlGateNotice || m.hitl_gate_notice
+        || (prevContent && prevContent !== finalBody ? prevContent : '')
+        || (prevContent && /HITL Gate|审批工单/.test(prevContent) ? prevContent : '')
+      return {
+        ...m,
+        approvalStatus: m.approvalStatus || 'approved',
+        pendingDelivery: m.pendingDelivery ?? m.pending_delivery ?? true,
+        hitlGateNotice: notice || m.hitlGateNotice,
+        content: finalBody,
+        // Keep process fields if still present; do not strip for delivery
+      }
+    }
+    if (rejectedIds.has(pid)) {
+      const prevContent = (m.content || '').trim()
+      const rejectBody = finalByApproval[pid] || prevContent
+      const notice = m.hitlGateNotice || m.hitl_gate_notice
+        || (prevContent && /HITL Gate|审批工单/.test(prevContent) ? prevContent : '')
+      return {
+        ...m,
+        approvalStatus: m.approvalStatus || 'rejected',
+        pendingDelivery: m.pendingDelivery ?? m.pending_delivery ?? true,
+        hitlGateNotice: notice || m.hitlGateNotice,
+        content: rejectBody,
+      }
+    }
+    // Pending delivery: ensure notice field
+    if ((m.pendingDelivery || m.pending_delivery) && !m.approvalStatus) {
+      return {
+        ...m,
+        hitlGateNotice: m.hitlGateNotice || m.hitl_gate_notice || m.content || '',
+      }
+    }
+    return m
+  }).filter((_, idx) => !skipIndexes.has(idx))
+
   const out = []
   let buffer = []
 
@@ -1501,17 +2033,20 @@ function mapSessionMessages(msgs) {
     }
   }
 
-  for (const msg of (msgs || [])) {
+  for (let sourceIndex = 0; sourceIndex < healedMsgs.length; sourceIndex++) {
+    const msg = healedMsgs[sourceIndex]
     if (isIntermediateMessage(msg)) {
       buffer.push(msg)
       continue
     }
     if (msg.role === 'assistant') {
-      out.push(normalizeMessage(msg, intermediateToSteps(buffer)))
+      const normalized = normalizeMessage({ ...msg, sourceIndex }, intermediateToSteps(buffer))
+      out.push(normalized)
       buffer = []
     } else {
       flushBuffer()
-      out.push(normalizeMessage(msg, []))
+      const normalized = normalizeMessage({ ...msg, sourceIndex }, [])
+      out.push(normalized)
     }
   }
   flushBuffer()
@@ -1525,8 +2060,18 @@ async function loadSessionById(id) {
   messages.value = mapSessionMessages(s.messages)
   enrichMessagesWithSessionLlmCalls(s)
   liveTurnsPreview.value = s.pending_context?.llm_turns || []
+  liveThinkingText.value = ''
+  liveThinkingTurn.value = null
+  liveStoryPatch.value = null
+  stopSessionEvents()
+  if (s.status === 'RUNNING') {
+    startSessionEvents(id)
+  }
+  hoveredUserMsgKey.value = null
+  editingUserMsgKey.value = null
+  editDraft.value = ''
   await nextTick()
-  scrollToBottom()
+  scrollToBottom({ force: true })
 }
 
 function enrichMessagesWithSessionLlmCalls(session) {
@@ -1536,6 +2081,12 @@ function enrichMessagesWithSessionLlmCalls(session) {
   const lastAssistant = [...mapped].reverse().find((m) => m.role === 'assistant')
   if (lastAssistant && !lastAssistant._llmTurns?.length) {
     lastAssistant._llmTurns = turnsFromLlmCalls(session.llm_calls)
+    if (!lastAssistant._executionStory && lastAssistant._llmTurns?.length) {
+      lastAssistant._executionStory = synthesizeStoryFromTurns(lastAssistant._llmTurns, {
+        status: lastAssistant.content ? 'done' : 'running',
+        metrics: lastAssistant.runMetrics,
+      })
+    }
   }
 }
 
@@ -1566,6 +2117,10 @@ async function refreshCurrentSession() {
       }
       unwatchBackgroundSession(sessionId.value)
       await fetchSessions()
+      liveThinkingText.value = ''
+      liveThinkingTurn.value = null
+      liveStoryPatch.value = null
+      stopSessionEvents()
       if (s.status === 'HITL_WAIT') {
         startSessionPollIfNeeded()
       } else {
@@ -1573,6 +2128,12 @@ async function refreshCurrentSession() {
       }
     } else if (prevStatus === 'HITL_WAIT' && s.status === 'RUNNING') {
       watchBackgroundSession(sessionId.value, agentId, agent.name)
+      liveThinkingText.value = ''
+      liveStoryPatch.value = null
+      startSessionEvents(sessionId.value)
+      startSessionPollIfNeeded()
+    } else if (s.status === 'RUNNING' && !sessionEventsActive) {
+      startSessionEvents(sessionId.value)
       startSessionPollIfNeeded()
     }
     await nextTick()
@@ -1584,9 +2145,14 @@ async function refreshCurrentSession() {
 
 function startSessionPollIfNeeded() {
   stopSessionPoll()
-  // Also poll HITL_WAIT so inbox/other-tab approve can resume UI progress here.
-  if (currentSessionStatus.value === 'RUNNING' || currentSessionStatus.value === 'HITL_WAIT') {
+  // SSE is primary while RUNNING; poll as fallback / HITL_WAIT resume detection.
+  if (currentSessionStatus.value === 'HITL_WAIT') {
     sessionPollTimer = setInterval(refreshCurrentSession, 2500)
+    return
+  }
+  if (currentSessionStatus.value === 'RUNNING') {
+    const interval = (sessionEventsActive && !sessionEventsFallbackPoll) ? 8000 : 2500
+    sessionPollTimer = setInterval(refreshCurrentSession, interval)
   }
 }
 
@@ -1629,6 +2195,13 @@ const filteredSkills = computed(() => {
   )
 })
 
+function onMsgContainerScroll() {
+  const el = msgContainer.value
+  if (!el) return
+  const dist = el.scrollHeight - el.scrollTop - el.clientHeight
+  stickToBottom.value = dist <= SCROLL_STICK_THRESHOLD_PX
+}
+
 onMounted(async () => {
   try {
     const a = await agentApi.get(agentId)
@@ -1644,13 +2217,10 @@ onMounted(async () => {
       sessionId.value = querySessionId
       await loadSessionById(querySessionId)
     } else {
-      const session = await sessionApi.create({
-        agent_id: agentId,
-        caller_type: 'web_playground',
-        caller_id: auth.user?.user_id || '',
-      })
-      sessionId.value = session.session_id
-      currentSessionStatus.value = session.status || 'ACTIVE'
+      // Lazy create: avoid burning A/B round-robin slots on empty page-open sessions
+      sessionId.value = null
+      messages.value = []
+      currentSessionStatus.value = 'ACTIVE'
     }
 
     setActiveViewing(sessionId.value, agentId)
@@ -1696,7 +2266,30 @@ function formatTime(t) {
   return formatRelativeTime(t, '')
 }
 
+async function ensureSession() {
+  if (sessionId.value) return sessionId.value
+  creatingSession.value = true
+  try {
+    const session = await sessionApi.create({
+      agent_id: agentId,
+      caller_type: 'web_playground',
+      caller_id: auth.user?.user_id || '',
+    })
+    sessionId.value = session.session_id
+    currentSessionStatus.value = session.status || 'ACTIVE'
+    setActiveViewing(sessionId.value, agentId)
+    return session.session_id
+  } finally {
+    creatingSession.value = false
+  }
+}
+
 async function createNewSession() {
+  // Reuse empty current session so we do not burn another A/B slot
+  if (sessionId.value && !(messages.value || []).length) {
+    message.info('当前会话尚未开始对话，已继续使用')
+    return
+  }
   try {
     creatingSession.value = true
     const session = await sessionApi.create({
@@ -1936,6 +2529,7 @@ function onResizeEnd() {
 
 onUnmounted(() => {
   stopSessionPoll()
+  stopSessionEvents()
   stopDebugPoll()
   setActiveViewing(null, null)
   document.removeEventListener('mousemove', onResize)
@@ -1973,9 +2567,12 @@ async function sendMessage() {
   sending.value = true
   thinkingExpanded.value = false
   liveTurnsPreview.value = []
+  liveThinkingText.value = ''
+  liveThinkingTurn.value = null
+  liveStoryPatch.value = null
 
   await nextTick()
-  scrollToBottom()
+  scrollToBottom({ force: true })
 
   try {
     const payload = {
@@ -1989,9 +2586,11 @@ async function sendMessage() {
       payload.skill_pack_id = skillPackId
     }
 
+    await ensureSession()
     await sessionApi.chatAsync(sessionId.value, payload)
     currentSessionStatus.value = 'RUNNING'
     watchBackgroundSession(sessionId.value, agentId, agent.name)
+    startSessionEvents(sessionId.value)
     startSessionPollIfNeeded()
     await fetchSessions()
   } catch (e) {
@@ -2001,9 +2600,11 @@ async function sendMessage() {
   }
 }
 
-function triggerUpload() {
-  if (!sessionId.value) {
-    message.warning('请先创建或选择会话')
+async function triggerUpload() {
+  try {
+    await ensureSession()
+  } catch (e) {
+    message.error(e.message || '创建会话失败')
     return
   }
   fileInput.value?.click()
@@ -2012,7 +2613,14 @@ function triggerUpload() {
 async function onFilesSelected(event) {
   const files = Array.from(event.target.files || [])
   event.target.value = ''
-  if (!files.length || !sessionId.value) return
+  if (!files.length) return
+  try {
+    await ensureSession()
+  } catch (e) {
+    message.error(e.message || '创建会话失败')
+    return
+  }
+  if (!sessionId.value) return
 
   uploadingAttachment.value = true
   try {
@@ -2128,11 +2736,13 @@ async function afterHitlApproved(msg, res) {
   } else if (res?.session_status === 'RUNNING') {
     currentSessionStatus.value = 'RUNNING'
     watchBackgroundSession(sessionId.value, agentId, agent.name)
+    startSessionEvents(sessionId.value)
     startSessionPollIfNeeded()
   }
   await refreshCurrentSession()
   if (currentSessionStatus.value === 'RUNNING') {
     watchBackgroundSession(sessionId.value, agentId, agent.name)
+    startSessionEvents(sessionId.value)
     startSessionPollIfNeeded()
   }
 }
@@ -2147,7 +2757,10 @@ async function approveHitl(msg) {
     })
     msg.approvalStatus = 'approved'
     if (res.kind === 'delivery') {
-      msg.approvalFinalResult = res.final_result || ''
+      const prev = (msg.content || '').trim()
+      if (!msg.hitlGateNotice && prev) msg.hitlGateNotice = prev
+      msg.content = res.final_result || msg.content || ''
+      msg.pendingDelivery = true
     } else if (res.kind === 'workflow') {
       msg.approvalFinalResult = res.final_result || ''
       if (res.execution_trace?.length) {
@@ -2158,6 +2771,8 @@ async function approveHitl(msg) {
         msg.approvalStatus = null
         msg.pendingWorkflow = true
         msg.content = res.final_result || msg.content
+      } else if (res.final_result) {
+        msg.content = res.final_result
       }
     } else {
       await afterHitlApproved(msg, res)
@@ -2183,6 +2798,7 @@ async function rejectHitl(msg) {
     })
     msg.approvalStatus = 'rejected'
     message.success(res.message || '已拒绝')
+    await refreshCurrentSession()
   } catch (e) {
     message.error('审批失败: ' + e.message)
   } finally {
@@ -2190,11 +2806,12 @@ async function rejectHitl(msg) {
   }
 }
 
-function scrollToBottom() {
+function scrollToBottom({ force = false } = {}) {
   nextTick(() => {
-    if (msgContainer.value) {
-      msgContainer.value.scrollTop = msgContainer.value.scrollHeight
-    }
+    if (!msgContainer.value) return
+    if (!force && !stickToBottom.value) return
+    msgContainer.value.scrollTop = msgContainer.value.scrollHeight
+    stickToBottom.value = true
   })
 }
 
@@ -2345,6 +2962,35 @@ function renderMarkdown(text) {
 .chat-msg-user {
   margin-left: auto;
 }
+.chat-msg-user-focused .chat-msg-content {
+  outline: 1px solid rgba(22, 119, 255, 0.35);
+}
+.user-msg-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 2px;
+  margin-top: 4px;
+}
+.user-msg-action-btn {
+  color: #8c8c8c !important;
+  width: 28px;
+  height: 28px;
+  padding: 0 !important;
+}
+.user-msg-action-btn:hover:not(:disabled) {
+  color: #262626 !important;
+  background: rgba(0, 0, 0, 0.04) !important;
+}
+.chat-msg-edit {
+  text-align: left;
+  max-width: 100%;
+}
+.chat-msg-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
 .chat-msg-role {
   font-size: 11px;
   color: #9e9590;
@@ -2358,6 +3004,7 @@ function renderMarkdown(text) {
   border-radius: 8px;
   font-size: 13px;
   line-height: 1.6;
+  word-break: break-word;
 }
 .chat-msg-assistant .chat-msg-content {
   background: #f3f0e8;
@@ -2493,6 +3140,26 @@ function renderMarkdown(text) {
 .chat-hitl-actions {
   margin-top: 8px;
 }
+.chat-hitl-emphasis {
+  margin: 8px 0 12px;
+  padding: 12px;
+  border: 1px solid #ffd591;
+  border-radius: 10px;
+  background: linear-gradient(180deg, #fffbe6 0%, #fff 100%);
+  box-shadow: 0 1px 4px rgba(250, 173, 20, 0.15);
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+.chat-live-summary {
+  margin: 4px 0 8px;
+  padding: 8px 12px;
+  font-size: 13px;
+  color: #595959;
+  background: #fafbfc;
+  border: 1px solid #eef0f3;
+  border-radius: 8px;
+}
 .hitl-som-preview {
   margin-bottom: 10px;
   border: 1px solid #ffd591;
@@ -2540,6 +3207,28 @@ function renderMarkdown(text) {
 }
 .chat-hitl-result {
   margin-top: 10px;
+}
+.chat-hitl-notice {
+  margin: 8px 0 10px;
+  padding: 10px 14px;
+  background: #f8f6f2;
+  border: 1px solid #e8e4dc;
+  border-radius: 8px;
+  font-size: 13px;
+  color: #5c5650;
+  line-height: 1.55;
+}
+.chat-hitl-notice :deep(p) {
+  margin: 0 0 6px 0;
+}
+.chat-hitl-notice :deep(p:last-child) {
+  margin-bottom: 0;
+}
+.chat-hitl-notice :deep(code) {
+  background: #eeeae3;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 12px;
 }
 .chat-file-item {
   margin-bottom: 4px;

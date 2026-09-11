@@ -24,6 +24,7 @@
           <a-menu-item key="/schedules">定时任务</a-menu-item>
           <a-menu-item key="/monitor">监控</a-menu-item>
           <a-menu-item key="/eval">评测</a-menu-item>
+          <a-menu-item key="/selfopt">自优化</a-menu-item>
         </a-sub-menu>
         <a-sub-menu key="models">
           <template #icon><ApiOutlined /></template>
@@ -55,12 +56,15 @@
           <ApiOutlined />
           <span>连接器</span>
         </a-menu-item>
+        <a-menu-item key="/approvals">
+          <AuditOutlined />
+          <span>审批中心</span>
+        </a-menu-item>
         <a-sub-menu key="screenpilot">
           <template #icon><DesktopOutlined /></template>
           <template #title>驭屏系统</template>
           <a-menu-item key="/screenpilot/systems">驭屏系统管理</a-menu-item>
           <a-menu-item key="/screenpilot/skills">UI 技能库</a-menu-item>
-          <a-menu-item key="/screenpilot/approvals">驭屏审批收件箱</a-menu-item>
         </a-sub-menu>
         <a-menu-item v-if="auth.isAdmin" key="/users">
           <TeamOutlined />
@@ -145,6 +149,7 @@ import {
   TeamOutlined,
   UserOutlined,
   BellOutlined,
+  AuditOutlined,
 } from '@ant-design/icons-vue'
 import {
   startBackgroundSessionWatcher,
@@ -217,7 +222,7 @@ async function onInboxItemClick(msg) {
   }
 }
 
-onMounted(() => {
+onMounted(async () => {
   if (!isAuthPage.value) {
     startBackgroundSessionWatcher()
     startInboxWatcher()
@@ -236,6 +241,8 @@ watch(
       selectedKeys.value = ['/eval']
     } else if (path.startsWith('/monitor')) {
       selectedKeys.value = ['/monitor']
+    } else if (path.startsWith('/selfopt')) {
+      selectedKeys.value = ['/selfopt']
     } else {
       selectedKeys.value = [path]
     }

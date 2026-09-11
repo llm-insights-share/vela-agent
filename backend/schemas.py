@@ -174,6 +174,9 @@ class CoordinatorConfigUpdate(BaseModel):
     hitl_before_delivery: bool = Field(default=True)
     total_token_budget: int = Field(default=500000, ge=10000)
     max_a2a_calls: int = Field(default=20, ge=1, le=100)
+    max_calls_per_agent: int = Field(default=2, ge=1, le=10)
+    child_max_iterations: int = Field(default=6, ge=1, le=30)
+    min_tokens_for_dispatch: int = Field(default=40000, ge=0)
 
 
 class CompositionResponse(BaseModel):
@@ -202,6 +205,30 @@ class HITLReview(BaseModel):
     comment: str = Field(default="", max_length=2048)
     otp_code: Optional[str] = Field(default=None, max_length=32)
     param_values: Optional[Dict[str, Any]] = None
+
+
+class ApprovalCenterItem(BaseModel):
+    """统一审批中心列表/详情项（通用 HITL + 驭屏）。"""
+    approval_id: str
+    session_id: str
+    agent_id: str
+    agent_name: str = ""
+    session_title: str = ""
+    tool_name: str
+    category: str  # screenpilot | delivery | workflow | tool
+    status: str
+    summary: str = ""
+    risk_tier: Optional[str] = None
+    action: Optional[str] = None
+    target_label: Optional[str] = None
+    url: Optional[str] = None
+    flow_kind: Optional[str] = None
+    reviewer: str = ""
+    review_comment: str = ""
+    created_at: Optional[datetime] = None
+    reviewed_at: Optional[datetime] = None
+    tool_args: Dict[str, Any] = {}
+    preview_payload: Optional[Dict[str, Any]] = None
 
 
 class ToolBindingItem(BaseModel):
@@ -266,6 +293,7 @@ class AgentResponse(BaseModel):
     workflow_definition: Dict[str, Any] = {}
     memory_enabled: bool = False
     query_rewrite_enabled: bool = False
+    selfopt_enabled: Optional[bool] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -483,12 +511,20 @@ class SessionChatRequest(BaseModel):
     timeout_seconds: Optional[int] = None
     execution_mode: Optional[str] = Field(default="auto", pattern="^(auto|react|plan_and_execute|direct)$")
     skip_history: bool = False
+    # After messages/mutate (edit/redo), last user message is already in session — do not append again
+    append_user_message: bool = True
 
     @model_validator(mode="after")
     def message_or_attachments(self):
         if not self.message.strip() and not self.attachment_ids:
             raise ValueError("消息和附件不能同时为空")
         return self
+
+
+class SessionMessagesMutateRequest(BaseModel):
+    action: str = Field(..., pattern="^(edit|redo|delete)$")
+    message_index: int = Field(..., ge=0)
+    content: Optional[str] = Field(default=None, max_length=32000)
 
 
 class SessionAttachmentResponse(BaseModel):
@@ -533,6 +569,8 @@ class SessionResponse(BaseModel):
     messages: List[Dict[str, Any]] = []
     llm_calls: List[Dict[str, Any]] = []
     pending_context: Optional[Dict[str, Any]] = None
+    ab_experiment_id: Optional[str] = None
+    ab_arm: Optional[str] = None
     created_at: Optional[datetime] = None
     last_active_at: Optional[datetime] = None
 

@@ -32,7 +32,7 @@
       :description="`审批单 ${hitlApprovalId}。请在审批收件箱处理后，再点击「刷新观测」继续录制。`"
     >
       <template #action>
-        <a-button size="small" type="link" @click="$router.push('/screenpilot/approvals')">打开审批收件箱</a-button>
+        <a-button size="small" type="link" @click="$router.push('/approvals?category=screenpilot')">打开审批中心</a-button>
       </template>
     </a-alert>
 

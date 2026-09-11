@@ -3,7 +3,7 @@
     <div class="llm-turns-header" @click="expanded = !expanded">
       <CaretRightOutlined v-if="!expanded" style="font-size: 10px;" />
       <CaretDownOutlined v-else style="font-size: 10px;" />
-      <span class="llm-turns-title">思考与执行过程</span>
+      <span class="llm-turns-title">{{ title }}</span>
       <span class="llm-turns-summary">{{ headerSummary }}</span>
     </div>
 
@@ -144,7 +144,10 @@ const props = defineProps({
   turns: { type: Array, default: () => [] },
   codeExecutions: { type: Array, default: () => [] },
   defaultExpanded: { type: Boolean, default: false },
+  title: { type: String, default: '调试详情' },
 })
+
+const emit = defineEmits(['expand-change'])
 
 const expanded = ref(!!props.defaultExpanded)
 const openTurns = reactive({})
@@ -156,8 +159,10 @@ const displayTurns = computed(() => (
 
 watch(
   () => props.defaultExpanded,
-  (v) => { if (v) expanded.value = true },
+  (v) => { expanded.value = !!v },
 )
+
+watch(expanded, (v) => emit('expand-change', v))
 
 watch(
   () => (displayTurns.value || []).length,

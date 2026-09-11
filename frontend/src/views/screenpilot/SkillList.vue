@@ -216,7 +216,7 @@
         :message="`等待审批：${execHitl.approval_id}`"
       >
         <template #action>
-          <a-button size="small" type="link" @click="$router.push('/screenpilot/approvals')">审批收件箱</a-button>
+          <a-button size="small" type="link" @click="$router.push('/approvals?category=screenpilot')">审批中心</a-button>
         </template>
       </a-alert>
       <div v-if="execResult" class="exec-result">
@@ -267,7 +267,7 @@
         :message="`等待审批：${execHitl.approval_id}`"
       >
         <template #action>
-          <a-button size="small" type="link" @click="$router.push('/screenpilot/approvals')">审批收件箱</a-button>
+          <a-button size="small" type="link" @click="$router.push('/approvals?category=screenpilot')">审批中心</a-button>
         </template>
       </a-alert>
       <div v-if="execResult" class="exec-result">

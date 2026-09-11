@@ -310,8 +310,12 @@ def record_agent_run(
             "guard_events": guard_events or [],
             "tokens_used_turn": result.get("tokens_used"),
             "openinference": True if oi_spans else False,
+            "ab_experiment_id": getattr(session, "ab_experiment_id", None),
+            "ab_arm": getattr(session, "ab_arm", None),
         },
         content_sampled=keep_full,
+        ab_experiment_id=getattr(session, "ab_experiment_id", None),
+        ab_arm=getattr(session, "ab_arm", None),
     )
     db.add(run)
 

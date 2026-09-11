@@ -45,6 +45,14 @@ observability:
   otel_enabled: true
   otlp_endpoint: http://127.0.0.1:6006
   success_sample_rate: 1.0
+selfopt:
+  ab_enabled: true
+  agent_ids:
+  - 753e3105-1550-460a-a15b-b12f593e976d
+  - efa1485c-2437-4eea-b1e4-d42a9685aa2a
+  enabled: true
+  reflect_model_service_id: 4a80262d-f77c-44bd-9b9c-288a76b11ea7
+  schedule_enabled: true
 tools:
   tavily:
     api_key: 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

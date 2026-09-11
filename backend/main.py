@@ -26,6 +26,7 @@ from routes.tools import router as tools_router
 from routes.config import router as config_router
 from routes.compositions import router as compositions_router
 from routes.hitl import router as hitl_router
+from routes.approvals import router as approvals_router
 from routes.workflows import router as workflows_router
 from routes.workflow_cron import router as workflow_cron_router
 from routes.dataquery_agents import router as dataquery_agents_router
@@ -44,6 +45,7 @@ from routes.mcp_servers import router as mcp_servers_router, oauth_callback_rout
 from routes.connectors import router as connectors_router
 from routes.monitor import router as monitor_router
 from routes.eval import router as eval_router
+from routes.selfopt import router as selfopt_router
 
 app = FastAPI(
     title="Vela Agent Playground API",
@@ -73,6 +75,7 @@ app.include_router(tools_router, dependencies=_auth_deps)
 app.include_router(config_router, dependencies=_auth_deps)
 app.include_router(compositions_router, dependencies=_auth_deps)
 app.include_router(hitl_router, dependencies=_auth_deps)
+app.include_router(approvals_router, dependencies=_auth_deps)
 app.include_router(workflows_router, dependencies=_auth_deps)
 app.include_router(workflow_cron_router, dependencies=_auth_deps)
 app.include_router(dataquery_agents_router, dependencies=_auth_deps)
@@ -88,6 +91,7 @@ app.include_router(mcp_servers_router, dependencies=_auth_deps)
 app.include_router(connectors_router, dependencies=_auth_deps)
 app.include_router(monitor_router, dependencies=_auth_deps)
 app.include_router(eval_router, dependencies=_auth_deps)
+app.include_router(selfopt_router, dependencies=_auth_deps)
 app.include_router(oauth_callback_router)
 
 AVATAR_DIR.mkdir(parents=True, exist_ok=True)
@@ -177,6 +181,14 @@ async def on_startup():
 
     cron_scheduler.start()
     schedule_scheduler.start()
+    try:
+        from services.selfopt.scheduler import selfopt_scheduler
+        from services.selfopt.config import is_schedule_enabled
+
+        if is_schedule_enabled():
+            selfopt_scheduler.start()
+    except Exception as e:
+        print(f"[startup] SelfOpt scheduler skipped: {e}")
     from models import ModelProvider, ProviderStatus, gen_uuid
     db = SessionLocal()
     try:
@@ -243,6 +255,12 @@ async def on_shutdown():
 
         cron_scheduler.stop()
         schedule_scheduler.stop()
+    except Exception as e:
+        print(f"[shutdown] schedulers: {e}")
+    try:
+        from services.selfopt.scheduler import selfopt_scheduler
+
+        selfopt_scheduler.stop()
     except Exception:
         pass
 

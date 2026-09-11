@@ -117,6 +117,36 @@ def evaluate_case_rules(
     }
 
 
+def resolve_run_user_input(db: Session, run: AgentRun) -> str:
+    """Extract the user message that triggered this run from session history."""
+    if not run.session_id:
+        return ""
+    session = (
+        db.query(SessionModel).filter(SessionModel.session_id == run.session_id).first()
+    )
+    if not session:
+        return ""
+    messages = session.messages or []
+    idx = run.message_index if run.message_index is not None else -1
+    # Prefer the nearest user message before (or at) the assistant turn
+    end = len(messages) if idx < 0 else min(idx + 1, len(messages))
+    for i in range(end - 1, -1, -1):
+        msg = messages[i] or {}
+        role = (msg.get("role") or "").lower()
+        if role in ("user", "human"):
+            content = msg.get("content") or msg.get("text") or ""
+            if isinstance(content, list):
+                parts = []
+                for p in content:
+                    if isinstance(p, dict):
+                        parts.append(str(p.get("text") or p.get("content") or ""))
+                    else:
+                        parts.append(str(p))
+                content = "".join(parts)
+            return str(content).strip()
+    return ""
+
+
 def _tools_from_run(db: Session, run: AgentRun) -> List[str]:
     spans = db.query(AgentSpan).filter(AgentSpan.run_id == run.run_id).all()
     names = []
@@ -141,6 +171,7 @@ async def _rerun_case(
     *,
     case: EvalCase,
     agent_id: str,
+    version_id: Optional[str] = None,
 ) -> tuple[str, Optional[AgentRun], str, List[str], int]:
     """Create ephemeral session, run agent once, return reply + run."""
     from services.agent_service import AgentService
@@ -152,6 +183,7 @@ async def _rerun_case(
     session = SessionModel(
         session_id=gen_uuid(),
         agent_id=agent_id,
+        version_id=version_id or None,
         status=SessionStatus.ACTIVE,
         messages=[],
         title=f"eval-rerun-{case.case_id[:8]}",
@@ -181,7 +213,12 @@ async def _rerun_case(
     return reply, run, reply, tools_called, elapsed
 
 
-def run_eval_job(db: Session, job_id: str) -> Dict[str, Any]:
+def run_eval_job(
+    db: Session,
+    job_id: str,
+    *,
+    version_id: Optional[str] = None,
+) -> Dict[str, Any]:
     job = db.query(EvalJob).filter(EvalJob.job_id == job_id).first()
     if not job:
         raise ValueError("Eval job not found")
@@ -205,7 +242,12 @@ def run_eval_job(db: Session, job_id: str) -> Dict[str, Any]:
         if job.run_mode == "rerun" and agent_id:
             try:
                 reply, run, _, tools_called, elapsed = asyncio.run(
-                    _rerun_case(db, case=case, agent_id=agent_id)
+                    _rerun_case(
+                        db,
+                        case=case,
+                        agent_id=agent_id,
+                        version_id=version_id,
+                    )
                 )
             except Exception as exc:
                 ev = {
@@ -265,6 +307,7 @@ def run_eval_job(db: Session, job_id: str) -> Dict[str, Any]:
         "pass_rate": round(pass_rate, 4),
         "threshold": job.pass_threshold,
         "run_mode": job.run_mode or "replay",
+        "version_id": version_id or "",
     }
     db.commit()
     return {"job_id": job.job_id, "status": job.status, "summary": job.summary}
@@ -376,19 +419,21 @@ def add_run_to_dataset(
     dataset_id: str,
     run_id: str,
     input_text: str = "",
+    rubric: str = "Auto-imported badcase from monitor",
 ) -> EvalCase:
     run = db.query(AgentRun).filter(AgentRun.run_id == run_id).first()
     if not run:
         raise ValueError("Run not found")
     tools = _tools_from_run(db, run)
+    resolved_input = (input_text or "").strip() or resolve_run_user_input(db, run)
     case = EvalCase(
         case_id=gen_uuid(),
         dataset_id=dataset_id,
-        input_text=input_text or run.summary or "",
+        input_text=resolved_input or (run.summary or ""),
         expected_output=run.summary or "",
         expected_tools=tools,
         source_run_id=run_id,
-        rubric="Auto-imported badcase from monitor",
+        rubric=rubric,
     )
     db.add(case)
     db.commit()

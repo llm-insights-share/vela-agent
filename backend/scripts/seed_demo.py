@@ -539,9 +539,9 @@ REPORTER_PROMPT = """你是经济责任审计「报告撰写」专员。
 """
 
 COORD_PROMPT = """你是经济责任审计立项 Coordinator。
-只做任务拆解、分派与汇总，不直接编造财务数据。
-典型链路：资料收集 → 风险识别 → 报告撰写。
-汇总时保留证据引用；交付前系统可能触发 HITL 审批。
+职责：根据子 Agent 职责对用户任务做拆解、规划与编排，并汇总结果。
+典型审计链路：资料收集 → 风险识别 →（需要时）报告撰写。
+闲聊或不需要子 Agent 时由你直接回答；汇总时保留证据引用；交付前系统可能触发 HITL 审批。
 """
 
 HR_PROMPT = """你是星河控股 HR 智能助手（Demo）。
@@ -690,11 +690,14 @@ def seed_all() -> Dict[str, Any]:
 
         coord_cfg = {
             "dispatch_strategy": "llm",
-            "max_dispatch_rounds": 6,
+            "max_dispatch_rounds": 3,
             "result_integration": "coordinator",
             "hitl_before_delivery": True,
-            "total_token_budget": 500000,
-            "max_a2a_calls": 20,
+            "total_token_budget": 800000,
+            "max_a2a_calls": 12,
+            "max_calls_per_agent": 2,
+            "child_max_iterations": 6,
+            "min_tokens_for_dispatch": 40000,
             **_EAGER_TOOLS,
         }
         coordinator = _upsert_agent(
@@ -719,13 +722,19 @@ def seed_all() -> Dict[str, Any]:
                     "agent_id": collector.agent_id,
                     "role_name": "资料收集",
                     "role_description": "从 OA/财务取数并输出资料清单",
-                    "task_keywords": ["资料", "收集", "OA", "财务", "任职", "合同", "总账"],
+                    "task_keywords": [
+                        "资料", "收集", "OA", "财务", "任职", "合同", "总账",
+                        "取数", "重大事项", "决策", "会议", "纪要", "三重一大", "集体", "Q1",
+                    ],
                 },
                 {
                     "agent_id": risk.agent_id,
                     "role_name": "风险识别",
                     "role_description": "对照法规识别风险点",
-                    "task_keywords": ["风险", "关联交易", "异常", "超预算", "法规"],
+                    "task_keywords": [
+                        "风险", "关联交易", "异常", "超预算", "法规",
+                        "集体决策", "个人决定", "合规", "三重一大", "核查", "审计问题",
+                    ],
                 },
                 {
                     "agent_id": reporter.agent_id,

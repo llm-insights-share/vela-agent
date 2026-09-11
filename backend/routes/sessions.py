@@ -1,5 +1,5 @@
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, UploadFile, File, Form
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, UploadFile, File, Form, Request
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 from typing import Any, Dict, List, Optional
@@ -14,6 +14,7 @@ from schemas import (
     SessionChatAsyncResponse,
     SessionAbortResponse,
     SessionResponse,
+    SessionMessagesMutateRequest,
     LlmCallLogListResponse,
     LlmCallLogItem,
     PaginatedResponse,
@@ -25,6 +26,7 @@ from services.agent_service import agent_service, _ensure_files_for_session
 from services.session_abort import request_abort, clear_abort
 from services.attachment_service import attachment_service, MIME_TYPES as ATTACHMENT_MIME_TYPES
 from services.session_title import ensure_session_title
+from services.session_events import sse_event_stream, publish_status, session_event_bus
 from deps import CurrentUser
 
 router = APIRouter(prefix="/api/v1/sessions", tags=["sessions"])
@@ -84,10 +86,16 @@ async def _run_session_chat_background(session_id: str, request_data: Dict[str, 
                 SessionModel.session_id == session_id
             ).first()
             if session:
+                err_text = (str(e) or "").strip() or type(e).__name__
+                if isinstance(e, TimeoutError) or type(e).__name__ == "TimeoutError":
+                    err_text = (
+                        f"执行超时（{type(e).__name__}）。"
+                        "多 Agent 编排可能超过会话 timeout，请提高 Agent 超时或缩短任务。"
+                    )
                 messages = list(session.messages or [])
                 messages.append({
                     "role": "assistant",
-                    "content": f"❌ 任务执行失败：{e}",
+                    "content": f"❌ 任务执行失败：{err_text}",
                 })
                 session.messages = messages
                 flag_modified(session, "messages")
@@ -95,13 +103,21 @@ async def _run_session_chat_background(session_id: str, request_data: Dict[str, 
                 pending = dict(session.pending_context or {})
                 job = dict(pending.get("background_job") or {})
                 job_key = str(job.get("started_at") or "")
-                job["error"] = str(e)
+                job["error"] = err_text
                 pending["background_job"] = job
                 session.pending_context = pending
                 session.last_active_at = now_utc()
                 db.commit()
                 from services.inbox import notify_async_session
                 notify_async_session(db, session, job_key=job_key)
+                try:
+                    session_event_bus.publish(
+                        session_id,
+                        {"type": "error", "message": err_text},
+                    )
+                    publish_status(session_id, "ERROR")
+                except Exception:
+                    pass
         except Exception:
             traceback.print_exc()
     finally:
@@ -141,11 +157,27 @@ def create_session(
     user: CurrentUser,
     db: Session = Depends(get_db),
 ):
+    from models import Agent
+    from services.selfopt.ab_router import assign_for_new_session
+
     caller_id = (data.caller_id or "").strip() or user.user_id
+    version_id = data.version_id
+    ab_experiment_id = None
+    ab_arm = None
+
+    # Only auto-assign when client did not pin a version
+    if not version_id:
+        agent = db.query(Agent).filter(Agent.agent_id == data.agent_id).first()
+        if agent:
+            assignment = assign_for_new_session(db, agent=agent)
+            version_id = assignment.version_id
+            ab_experiment_id = assignment.ab_experiment_id
+            ab_arm = assignment.ab_arm
+
     session = SessionModel(
         session_id=gen_uuid(),
         agent_id=data.agent_id,
-        version_id=data.version_id,
+        version_id=version_id,
         caller_type=data.caller_type,
         caller_id=caller_id,
         token_budget=data.token_budget,
@@ -154,10 +186,13 @@ def create_session(
         messages=[],
         pending_context={},
         trace_id=gen_trace_id(),
+        ab_experiment_id=ab_experiment_id,
+        ab_arm=ab_arm,
     )
     db.add(session)
     db.commit()
     db.refresh(session)
+
 
     # Connector enablement is resolved at chat time from Agent connector_bindings
     # ∩ user CONNECTED connectors (catalog_key). Session toggles are no longer used.
@@ -302,6 +337,88 @@ def get_session(session_id: str, db: Session = Depends(get_db)):
     return SessionResponse.model_validate(session)
 
 
+@router.get("/{session_id}/events")
+async def session_events(session_id: str, request: Request, db: Session = Depends(get_db)):
+    """SSE stream of thinking deltas / status for a running session."""
+    session = db.query(SessionModel).filter(
+        SessionModel.session_id == session_id
+    ).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="会话不存在")
+
+    async def _gen():
+        async for chunk in sse_event_stream(session_id):
+            if await request.is_disconnected():
+                break
+            yield chunk
+
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post("/{session_id}/messages/mutate", response_model=SessionResponse)
+def mutate_session_messages(
+    session_id: str,
+    data: SessionMessagesMutateRequest,
+    db: Session = Depends(get_db),
+):
+    """Truncate/rewrite session messages for edit / redo / delete of a user turn."""
+    session = db.query(SessionModel).filter(
+        SessionModel.session_id == session_id
+    ).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    if session.status == SessionStatus.CLOSED:
+        raise HTTPException(status_code=400, detail="会话已关闭")
+    if session.status in (SessionStatus.RUNNING, SessionStatus.HITL_WAIT):
+        raise HTTPException(
+            status_code=409,
+            detail="会话正在执行或等待审批，无法修改消息",
+        )
+
+    messages = list(session.messages or [])
+    idx = data.message_index
+    if idx < 0 or idx >= len(messages):
+        raise HTTPException(status_code=400, detail="message_index 越界")
+    target = messages[idx] or {}
+    if (target.get("role") or "") != "user":
+        raise HTTPException(status_code=400, detail="只能对用户消息执行编辑/重做/删除")
+
+    action = data.action
+    if action == "delete":
+        messages = messages[:idx]
+    elif action == "redo":
+        messages = messages[: idx + 1]
+    elif action == "edit":
+        content = (data.content or "").strip()
+        if not content:
+            raise HTTPException(status_code=400, detail="编辑内容不能为空")
+        new_user = {k: v for k, v in target.items() if k != "content"}
+        new_user["role"] = "user"
+        new_user["content"] = content
+        messages = messages[:idx] + [new_user]
+    else:
+        raise HTTPException(status_code=400, detail="不支持的 action")
+
+    session.messages = messages
+    flag_modified(session, "messages")
+    # Truncation invalidates in-flight HITL / mid-run preview context
+    session.pending_context = {}
+    flag_modified(session, "pending_context")
+    session.status = SessionStatus.ACTIVE
+    session.last_active_at = now_utc()
+    db.commit()
+    db.refresh(session)
+    return SessionResponse.model_validate(session)
+
+
 @router.post("/{session_id}/chat")
 async def chat(session_id: str, data: SessionChatRequest, db: Session = Depends(get_db)):
     session = db.query(SessionModel).filter(
@@ -348,6 +465,7 @@ async def chat_async(
     if not session:
         raise HTTPException(status_code=404, detail="会话不存在")
 
+
     if session.status == SessionStatus.CLOSED:
         raise HTTPException(status_code=400, detail="会话已关闭")
 
@@ -355,10 +473,18 @@ async def chat_async(
         raise HTTPException(status_code=409, detail="会话正在运行中，请等待当前任务完成")
 
     messages = list(session.messages or [])
-    messages.append(_build_user_message_payload(data, session, db))
-    session.messages = messages
-    flag_modified(session, "messages")
-    ensure_session_title(session)
+    if data.append_user_message:
+        messages.append(_build_user_message_payload(data, session, db))
+        session.messages = messages
+        flag_modified(session, "messages")
+        ensure_session_title(session)
+    else:
+        # edit/redo path: user message already persisted by messages/mutate
+        if not messages or (messages[-1] or {}).get("role") != "user":
+            raise HTTPException(
+                status_code=400,
+                detail="会话末尾没有用户消息，无法在不追加的情况下继续对话",
+            )
 
     pending = dict(session.pending_context or {})
     pending["background_job"] = {
@@ -493,6 +619,21 @@ async def abort_session(session_id: str, db: Session = Depends(get_db)):
 
     session.last_active_at = now_utc()
     db.commit()
+
+    try:
+        if status_out == "ACTIVE":
+            session_event_bus.publish(
+                session_id,
+                {"type": "done", "status": "ACTIVE", "aborted": True},
+            )
+            publish_status(session_id, "ACTIVE")
+        else:
+            session_event_bus.publish(
+                session_id,
+                {"type": "status", "status": "ABORTING", "message": message},
+            )
+    except Exception:
+        pass
 
     return SessionAbortResponse(
         accepted=True,

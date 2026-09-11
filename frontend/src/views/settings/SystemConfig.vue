@@ -200,6 +200,83 @@
     </a-card>
 
     <a-card style="margin-bottom: 24px;">
+      <template #title>自优化（SelfOpt）</template>
+      <template #extra>
+        <a-button
+          type="text"
+          size="small"
+          :title="cardCollapsed.selfopt ? '展开' : '收起'"
+          @click.stop="cardCollapsed.selfopt = !cardCollapsed.selfopt"
+        >
+          <template #icon>
+            <UpOutlined v-if="!cardCollapsed.selfopt" />
+            <DownOutlined v-else />
+          </template>
+        </a-button>
+      </template>
+      <div v-show="!cardCollapsed.selfopt">
+        <div class="field-hint" style="margin-bottom: 12px;">
+          默认关闭。开启后须勾选目标 Agent；可指定反思模型（默认跟随各 Agent 绑定模型）。正式上线需人工确认。
+        </div>
+        <a-form :model="selfoptForm" :label-col="{ span: 4 }" :wrapper-col="{ span: 16 }">
+          <a-form-item label="启用自优化">
+            <a-switch v-model:checked="selfoptForm.enabled" />
+          </a-form-item>
+          <a-form-item label="允许在线 A/B">
+            <a-switch v-model:checked="selfoptForm.ab_enabled" :disabled="!selfoptForm.enabled" />
+          </a-form-item>
+          <a-form-item label="定时反思 Job">
+            <a-switch v-model:checked="selfoptForm.schedule_enabled" :disabled="!selfoptForm.enabled" />
+            <div class="field-hint">开启后后台按小时轮询白名单内已发布 Agent（约每 20h 跑一次）。</div>
+          </a-form-item>
+          <a-form-item label="目标 Agent">
+            <a-select
+              v-model:value="selfoptForm.agent_ids"
+              mode="multiple"
+              allow-clear
+              show-search
+              placeholder="选择可参与自优化的 Agent（空=不针对任何 Agent）"
+              :options="selfoptAgentOptions"
+              :filter-option="filterSelfoptAgent"
+              :disabled="!selfoptForm.enabled"
+              style="width: 100%"
+            />
+            <div v-if="selfoptOptionsError" class="field-hint" style="color: #b5341c">{{ selfoptOptionsError }}</div>
+          </a-form-item>
+          <a-form-item label="反思供应商">
+            <a-select
+              v-model:value="selfoptReflectProviderId"
+              allow-clear
+              show-search
+              placeholder="先选供应商（留空=跟随各 Agent）"
+              :options="selfoptProviderOptions"
+              :filter-option="filterSelfoptAgent"
+              :disabled="!selfoptForm.enabled"
+              style="width: 100%"
+              @change="onSelfoptProviderChange"
+            />
+          </a-form-item>
+          <a-form-item label="反思模型">
+            <a-select
+              v-model:value="selfoptForm.reflect_model_service_id"
+              allow-clear
+              show-search
+              placeholder="跟随目标 Agent 绑定模型"
+              :options="selfoptModelOptions"
+              :filter-option="filterSelfoptAgent"
+              :disabled="!selfoptForm.enabled || !selfoptReflectProviderId"
+              style="width: 100%"
+            />
+            <div class="field-hint">先选供应商再选模型；两项都留空则使用被优化 Agent 自己的模型服务。</div>
+          </a-form-item>
+          <a-form-item :wrapper-col="{ offset: 4, span: 16 }">
+            <a-button type="primary" :loading="selfoptSaving" @click="saveSelfopt">保存自优化配置</a-button>
+          </a-form-item>
+        </a-form>
+      </div>
+    </a-card>
+
+    <a-card style="margin-bottom: 24px;">
       <template #title>代码执行沙箱 (Code Interpreter)</template>
       <template #extra>
         <a-button
@@ -515,11 +592,12 @@
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
 import { UpOutlined, DownOutlined } from '@ant-design/icons-vue'
-import { configApi, serviceApi, memoryApi } from '../../api'
+import { configApi, serviceApi, memoryApi, agentApi, providerApi } from '../../api'
 import { message } from 'ant-design-vue'
 
 const cardCollapsed = reactive({
   tools: true,
+  selfopt: true,
   codeExec: true,
   contextual: true,
   screenpilot: true,
@@ -545,6 +623,43 @@ const observabilityMeta = reactive({
   runtime_otel_enabled: true,
 })
 const observabilitySaving = ref(false)
+const selfoptForm = reactive({
+  enabled: false,
+  schedule_enabled: false,
+  ab_enabled: true,
+  reflect_model_service_id: undefined,
+  agent_ids: [],
+})
+const selfoptSaving = ref(false)
+const selfoptAgentOptions = ref([])
+const selfoptProviderOptions = ref([])
+const selfoptModelOptions = ref([])
+const selfoptAllServices = ref([])
+const selfoptReflectProviderId = ref(undefined)
+const selfoptOptionsError = ref('')
+
+function filterSelfoptAgent(input, option) {
+  return (option?.label || '').toLowerCase().includes((input || '').toLowerCase())
+}
+
+function syncSelfoptModelOptions(providerId) {
+  const pid = providerId || selfoptReflectProviderId.value
+  if (!pid) {
+    selfoptModelOptions.value = []
+    return
+  }
+  selfoptModelOptions.value = (selfoptAllServices.value || [])
+    .filter((s) => s.provider_id === pid)
+    .map((s) => ({
+      label: `${s.display_name || s.model_name} (${s.model_name})`,
+      value: s.model_service_id,
+    }))
+}
+
+function onSelfoptProviderChange(providerId) {
+  selfoptForm.reflect_model_service_id = undefined
+  syncSelfoptModelOptions(providerId)
+}
 const observabilityEnvHint = computed(() => {
   const parts = []
   if (observabilityMeta.sdk_disabled_by_env) {
@@ -1012,10 +1127,90 @@ async function saveObservability() {
   }
 }
 
+async function fetchSelfopt() {
+  try {
+    const res = await configApi.getSelfopt()
+    selfoptForm.enabled = !!res.enabled
+    selfoptForm.schedule_enabled = !!res.schedule_enabled
+    selfoptForm.ab_enabled = res.ab_enabled !== false
+    selfoptForm.reflect_model_service_id = res.reflect_model_service_id || undefined
+    selfoptForm.agent_ids = Array.isArray(res.agent_ids) ? [...res.agent_ids] : []
+    // Resolve provider from saved model service after options loaded
+    const msid = selfoptForm.reflect_model_service_id
+    if (msid && selfoptAllServices.value.length) {
+      const svc = selfoptAllServices.value.find((s) => s.model_service_id === msid)
+      selfoptReflectProviderId.value = svc?.provider_id || undefined
+      syncSelfoptModelOptions(selfoptReflectProviderId.value)
+    } else if (!msid) {
+      selfoptReflectProviderId.value = undefined
+      selfoptModelOptions.value = []
+    }
+  } catch (e) {
+    // ignore
+  }
+}
+
+async function fetchSelfoptOptions() {
+  selfoptOptionsError.value = ''
+  try {
+    const [agentsRes, providersRes, servicesRes] = await Promise.all([
+      agentApi.list({ page: 1, page_size: 100 }),
+      providerApi.list({ page: 1, page_size: 100 }),
+      serviceApi.list({ page: 1, page_size: 100 }),
+    ])
+    selfoptAgentOptions.value = (agentsRes.items || []).map((a) => ({
+      label: a.name,
+      value: a.agent_id,
+    }))
+    selfoptProviderOptions.value = (providersRes.items || []).map((p) => ({
+      label: p.display_name || p.provider_code,
+      value: p.provider_id,
+    }))
+    selfoptAllServices.value = servicesRes.items || []
+    // Prefill cascade from saved reflect_model_service_id
+    const msid = selfoptForm.reflect_model_service_id
+    if (msid) {
+      const svc = selfoptAllServices.value.find((s) => s.model_service_id === msid)
+      selfoptReflectProviderId.value = svc?.provider_id || undefined
+    }
+    syncSelfoptModelOptions(selfoptReflectProviderId.value)
+    if (!selfoptAgentOptions.value.length) {
+      selfoptOptionsError.value = '未获取到 Agent 列表，请确认已创建 Agent'
+    }
+  } catch (e) {
+    selfoptAgentOptions.value = []
+    selfoptProviderOptions.value = []
+    selfoptAllServices.value = []
+    selfoptModelOptions.value = []
+    selfoptOptionsError.value = e.message || '加载 Agent/模型列表失败'
+  }
+}
+
+async function saveSelfopt() {
+  selfoptSaving.value = true
+  try {
+    const res = await configApi.updateSelfopt({
+      enabled: !!selfoptForm.enabled,
+      schedule_enabled: !!selfoptForm.schedule_enabled,
+      ab_enabled: !!selfoptForm.ab_enabled,
+      reflect_model_service_id: selfoptForm.reflect_model_service_id || '',
+      agent_ids: selfoptForm.agent_ids || [],
+    })
+    message.success(res.message || '自优化配置已保存')
+    await fetchSelfopt()
+  } catch (e) {
+    message.error(e.message)
+  } finally {
+    selfoptSaving.value = false
+  }
+}
+
 onMounted(async () => {
   await fetchConfig()
   await fetchToolSearch()
   await fetchObservability()
+  await fetchSelfopt()
+  await fetchSelfoptOptions()
   await fetchCodeExecConfig()
   await fetchContextualConfig()
   await fetchScreenpilot()

@@ -202,16 +202,32 @@ async def approve_action(
     # MA-IMP-09: 多 Agent 交付审批
     if approval.tool_name == "__delivery__":
         tool_args = approval.tool_args or {}
-        final_result = tool_args.get("final_result", "")
+        final_result = tool_args.get("final_result", "") or ""
+        # Fallback if tool_args lost the payload but pending_context still has it
+        if not str(final_result).strip() and session:
+            pending = session.pending_context or {}
+            if isinstance(pending, dict):
+                final_result = pending.get("final_result") or final_result
         if session:
-            messages = session.messages or []
-            messages.append({
-                "role": "assistant",
-                "content": final_result,
-                "meta": {"approved": True, "approval_id": approval_id},
-            })
+            # Copy list so SQLAlchemy detects JSON mutation
+            messages = list(session.messages or [])
+            # Merge deliverable into the same gate bubble (single chat bubble UX).
+            # Keep thinking / executionStory; do not append a second assistant message.
+            for m in messages:
+                pid = m.get("pendingApprovalId") or m.get("pending_approval_id")
+                if pid != approval_id:
+                    continue
+                prev_content = (m.get("content") or "").strip()
+                if not m.get("hitlGateNotice") and prev_content:
+                    m["hitlGateNotice"] = prev_content
+                m["approvalStatus"] = "approved"
+                m["pendingDelivery"] = True
+                m["content"] = final_result or "（交付内容为空）"
+                m.pop("approvalFinalResult", None)
             session.messages = messages
+            flag_modified(session, "messages")
             session.pending_context = {}
+            flag_modified(session, "pending_context")
         result_data["final_result"] = final_result
         result_data["kind"] = "delivery"
         if session and (session.caller_type or "").upper() == "SCHEDULE":
@@ -445,28 +461,41 @@ def reject_action(
     ).first()
     if session:
         session.status = SessionStatus.ACTIVE
-        messages = session.messages or []
+        messages = list(session.messages or [])
         if approval.tool_name == "__workflow_hitl__":
             messages.append({
                 "role": "system",
                 "content": f"[HITL 审批拒绝] 工作流在节点 {approval.tool_args.get('node_id', '')} 被拒绝。原因：{payload.comment or '无'}",
                 "meta": {"approved": False, "approval_id": approval_id},
             })
-            session.pending_context = {}
         elif approval.tool_name == "__delivery__":
-            messages.append({
-                "role": "assistant",
-                "content": f"⏸️ 多 Agent 任务的交付物被审批拒绝。\n拒绝人：{payload.reviewer or 'unknown'}\n拒绝原因：{payload.comment or '无'}",
-                "meta": {"approved": False, "approval_id": approval_id},
-            })
+            # Keep a single bubble: mark gate rejected in place (preserve process story).
+            reject_text = (
+                f"⏸️ 多 Agent 任务的交付物被审批拒绝。\n"
+                f"拒绝人：{payload.reviewer or 'unknown'}\n"
+                f"拒绝原因：{payload.comment or '无'}"
+            )
+            for m in messages:
+                pid = m.get("pendingApprovalId") or m.get("pending_approval_id")
+                if pid != approval_id:
+                    continue
+                prev_content = (m.get("content") or "").strip()
+                if not m.get("hitlGateNotice") and prev_content:
+                    m["hitlGateNotice"] = prev_content
+                m["approvalStatus"] = "rejected"
+                m["pendingDelivery"] = True
+                m["content"] = reject_text
         else:
             messages.append({
                 "role": "system",
                 "content": f"[HITL 审批拒绝] 工具 {approval.tool_name} 调用被拒绝。原因：{payload.comment or '无'}。请基于此结果调整后续行动。",
                 "meta": {"approved": False, "approval_id": approval_id},
             })
+        from sqlalchemy.orm.attributes import flag_modified
         session.messages = messages
+        flag_modified(session, "messages")
         session.pending_context = {}
+        flag_modified(session, "pending_context")
 
     db.commit()
     if session and (session.caller_type or "").upper() == "SCHEDULE":

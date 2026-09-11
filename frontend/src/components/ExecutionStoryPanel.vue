@@ -1,5 +1,5 @@
 <template>
-  <div v-if="story && visiblePhases.length" class="exec-story">
+  <div v-if="visible" class="exec-story">
     <div class="exec-story-header" @click="expanded = !expanded">
       <CaretRightOutlined v-if="!expanded" style="font-size: 10px;" />
       <CaretDownOutlined v-else style="font-size: 10px;" />
@@ -9,6 +9,11 @@
     </div>
 
     <div v-if="expanded" class="exec-story-body">
+      <div v-if="liveThinking" class="exec-live-thinking">
+        <div class="exec-live-thinking-label">实时思考</div>
+        <pre class="exec-live-thinking-text">{{ liveThinking }}</pre>
+      </div>
+
       <div
         v-for="phase in visiblePhases"
         :key="phase.id"
@@ -28,7 +33,10 @@
           >
             <div class="exec-step-head">
               <a-tag :color="stepKindColor(step.kind)" size="small">{{ stepKindLabel(step) }}</a-tag>
+              <a-tag v-if="step.role_name" color="purple" size="small">{{ step.role_name }}</a-tag>
+              <a-tag v-if="step.round" color="default" size="small">第 {{ step.round }} 轮</a-tag>
               <span class="exec-step-title">{{ step.title }}</span>
+              <span v-if="step.duration_ms" class="exec-step-duration">{{ step.duration_ms }}ms</span>
               <a-button
                 v-if="step.detail && step.detail.length > 80"
                 type="link"
@@ -63,7 +71,12 @@ const props = defineProps({
   story: { type: Object, default: null },
   /** When running/hitl, expand by default so user sees live progress */
   defaultExpanded: { type: Boolean, default: false },
+  extraSummary: { type: String, default: '' },
+  /** Streaming thinking text for the current LLM turn */
+  liveThinking: { type: String, default: '' },
 })
+
+const emit = defineEmits(['expand-change'])
 
 const expanded = ref(!!props.defaultExpanded)
 const openPhases = reactive(new Set())
@@ -72,19 +85,32 @@ const openSteps = reactive(new Set())
 watch(
   () => props.story?.status,
   (status) => {
-    if (status === 'running' || status === 'hitl_wait') {
+    if (props.defaultExpanded && (status === 'running' || status === 'hitl_wait')) {
       expanded.value = true
     }
   },
-  { immediate: true },
 )
 
 watch(
   () => props.defaultExpanded,
   (v) => {
+    expanded.value = !!v
+  },
+)
+
+watch(
+  () => props.liveThinking,
+  (v) => {
     if (v) expanded.value = true
   },
 )
+
+watch(expanded, (v) => emit('expand-change', v))
+
+const visible = computed(() => {
+  if (props.liveThinking) return true
+  return !!(props.story && visiblePhases.value.length)
+})
 
 const visiblePhases = computed(() => {
   const phases = props.story?.phases || []
@@ -98,12 +124,16 @@ const statusTag = computed(() => {
   if (s === 'error') return { label: '异常', color: 'red' }
   if (s === 'aborted') return { label: '已中止', color: 'default' }
   if (s === 'done') return { label: '完成', color: 'green' }
+  if (props.liveThinking) return { label: '进行中', color: 'processing' }
   return null
 })
 
 const headerSummary = computed(() => {
   const story = props.story
-  if (!story) return ''
+  if (!story) {
+    if (props.liveThinking) return props.extraSummary || '模型思考中…'
+    return props.extraSummary || ''
+  }
   const parts = []
   if (story.summary) parts.push(story.summary)
   const m = story.metrics || {}
@@ -111,6 +141,8 @@ const headerSummary = computed(() => {
   if (m.tool_calls) meta.push(`${m.tool_calls} 次工具`)
   if (m.elapsed_ms) meta.push(`${Math.round(m.elapsed_ms / 1000)}s`)
   if (meta.length) parts.push(meta.join(' · '))
+  if (props.extraSummary) parts.push(props.extraSummary)
+  if (props.liveThinking && !parts.length) parts.push('模型思考中…')
   return parts.join(' · ')
 })
 
@@ -156,10 +188,12 @@ function stepKindColor(kind) {
     hitl: 'orange',
     check: 'green',
     error: 'red',
+    dispatch: 'purple',
   })[kind] || 'default'
 }
 
 function stepKindLabel(step) {
+  if (step.kind === 'dispatch') return '调度'
   if (step.kind === 'tool' || step.kind === 'code' || step.kind === 'ui_skill') {
     return step.tool_name || step.kind
   }
@@ -178,7 +212,6 @@ function stepKindLabel(step) {
 function isPhaseOpen(phase) {
   if (openPhases.has(phase.id)) return true
   if (openPhases.has(`closed:${phase.id}`)) return false
-  // Default: open active/error/hitl phases; others collapsed
   return phase.status === 'active' || phase.status === 'error' || phase.status === 'hitl'
 }
 
@@ -190,7 +223,6 @@ function togglePhase(id) {
     openPhases.delete(`closed:${id}`)
     openPhases.add(id)
   } else {
-    // was default-open → close
     openPhases.add(`closed:${id}`)
   }
 }
@@ -241,6 +273,30 @@ function toggleStep(id) {
   overflow-y: auto;
   border-top: 1px solid #eef0f3;
 }
+.exec-live-thinking {
+  margin: 8px 0 12px;
+  padding: 8px 10px;
+  background: #fff;
+  border: 1px dashed #e0dcd4;
+  border-radius: 6px;
+}
+.exec-live-thinking-label {
+  font-size: 11px;
+  color: #9e9590;
+  margin-bottom: 4px;
+  font-weight: 500;
+}
+.exec-live-thinking-text {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: #5c5650;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  max-height: 220px;
+  overflow-y: auto;
+}
 .exec-phase {
   margin-top: 8px;
 }
@@ -288,6 +344,11 @@ function toggleStep(id) {
 }
 .exec-step-title {
   color: #444;
+}
+.exec-step-duration {
+  margin-left: auto;
+  color: #999;
+  font-size: 11px;
 }
 .exec-step-toggle {
   padding: 0;

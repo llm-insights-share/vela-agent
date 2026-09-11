@@ -20,17 +20,18 @@ _ARG_PREVIEW_LIMIT = 800
 _TOOL_RESULT_PREVIEW = 800
 
 
-def bind_session(session_id: str, base_seq: int = 0, default_source: str = "react") -> None:
-    _recorder_ctx.set(
-        {
-            "session_id": session_id,
-            "base_seq": base_seq,
-            "buffer": [],
-            "turns": [],
-            "default_source": default_source,
-            "prev_message_count": 0,
-        }
-    )
+def bind_session(session_id: str, base_seq: int = 0, default_source: str = "react", **extra: Any):
+    """Bind a new recorder context. Returns a ContextVar token for nest-safe reset."""
+    ctx: Dict[str, Any] = {
+        "session_id": session_id,
+        "base_seq": base_seq,
+        "buffer": [],
+        "turns": [],
+        "default_source": default_source,
+        "prev_message_count": 0,
+    }
+    ctx.update(extra)
+    return _recorder_ctx.set(ctx)
 
 
 def unbind_session() -> None:
@@ -264,6 +265,27 @@ def record_call(
     ctx["buffer"].append(record)
     ctx["turns"].append(turn)
     ctx["prev_message_count"] = len(messages or [])
+
+    # Bubble nested (sub-agent) calls into parent coordinator session for debug drawer
+    parent = ctx.get("parent_ctx")
+    if isinstance(parent, dict) and parent is not ctx:
+        bubbled = _safe_copy(record)
+        if isinstance(bubbled, dict):
+            bubbled["call_id"] = gen_uuid()
+            bubbled["seq"] = int(parent.get("base_seq") or 0) + len(parent.get("buffer") or []) + 1
+            label = (ctx.get("bubble_label") or "subagent").strip() or "subagent"
+            src = str(bubbled.get("source") or "react")
+            if not src.startswith("sub:"):
+                bubbled["source"] = f"sub:{label}/{src}"
+            parent.setdefault("buffer", []).append(bubbled)
+            p_prev = int(parent.get("prev_message_count") or 0)
+            parent.setdefault("turns", []).append(
+                build_turn_from_record(bubbled, prev_message_count=p_prev)
+            )
+            parent["prev_message_count"] = len(
+                ((bubbled.get("input") or {}).get("messages")) or []
+            )
+
     return record
 
 
@@ -341,12 +363,19 @@ def flush_to_session(db, session) -> None:
 
 
 class LlmRecordingScope:
-    """Async context manager to bind/flush LLM call recording for a session chat."""
+    """Async context manager to bind/flush LLM call recording for a session chat.
 
-    def __init__(self, db, session, agent) -> None:
+    Nest-safe: sub-agent chat_with_agent scopes restore the parent context on exit
+    so coordinator sessions keep recording across A2A calls.
+    """
+
+    def __init__(self, db, session, agent, *, bubble_to_parent: bool = True) -> None:
         self.db = db
         self.session = session
         self.agent = agent
+        self.bubble_to_parent = bubble_to_parent
+        self._token = None
+        self._prev_source = None
 
     async def __aenter__(self):
         from models import AgentType
@@ -356,7 +385,10 @@ class LlmRecordingScope:
             AgentType.WORKFLOW: "workflow",
             AgentType.SINGLE: "react",
         }
-        # Clear stale mid-run preview
+        parent_ctx = _recorder_ctx.get()
+        self._prev_source = _call_source_ctx.get()
+
+        # Clear stale mid-run preview (only for outermost / own session)
         try:
             pending = dict(self.session.pending_context or {})
             if "llm_turns" in pending:
@@ -368,10 +400,20 @@ class LlmRecordingScope:
                 self.db.commit()
         except Exception:
             pass
-        bind_session(
+
+        default_source = default_source_map.get(self.agent.agent_type, "react")
+        extra: Dict[str, Any] = {}
+        if self.bubble_to_parent and isinstance(parent_ctx, dict):
+            # Nested under another recording scope (e.g. COMPOSITE → specialist)
+            extra["parent_ctx"] = parent_ctx
+            extra["bubble_label"] = getattr(self.agent, "name", None) or "subagent"
+            default_source = f"sub:{extra['bubble_label']}"
+
+        self._token = bind_session(
             self.session.session_id,
             base_seq=len(self.session.llm_calls or []),
-            default_source=default_source_map.get(self.agent.agent_type, "react"),
+            default_source=default_source,
+            **extra,
         )
         return self
 
@@ -380,5 +422,11 @@ class LlmRecordingScope:
             flush_to_session(self.db, self.session)
         except Exception as e:
             print(f"[llm_call_recorder] flush failed: {e}")
-        unbind_session()
+        finally:
+            # Restore parent context instead of wiping (critical for multi-agent)
+            if self._token is not None:
+                _recorder_ctx.reset(self._token)
+            else:
+                unbind_session()
+            _call_source_ctx.set(self._prev_source)
         return False

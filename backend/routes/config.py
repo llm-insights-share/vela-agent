@@ -242,6 +242,67 @@ def update_observability_config(data: ObservabilityConfigUpdate):
     }
 
 
+class SelfOptConfigUpdate(BaseModel):
+    enabled: bool = False
+    schedule_enabled: bool = False
+    ab_enabled: bool = True
+    reflect_model_service_id: str = ""
+    agent_ids: List[str] = []
+
+
+@router.get("/selfopt")
+def get_selfopt_config():
+    from services.selfopt.config import load_selfopt_config
+
+    cfg = load_selfopt_config()
+    return {
+        "enabled": cfg.enabled,
+        "schedule_enabled": cfg.schedule_enabled,
+        "ab_enabled": cfg.ab_enabled,
+        "reflect_model_service_id": cfg.reflect_model_service_id or "",
+        "agent_ids": list(cfg.agent_ids or []),
+    }
+
+
+@router.put("/selfopt")
+def update_selfopt_config(data: SelfOptConfigUpdate, db: Session = Depends(get_db)):
+    from services.selfopt.config import SelfOptConfig, save_selfopt_config
+    from services.selfopt.promote import abort_all_running_for_disable
+
+    was = _load_config().get("selfopt") or {}
+    cfg = save_selfopt_config(
+        SelfOptConfig(
+            enabled=bool(data.enabled),
+            schedule_enabled=bool(data.schedule_enabled),
+            ab_enabled=bool(data.ab_enabled),
+            reflect_model_service_id=str(data.reflect_model_service_id or "").strip(),
+            agent_ids=list(data.agent_ids or []),
+        )
+    )
+    aborted = 0
+    if not cfg.enabled and bool(was.get("enabled", False)):
+        aborted = abort_all_running_for_disable(db)
+    # Hot start/stop schedule loop
+    try:
+        from services.selfopt.scheduler import selfopt_scheduler
+
+        if cfg.enabled and cfg.schedule_enabled:
+            selfopt_scheduler.start()
+        else:
+            selfopt_scheduler.stop()
+    except Exception:
+        pass
+    return {
+        "message": "自优化配置已保存",
+        "enabled": cfg.enabled,
+        "schedule_enabled": cfg.schedule_enabled,
+        "ab_enabled": cfg.ab_enabled,
+        "reflect_model_service_id": cfg.reflect_model_service_id or "",
+        "agent_ids": list(cfg.agent_ids or []),
+        "aborted_experiments": aborted,
+    }
+
+
 @router.get("/code-exec", response_model=CodeExecConfigResponse)
 def get_code_exec_config():
     from services.code_exec.config import load_code_exec_config

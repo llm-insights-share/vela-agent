@@ -28,7 +28,9 @@
             <a-tag :color="statusColor(record.status)">{{ statusLabel(record.status) }}</a-tag>
           </template>
           <template v-if="column.key === 'model_name'">
-            <a-tag v-if="record.model_name" color="blue">{{ record.model_name }}</a-tag>
+            <a-tooltip v-if="record.model_name" :title="record.model_name">
+              <span class="model-name-tag">{{ record.model_name }}</span>
+            </a-tooltip>
             <span v-else style="color: #9e9590">-</span>
           </template>
           <template v-if="column.key === 'action'">
@@ -64,11 +66,10 @@ const columns = [
   { title: '名称', key: 'name', dataIndex: 'name' },
   { title: '描述', dataIndex: 'description', ellipsis: true },
   { title: '类型', key: 'agent_type', width: 100 },
-  { title: '模型', key: 'model_name' },
-  { title: '版本', dataIndex: 'current_version' },
-  { title: '自主级别', dataIndex: 'autonomy_level', width: 100 },
+  { title: '模型', key: 'model_name', width: 180 },
+  { title: '版本', dataIndex: 'current_version', width: 90 },
   { title: '状态', key: 'status', width: 100 },
-  { title: '操作', key: 'action', width: 220 },
+  { title: '操作', key: 'action', width: 280 },
 ]
 
 function statusColor(s) {
@@ -134,4 +135,20 @@ onMounted(fetchAgents)
 <style scoped>
 .page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
 .page-title { font-family: 'Noto Serif SC', serif; font-size: 22px; font-weight: 700; color: #1a1714; margin: 0; }
+.model-name-tag {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+  padding: 1px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #1677ff;
+  background: #e6f4ff;
+  border: 1px solid #91caff;
+  cursor: default;
+}
 </style>

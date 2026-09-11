@@ -538,6 +538,8 @@ class AgentService:
                 msg["executionStory"] = result["execution_story"]
             if result.get("llm_turns"):
                 msg["llmTurns"] = result["llm_turns"]
+            if result.get("audit_trail"):
+                msg["auditTrail"] = result["audit_trail"]
             if result.get("execution_trace"):
                 msg["executionTrace"] = result["execution_trace"]
             if result.get("execution_mode"):
@@ -564,6 +566,12 @@ class AgentService:
                 msg["pendingOtp"] = True
             if result.get("pending_skill_params"):
                 msg["pendingSkillParams"] = True
+            notice = result.get("hitl_gate_notice") or result.get("hitlGateNotice")
+            if notice:
+                msg["hitlGateNotice"] = notice
+            elif result.get("pending_delivery") and content:
+                # Waiting-state content is the gate notice until approve merges the deliverable.
+                msg["hitlGateNotice"] = content
 
         # HITL 续跑 / 上一条是 system 进度：追加新 assistant，避免覆盖审批与进度消息。
         append_new = bool(content) and (
@@ -649,6 +657,39 @@ class AgentService:
         except Exception:
             pass
 
+        try:
+            from services.session_events import publish_status, session_event_bus
+
+            status_name = getattr(session.status, "value", None) or str(session.status)
+            if pending_approval_id or session_status == "HITL_WAIT":
+                session_event_bus.publish(
+                    session.session_id,
+                    {
+                        "type": "hitl",
+                        "pending_approval_id": pending_approval_id,
+                        "status": "HITL_WAIT",
+                    },
+                )
+                publish_status(session.session_id, "HITL_WAIT")
+            elif success is False:
+                session_event_bus.publish(
+                    session.session_id,
+                    {"type": "error", "message": content or "任务执行失败"},
+                )
+                publish_status(session.session_id, "ERROR")
+            else:
+                session_event_bus.publish(
+                    session.session_id,
+                    {
+                        "type": "done",
+                        "status": status_name,
+                        "aborted": bool(result.get("aborted")),
+                    },
+                )
+                publish_status(session.session_id, status_name or "ACTIVE")
+        except Exception:
+            pass
+
     @staticmethod
     async def chat_with_agent(
         db: Session,
@@ -683,6 +724,23 @@ class AgentService:
         ).first()
         if not session:
             raise ValueError("会话不存在")
+
+        # Pin AgentVersion snapshot when session.version_id is set (A/B or eval rerun)
+        if getattr(session, "version_id", None):
+            from models import AgentVersion as _AV
+            from services.selfopt.apply import apply_version_snapshot_in_memory
+
+            ver = db.query(_AV).filter(_AV.version_id == session.version_id).first()
+            if ver:
+                apply_version_snapshot_in_memory(agent, ver)
+                # Refresh model/provider if snapshot changed model_service_id
+                model_svc = db.query(ModelService).filter(
+                    ModelService.model_service_id == agent.model_service_id
+                ).first()
+                if model_svc:
+                    provider = db.query(ModelProvider).filter(
+                        ModelProvider.provider_id == model_svc.provider_id
+                    ).first()
 
         from services.session_abort import clear_abort
 
@@ -724,30 +782,51 @@ class AgentService:
                     provider=provider,
                     model_svc=model_svc,
                 )
+                base_to = float(timeout_seconds) if timeout_seconds else 300.0
+                cfg = getattr(agent, "composition_config", None) or {}
+                rounds = max(1, int(cfg.get("max_dispatch_rounds") or 3))
+                # Multi-agent runs sub-agents sequentially across rounds; 1x agent timeout is too short
+                coord_timeout = min(max(base_to, base_to * rounds), 1800.0)
                 result = await asyncio.wait_for(
                     coordinator.run(message),
-                    timeout=float(timeout_seconds) if timeout_seconds else 300.0,
+                    timeout=coord_timeout,
                 )
                 # 写入 session 消息历史（HITL 挂起时不写 final_result，留待审批通过后再写）
-                messages = session.messages or []
+                from sqlalchemy.orm.attributes import flag_modified
+                messages = list(session.messages or [])
                 if persist_user_message:
                     messages.append({"role": "user", "content": message})
                 pending_approval_id = result.get("pending_approval_id")
                 if not pending_approval_id:
-                    messages.append({"role": "assistant", "content": result.get("result", "")})
+                    messages.append({
+                        "role": "assistant",
+                        "content": result.get("result", ""),
+                        "thinking": "\n".join(result.get("thinking_log", [])),
+                        "executionMode": "multi_agent",
+                        "executionStory": result.get("execution_story"),
+                        "auditTrail": result.get("audit_trail", []),
+                    })
                 session.messages = messages
+                flag_modified(session, "messages")
                 session.token_used = (session.token_used or 0) + result.get("total_tokens", 0)
                 session.last_active_at = now_utc()
                 db.commit()
 
                 # MA-IMP-09: 交付前 HITL Gate 触发时返回挂起响应
                 if pending_approval_id:
+                    gate_notice = (
+                        f"⏸️ 多 Agent 任务已完成，但 Coordinator 触发了交付前 HITL Gate。\n"
+                        f"审批工单 ID: `{pending_approval_id}`\n\n"
+                        f"请在审批中心通过后查看最终交付物。"
+                    )
                     return {
-                        "content": f"⏸️ 多 Agent 任务已完成，但 Coordinator 触发了交付前 HITL Gate。\n审批工单 ID: `{pending_approval_id}`\n\n请在审批中心通过后查看最终交付物。",
+                        "content": gate_notice,
+                        "hitl_gate_notice": gate_notice,
                         "thinking": "\n".join(result.get("thinking_log", [])),
                         "tokens_used": result.get("total_tokens", 0),
                         "total_tokens": (session.token_used or 0),
-                        "execution_mode": "hitl_pending",
+                        "execution_mode": "multi_agent",
+                        "execution_story": result.get("execution_story"),
                         "files": [],
                         "audit_trail": result.get("audit_trail", []),
                         "dispatch_count": result.get("dispatch_count", 0),
@@ -762,6 +841,7 @@ class AgentService:
                     "tokens_used": result.get("total_tokens", 0),
                     "total_tokens": (session.token_used or 0),
                     "execution_mode": "multi_agent",
+                    "execution_story": result.get("execution_story"),
                     "files": [],
                     "audit_trail": result.get("audit_trail", []),
                     "dispatch_count": result.get("dispatch_count", 0),
@@ -1822,15 +1902,44 @@ class AgentLoop:
         }
         llm_source = source_map.get(getattr(self, "_current_mode", "react"), "react")
 
-        completion = await model_provider_service.chat_completion(
-            provider=self.provider,
-            model_name=self.model_svc.model_name,
-            messages=messages,
-            max_tokens=effective_max_tokens,
-            tools=tools,
-            timeout_seconds=self.timeout_seconds,
-            source=llm_source,
-        )
+        try:
+            completion = await model_provider_service.chat_completion_stream(
+                provider=self.provider,
+                model_name=self.model_svc.model_name,
+                messages=messages,
+                max_tokens=effective_max_tokens,
+                tools=tools,
+                timeout_seconds=self.timeout_seconds,
+                source=llm_source,
+                on_delta=self._on_llm_delta,
+            )
+        except Exception as stream_err:
+            # Some providers reject stream=true; fall back to buffered completion.
+            print(f"[AgentLoop] stream failed, fallback: {stream_err}")
+            completion = await model_provider_service.chat_completion(
+                provider=self.provider,
+                model_name=self.model_svc.model_name,
+                messages=messages,
+                max_tokens=effective_max_tokens,
+                tools=tools,
+                timeout_seconds=self.timeout_seconds,
+                source=llm_source,
+            )
+            # Surface completed reasoning/content as one delta when stream unavailable
+            try:
+                msg = ((completion.get("choices") or [{}])[0].get("message") or {})
+                rc = (
+                    completion.get("reasoning_content")
+                    or msg.get("reasoning_content")
+                    or msg.get("thinking")
+                    or ""
+                )
+                if rc:
+                    self._on_llm_delta("reasoning", str(rc))
+                elif msg.get("content"):
+                    self._on_llm_delta("content", str(msg.get("content"))[:2000])
+            except Exception:
+                pass
 
         usage = completion.get("usage", {})
         self.total_tokens_used += usage.get("total_tokens", 0)
@@ -1838,7 +1947,52 @@ class AgentLoop:
             self._flush_llm_turns_preview()
         except Exception:
             pass
+        try:
+            self._publish_story_patch()
+        except Exception:
+            pass
         return completion
+
+    def _on_llm_delta(self, kind: str, text: str) -> None:
+        from services.session_events import publish_thinking_delta
+
+        sid = getattr(self.session, "session_id", None)
+        if not sid:
+            return
+        # Prefer showing reasoning; content deltas also help models without reasoning
+        field = "reasoning" if kind == "reasoning" else "content"
+        turn = None
+        try:
+            from services.llm_call_recorder import get_active_context
+            ctx = get_active_context()
+            if ctx and ctx.get("turns"):
+                turn = len(ctx["turns"]) + 1
+        except Exception:
+            pass
+        publish_thinking_delta(sid, text=text, field=field, turn=turn)
+
+    def _publish_story_patch(self) -> None:
+        from services.session_events import publish_story_patch
+
+        sid = getattr(self.session, "session_id", None)
+        story = getattr(self, "story", None)
+        if not sid or not story:
+            return
+        try:
+            snapshot = story.snapshot() if hasattr(story, "snapshot") else None
+            if snapshot is None and hasattr(story, "to_dict"):
+                snapshot = story.to_dict()
+            if snapshot is None and isinstance(getattr(story, "phases", None), list):
+                snapshot = {
+                    "status": getattr(story, "status", "running") or "running",
+                    "summary": getattr(story, "summary", "") or "",
+                    "phases": list(story.phases),
+                    "metrics": getattr(story, "metrics", {}) or {},
+                }
+            if snapshot:
+                publish_story_patch(sid, snapshot)
+        except Exception:
+            pass
 
     def _flush_llm_turns_preview(self) -> None:
         from services.llm_call_recorder import flush_turns_preview, get_active_context

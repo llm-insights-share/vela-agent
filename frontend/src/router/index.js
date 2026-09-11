@@ -125,9 +125,13 @@ const routes = [
     redirect: '/screenpilot/skills',
   },
   {
+    path: '/approvals',
+    name: 'ApprovalCenter',
+    component: () => import('../views/approvals/ApprovalCenter.vue'),
+  },
+  {
     path: '/screenpilot/approvals',
-    name: 'ScreenPilotApprovals',
-    component: () => import('../views/screenpilot/ApprovalInbox.vue'),
+    redirect: (to) => ({ path: '/approvals', query: { ...to.query, category: 'screenpilot' } }),
   },
   {
     path: '/monitor',
@@ -138,6 +142,11 @@ const routes = [
     path: '/eval',
     name: 'EvalHub',
     component: () => import('../views/eval/EvalHub.vue'),
+  },
+  {
+    path: '/selfopt',
+    name: 'SelfOptHub',
+    component: () => import('../views/selfopt/SelfOptHub.vue'),
   },
   {
     path: '/eval/datasets',

@@ -445,8 +445,126 @@ def _migrate_db():
             created_at DATETIME
         )
         """,
+        """
+        CREATE TABLE IF NOT EXISTS selfopt_jobs (
+            job_id VARCHAR PRIMARY KEY,
+            agent_id VARCHAR NOT NULL,
+            job_label VARCHAR(256),
+            window_start DATETIME,
+            window_end DATETIME,
+            status VARCHAR(32) DEFAULT 'pending',
+            stats_json TEXT DEFAULT '{}',
+            created_at DATETIME,
+            updated_at DATETIME
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS selfopt_proposals (
+            proposal_id VARCHAR PRIMARY KEY,
+            job_id VARCHAR,
+            agent_id VARCHAR NOT NULL,
+            base_version_id VARCHAR,
+            candidate_version_id VARCHAR,
+            change_kind VARCHAR(64) DEFAULT 'prompt_fewshot',
+            risk_tier VARCHAR(16) DEFAULT 'T1',
+            diff_json TEXT DEFAULT '{}',
+            rationale TEXT DEFAULT '',
+            evidence_run_ids TEXT DEFAULT '[]',
+            eval_before_job_id VARCHAR DEFAULT '',
+            eval_after_job_id VARCHAR DEFAULT '',
+            eval_report_json TEXT DEFAULT '{}',
+            status VARCHAR(32) DEFAULT 'drafted',
+            created_at DATETIME,
+            updated_at DATETIME
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS selfopt_ab_experiments (
+            experiment_id VARCHAR PRIMARY KEY,
+            agent_id VARCHAR NOT NULL,
+            proposal_id VARCHAR,
+            control_version_id VARCHAR NOT NULL,
+            treatment_version_id VARCHAR NOT NULL,
+            strategy VARCHAR(32) DEFAULT 'round_robin',
+            rr_counter INTEGER DEFAULT 0,
+            status VARCHAR(32) DEFAULT 'running',
+            started_at DATETIME,
+            ended_at DATETIME,
+            min_sessions INTEGER DEFAULT 10,
+            target_sessions INTEGER DEFAULT 40,
+            decision VARCHAR(32) DEFAULT 'pending',
+            decided_by VARCHAR(128) DEFAULT '',
+            decided_at DATETIME,
+            decision_note TEXT DEFAULT '',
+            created_at DATETIME
+        )
+        """,
     ):
         cursor.execute(table_sql)
+
+    # SelfOpt column migrations
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='agents'")
+    if cursor.fetchone():
+        cursor.execute("PRAGMA table_info(agents)")
+        agent_cols = {row[1] for row in cursor.fetchall()}
+        if "selfopt_enabled" not in agent_cols:
+            cursor.execute("ALTER TABLE agents ADD COLUMN selfopt_enabled BOOLEAN")
+
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'")
+    if cursor.fetchone():
+        cursor.execute("PRAGMA table_info(sessions)")
+        sess_cols = {row[1] for row in cursor.fetchall()}
+        if "ab_experiment_id" not in sess_cols:
+            cursor.execute("ALTER TABLE sessions ADD COLUMN ab_experiment_id VARCHAR")
+        if "ab_arm" not in sess_cols:
+            cursor.execute("ALTER TABLE sessions ADD COLUMN ab_arm VARCHAR(16)")
+
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='agent_runs'")
+    if cursor.fetchone():
+        cursor.execute("PRAGMA table_info(agent_runs)")
+        run_cols = {row[1] for row in cursor.fetchall()}
+        if "ab_experiment_id" not in run_cols:
+            cursor.execute("ALTER TABLE agent_runs ADD COLUMN ab_experiment_id VARCHAR")
+        if "ab_arm" not in run_cols:
+            cursor.execute("ALTER TABLE agent_runs ADD COLUMN ab_arm VARCHAR(16)")
+
+    # SelfOptJob.job_label migration + backfill
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='selfopt_jobs'")
+    if cursor.fetchone():
+        cursor.execute("PRAGMA table_info(selfopt_jobs)")
+        job_cols = {row[1] for row in cursor.fetchall()}
+        if "job_label" not in job_cols:
+            cursor.execute("ALTER TABLE selfopt_jobs ADD COLUMN job_label VARCHAR(256)")
+        # Backfill missing labels: {agent_name|agent_id短码}-{YYYYMMDD}-{seq}
+        cursor.execute(
+            """
+            SELECT j.job_id, j.agent_id, j.created_at, a.name
+            FROM selfopt_jobs j
+            LEFT JOIN agents a ON a.agent_id = j.agent_id
+            WHERE j.job_label IS NULL OR j.job_label = ''
+            ORDER BY j.agent_id, j.created_at ASC
+            """
+        )
+        rows = cursor.fetchall()
+        day_seq: dict = {}
+        for job_id, agent_id, created_at, agent_name in rows:
+            name_part = (agent_name or "").strip() or (str(agent_id or "")[:8] or "agent")
+            # Normalize created_at to YYYYMMDD
+            date_str = ""
+            if created_at:
+                s = str(created_at).replace("T", " ").replace("-", "")
+                date_str = s[:8] if len(s) >= 8 else ""
+            if not date_str or not date_str.isdigit():
+                from datetime import datetime, timezone
+
+                date_str = datetime.now(timezone.utc).strftime("%Y%m%d")
+            key = (agent_id, date_str)
+            day_seq[key] = day_seq.get(key, 0) + 1
+            label = f"{name_part}-{date_str}-{day_seq[key]:02d}"
+            cursor.execute(
+                "UPDATE selfopt_jobs SET job_label = ? WHERE job_id = ?",
+                (label, job_id),
+            )
 
     conn.commit()
     conn.close()

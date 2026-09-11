@@ -237,6 +237,301 @@ class ModelProviderService:
                         )
                     raise
 
+
+    @staticmethod
+    async def chat_completion_stream(
+        provider: ModelProvider,
+        model_name: str,
+        messages: List[Dict[str, Any]],
+        max_tokens: int = 4096,
+        temperature: float = 0.7,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[Any] = None,
+        timeout_seconds: Optional[int] = None,
+        source: Optional[str] = None,
+        on_delta: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """Stream chat completion; accumulate into the same shape as chat_completion.
+
+        on_delta(kind, text) where kind is 'reasoning' | 'content'.
+        """
+        import json as _json
+        from services.llm_call_recorder import get_active_context, record_call
+        from services.monitor.oi_tracing import mark_span_error, mark_span_ok, oi_span, set_span_attrs
+        from services.monitor.openinference_attrs import attrs_for_llm_call
+
+        headers = {"Authorization": f"Bearer {provider.api_key}", "Content-Type": "application/json"}
+        if provider.extra_headers:
+            headers.update(provider.extra_headers)
+
+        payload = {
+            "model": model_name,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": True,
+        }
+        if tools:
+            payload["tools"] = tools
+        if tool_choice is not None:
+            payload["tool_choice"] = tool_choice
+
+        read_timeout = float(timeout_seconds) if timeout_seconds else float(provider.timeout_seconds)
+        timeout = httpx.Timeout(
+            connect=10.0,
+            read=read_timeout,
+            write=30.0,
+            pool=10.0,
+        )
+
+        record_enabled = get_active_context() is not None
+        started = time.monotonic()
+        span_name = f"chat.{source or 'llm'}"
+
+        content_parts: List[str] = []
+        reasoning_parts: List[str] = []
+        tool_calls_acc: Dict[int, Dict[str, Any]] = {}
+        finish_reason = None
+        usage: Dict[str, Any] = {}
+        model_out = model_name
+
+        def _emit(kind: str, text: str) -> None:
+            if not text or not on_delta:
+                return
+            try:
+                on_delta(kind, text)
+            except Exception:
+                pass
+
+        with oi_span(
+            span_name,
+            attrs_for_llm_call(
+                model_name=model_name,
+                messages=messages,
+                tools=tools,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                source=source,
+            ),
+        ) as span:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                try:
+                    url = provider.base_url.rstrip("/") + "/chat/completions"
+                    async with client.stream("POST", url, headers=headers, json=payload) as response:
+                        if response.status_code >= 400:
+                            body = (await response.aread()).decode("utf-8", errors="replace")[:1000]
+                            print(f"[ModelProviderService] stream chat error body: {body}")
+                            err_msg = body
+                            try:
+                                err_obj = _json.loads(body).get("error", {})
+                                if isinstance(err_obj, dict) and err_obj.get("message"):
+                                    err_msg = err_obj["message"]
+                            except Exception:
+                                pass
+                            raise ValueError(f"模型 API 错误 ({response.status_code}): {err_msg}") from None
+
+                        async for line in response.aiter_lines():
+                            if not line:
+                                continue
+                            if line.startswith(":"):
+                                continue
+                            if not line.startswith("data:"):
+                                continue
+                            data_str = line[5:].strip()
+                            if not data_str or data_str == "[DONE]":
+                                continue
+                            try:
+                                chunk = _json.loads(data_str)
+                            except Exception:
+                                continue
+                            if chunk.get("model"):
+                                model_out = chunk["model"]
+                            if isinstance(chunk.get("usage"), dict):
+                                usage = chunk["usage"]
+                            choices = chunk.get("choices") or []
+                            if not choices:
+                                continue
+                            choice0 = choices[0] or {}
+                            if choice0.get("finish_reason"):
+                                finish_reason = choice0["finish_reason"]
+                            delta = choice0.get("delta") or {}
+                            rc = delta.get("reasoning_content") or delta.get("thinking")
+                            if isinstance(rc, str) and rc:
+                                reasoning_parts.append(rc)
+                                _emit("reasoning", rc)
+                            ct = delta.get("content")
+                            if isinstance(ct, str) and ct:
+                                content_parts.append(ct)
+                                _emit("content", ct)
+                            for tc in delta.get("tool_calls") or []:
+                                if not isinstance(tc, dict):
+                                    continue
+                                idx = int(tc.get("index") or 0)
+                                acc = tool_calls_acc.setdefault(
+                                    idx,
+                                    {
+                                        "id": "",
+                                        "type": "function",
+                                        "function": {"name": "", "arguments": ""},
+                                    },
+                                )
+                                if tc.get("id"):
+                                    acc["id"] = tc["id"]
+                                if tc.get("type"):
+                                    acc["type"] = tc["type"]
+                                fn = tc.get("function") or {}
+                                if fn.get("name"):
+                                    acc["function"]["name"] = (
+                                        (acc["function"].get("name") or "") + fn["name"]
+                                    )
+                                if fn.get("arguments"):
+                                    acc["function"]["arguments"] = (
+                                        (acc["function"].get("arguments") or "")
+                                        + fn["arguments"]
+                                    )
+
+                    message: Dict[str, Any] = {
+                        "role": "assistant",
+                        "content": "".join(content_parts) or None,
+                    }
+                    reasoning = "".join(reasoning_parts)
+                    if reasoning:
+                        message["reasoning_content"] = reasoning
+                    if tool_calls_acc:
+                        message["tool_calls"] = [
+                            tool_calls_acc[i] for i in sorted(tool_calls_acc.keys())
+                        ]
+
+                    result: Dict[str, Any] = {
+                        "id": "chatcmpl-stream",
+                        "object": "chat.completion",
+                        "model": model_out,
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": message,
+                                "finish_reason": finish_reason or "stop",
+                            }
+                        ],
+                        "usage": usage or {},
+                    }
+                    if reasoning:
+                        result["reasoning_content"] = reasoning
+
+                    set_span_attrs(
+                        span,
+                        attrs_for_llm_call(
+                            model_name=model_name,
+                            messages=messages,
+                            tools=tools,
+                            max_tokens=max_tokens,
+                            temperature=temperature,
+                            output_content=message.get("content"),
+                            output_tool_calls=message.get("tool_calls"),
+                            usage=result.get("usage") or {},
+                            source=source,
+                        ),
+                    )
+                    mark_span_ok(span)
+                    if record_enabled:
+                        record_call(
+                            model_name=model_name,
+                            messages=messages,
+                            tools=tools,
+                            max_tokens=max_tokens,
+                            temperature=temperature,
+                            completion=result,
+                            duration_ms=int((time.monotonic() - started) * 1000),
+                            source=source,
+                        )
+                    return result
+                except httpx.ReadTimeout:
+                    err = ValueError(
+                        f"模型服务响应超时（{read_timeout}s），请尝试简化 Skill 内容或增加超时时间"
+                    )
+                    mark_span_error(span, str(err))
+                    set_span_attrs(
+                        span,
+                        attrs_for_llm_call(
+                            model_name=model_name,
+                            messages=messages,
+                            tools=tools,
+                            max_tokens=max_tokens,
+                            temperature=temperature,
+                            raw_error=str(err),
+                            source=source,
+                        ),
+                    )
+                    if record_enabled:
+                        record_call(
+                            model_name=model_name,
+                            messages=messages,
+                            tools=tools,
+                            max_tokens=max_tokens,
+                            temperature=temperature,
+                            duration_ms=int((time.monotonic() - started) * 1000),
+                            source=source,
+                            raw_error=str(err),
+                        )
+                    raise err
+                except (httpx.ConnectTimeout, httpx.ConnectError) as e:
+                    err = ValueError(
+                        f"无法连接模型服务（{type(e).__name__}），请检查网络或稍后重试"
+                    )
+                    print(f"[ModelProviderService] stream chat error for {provider.provider_code}: {err}")
+                    mark_span_error(span, str(err))
+                    set_span_attrs(
+                        span,
+                        attrs_for_llm_call(
+                            model_name=model_name,
+                            messages=messages,
+                            tools=tools,
+                            max_tokens=max_tokens,
+                            temperature=temperature,
+                            raw_error=str(err),
+                            source=source,
+                        ),
+                    )
+                    if record_enabled:
+                        record_call(
+                            model_name=model_name,
+                            messages=messages,
+                            tools=tools,
+                            max_tokens=max_tokens,
+                            temperature=temperature,
+                            duration_ms=int((time.monotonic() - started) * 1000),
+                            source=source,
+                            raw_error=str(err),
+                        )
+                    raise err
+                except Exception as e:
+                    print(f"[ModelProviderService] stream chat error for {provider.provider_code}: {e}")
+                    mark_span_error(span, str(e))
+                    set_span_attrs(
+                        span,
+                        attrs_for_llm_call(
+                            model_name=model_name,
+                            messages=messages,
+                            tools=tools,
+                            max_tokens=max_tokens,
+                            temperature=temperature,
+                            raw_error=str(e),
+                            source=source,
+                        ),
+                    )
+                    if record_enabled:
+                        record_call(
+                            model_name=model_name,
+                            messages=messages,
+                            tools=tools,
+                            max_tokens=max_tokens,
+                            temperature=temperature,
+                            duration_ms=int((time.monotonic() - started) * 1000),
+                            source=source,
+                            raw_error=str(e),
+                        )
+                    raise
+
     @staticmethod
     async def health_check(provider: ModelProvider) -> bool:
         try:
