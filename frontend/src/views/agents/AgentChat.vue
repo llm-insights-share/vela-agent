@@ -133,6 +133,13 @@
                 <div class="think-step-head">
                   <a-tag :color="thinkingStepColor(step.type)" size="small">{{ thinkingStepLabel(step) }}</a-tag>
                   <a-button
+                    v-if="step.type !== 'tool' && !step.searchCard && step.text && step.text.length > 80"
+                    type="link"
+                    size="small"
+                    class="think-step-toggle"
+                    @click.stop="step.expanded = !step.expanded"
+                  >{{ step.expanded ? '收起' : '展开' }}</a-button>
+                  <a-button
                     v-if="step.type === 'tool' && !step.searchCard && step.text && step.text.length > 80"
                     type="link"
                     size="small"
@@ -162,7 +169,12 @@
                   v-else-if="step.type === 'tool'"
                   class="think-step-text"
                 >{{ step.expanded || step.text.length <= 80 ? step.text : (step.text.slice(0, 80) + '…') }}</pre>
-                <div v-else class="think-step-text">{{ step.text }}</div>
+                <div
+                  v-else-if="step.expanded || !step.text || step.text.length <= 80"
+                  class="think-step-text think-step-md"
+                  v-html="renderMarkdown(step.text)"
+                ></div>
+                <div v-else class="think-step-text muted-preview">{{ step.text.slice(0, 80) }}…</div>
               </div>
             </div>
           </div>
@@ -3352,6 +3364,55 @@ function renderMarkdown(text) {
   border: 1px solid #efeae2;
   border-radius: 4px;
   padding: 6px 8px;
+}
+.think-step-text.muted-preview {
+  color: #999;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.think-step-md {
+  font-family: inherit;
+  white-space: normal;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.think-step-md :deep(p) { margin: 0 0 8px; }
+.think-step-md :deep(p:last-child) { margin-bottom: 0; }
+.think-step-md :deep(table) {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 8px 0;
+  font-size: 12px;
+}
+.think-step-md :deep(th),
+.think-step-md :deep(td) {
+  border: 1px solid #e8e4dc;
+  padding: 4px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+.think-step-md :deep(th) { background: #f5f3ef; font-weight: 600; }
+.think-step-md :deep(ul),
+.think-step-md :deep(ol) { margin: 0 0 8px; padding-left: 1.4em; }
+.think-step-md :deep(code) {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  background: #f3f0e8;
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+.think-step-md :deep(pre) {
+  margin: 6px 0;
+  padding: 8px;
+  background: #f6f4ef;
+  border-radius: 4px;
+  overflow-x: auto;
+}
+.think-step-md :deep(hr) {
+  border: none;
+  border-top: 1px solid #e8e4dc;
+  margin: 10px 0;
 }
 .think-step-tool .think-step-text {
   background: #f8f7ff;

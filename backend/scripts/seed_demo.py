@@ -1,4 +1,10 @@
-"""Idempotent seed for audit (COMPOSITE) and HR (SINGLE) demos.
+"""Idempotent seed for demo agents.
+
+Domains:
+  - audit (COMPOSITE): economic-responsibility audit
+  - hr (SINGLE): HR assistant
+  - office (COMPOSITE): daily office / admin
+  - pm (COMPOSITE): product manager workspace
 
 Usage (from backend/):
   python -m scripts.seed_demo
@@ -515,6 +521,295 @@ HR_TOOLS_SPEC = [
     ),
 ]
 
+OFFICE_TOOLS_SPEC = [
+    (
+        "office_list_meetings",
+        "办公·会议列表",
+        "按状态/组织人/日期列出会议",
+        "office_list_meetings",
+        {
+            "type": "object",
+            "properties": {
+                "status": {"type": "string"},
+                "organizer_name": {"type": "string"},
+                "date_from": {"type": "string"},
+            },
+        },
+    ),
+    (
+        "office_get_meeting",
+        "办公·会议详情",
+        "查询会议、纪要与督办待办",
+        "office_get_meeting",
+        {
+            "type": "object",
+            "properties": {
+                "meeting_id": {"type": "string"},
+                "title": {"type": "string"},
+            },
+        },
+    ),
+    (
+        "office_list_action_items",
+        "办公·督办待办",
+        "列出督办事项，可筛逾期",
+        "office_list_action_items",
+        {
+            "type": "object",
+            "properties": {
+                "status": {"type": "string"},
+                "owner_name": {"type": "string"},
+                "overdue_only": {"type": "boolean", "default": False},
+            },
+        },
+    ),
+    (
+        "office_list_travel",
+        "办公·差旅申请",
+        "查询差旅申请单",
+        "office_list_travel",
+        {
+            "type": "object",
+            "properties": {
+                "emp_name": {"type": "string"},
+                "status": {"type": "string"},
+            },
+        },
+    ),
+    (
+        "office_get_expense_claim",
+        "办公·报销单详情",
+        "查询报销单明细与关联差旅",
+        "office_get_expense_claim",
+        {
+            "type": "object",
+            "properties": {
+                "claim_id": {"type": "string"},
+                "emp_name": {"type": "string"},
+            },
+        },
+    ),
+    (
+        "office_list_rooms",
+        "办公·会议室",
+        "列出会议室及状态",
+        "office_list_rooms",
+        {
+            "type": "object",
+            "properties": {"status": {"type": "string"}},
+        },
+    ),
+    (
+        "office_list_seal_requests",
+        "办公·用印申请",
+        "查询印章使用申请",
+        "office_list_seal_requests",
+        {
+            "type": "object",
+            "properties": {
+                "status": {"type": "string"},
+                "seal_type": {"type": "string"},
+            },
+        },
+    ),
+    (
+        "office_list_supplies",
+        "办公·物资库存",
+        "查询办公用品库存与领用单",
+        "office_list_supplies",
+        {
+            "type": "object",
+            "properties": {"low_stock_only": {"type": "boolean", "default": False}},
+        },
+    ),
+    (
+        "office_submit_minutes_draft",
+        "办公·提交纪要草案",
+        "将会议纪要草案写入 outbox（需审批）",
+        "office_submit_minutes_draft",
+        {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "markdown_body": {"type": "string"},
+            },
+            "required": ["title", "markdown_body"],
+        },
+    ),
+    (
+        "office_submit_expense_review_note",
+        "办公·提交报销预审意见",
+        "将报销预审意见写入 outbox（需审批）",
+        "office_submit_expense_review_note",
+        {
+            "type": "object",
+            "properties": {
+                "claim_id": {"type": "string"},
+                "conclusion": {"type": "string"},
+                "note_markdown": {"type": "string"},
+            },
+            "required": ["claim_id", "conclusion", "note_markdown"],
+        },
+    ),
+]
+
+PM_TOOLS_SPEC = [
+    (
+        "pm_list_products",
+        "产品·产品列表",
+        "列出产品线",
+        "pm_list_products",
+        {"type": "object", "properties": {}},
+    ),
+    (
+        "pm_list_roadmap",
+        "产品·Roadmap",
+        "按产品/季度查询路线图",
+        "pm_list_roadmap",
+        {
+            "type": "object",
+            "properties": {
+                "product_code": {"type": "string"},
+                "quarter": {"type": "string"},
+            },
+        },
+    ),
+    (
+        "pm_list_backlog",
+        "产品·Backlog",
+        "按优先级列出 backlog",
+        "pm_list_backlog",
+        {
+            "type": "object",
+            "properties": {
+                "product_code": {"type": "string"},
+                "status": {"type": "string"},
+                "top_n": {"type": "integer", "default": 10},
+            },
+        },
+    ),
+    (
+        "pm_list_competitors",
+        "产品·竞品列表",
+        "列出竞品档案",
+        "pm_list_competitors",
+        {
+            "type": "object",
+            "properties": {"category": {"type": "string"}},
+        },
+    ),
+    (
+        "pm_get_competitor_matrix",
+        "产品·竞品功能矩阵",
+        "查询竞品功能支持度矩阵",
+        "pm_get_competitor_matrix",
+        {
+            "type": "object",
+            "properties": {"competitor_name": {"type": "string"}},
+        },
+    ),
+    (
+        "pm_list_feedback",
+        "产品·用户反馈",
+        "查询工单/访谈/NPS 反馈",
+        "pm_list_feedback",
+        {
+            "type": "object",
+            "properties": {
+                "product_code": {"type": "string"},
+                "theme": {"type": "string"},
+                "sentiment": {"type": "string"},
+            },
+        },
+    ),
+    (
+        "pm_list_interviews",
+        "产品·访谈记录",
+        "列出用户访谈纪要摘要",
+        "pm_list_interviews",
+        {
+            "type": "object",
+            "properties": {"product_code": {"type": "string"}},
+        },
+    ),
+    (
+        "pm_query_metrics",
+        "产品·日指标",
+        "查询 DAU/激活/留存/NPS 等日序列",
+        "pm_query_metrics",
+        {
+            "type": "object",
+            "properties": {
+                "product_code": {"type": "string", "default": "approval-hub"},
+                "date_from": {"type": "string"},
+                "date_to": {"type": "string"},
+            },
+        },
+    ),
+    (
+        "pm_query_funnel",
+        "产品·AARRR漏斗",
+        "查询周度获客-激活-留存-推荐-收入漏斗",
+        "pm_query_funnel",
+        {
+            "type": "object",
+            "properties": {
+                "product_code": {"type": "string", "default": "approval-hub"},
+            },
+        },
+    ),
+    (
+        "pm_list_events",
+        "产品·埋点事件表",
+        "查询埋点事件定义",
+        "pm_list_events",
+        {
+            "type": "object",
+            "properties": {
+                "product_code": {"type": "string"},
+                "status": {"type": "string"},
+            },
+        },
+    ),
+    (
+        "pm_list_experiments",
+        "产品·A/B实验",
+        "查询实验与结论",
+        "pm_list_experiments",
+        {
+            "type": "object",
+            "properties": {
+                "product_code": {"type": "string"},
+                "status": {"type": "string"},
+            },
+        },
+    ),
+    (
+        "pm_list_prds",
+        "产品·PRD索引",
+        "列出 PRD 文档元数据",
+        "pm_list_prds",
+        {
+            "type": "object",
+            "properties": {"product_code": {"type": "string"}},
+        },
+    ),
+    (
+        "pm_submit_prd_draft",
+        "产品·提交PRD草案",
+        "将 PRD 草案写入 outbox（需审批）",
+        "pm_submit_prd_draft",
+        {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "markdown_body": {"type": "string"},
+            },
+            "required": ["title", "markdown_body"],
+        },
+    ),
+]
+
 
 # Demo agents force eager tool loading so bound local_python tools are visible
 # without tool_search (system default may be deferred).
@@ -552,11 +847,57 @@ HR_PROMPT = """你是星河控股 HR 智能助手（Demo）。
 - 简历筛选按技能输出匹配度、硬性对照、风险点、3道面试题
 """
 
+OFFICE_MEETING_PROMPT = """你是星河控股行政「会议与督办」专员（Demo）。
+职责：查询会议/纪要/督办，对照制度给出逾期升级建议；需要时可起草纪要并提交审批。
+规则：禁止编造待办状态；数字与责任人必须来自 office_* 工具。
+可用工具：office_list_meetings、office_get_meeting、office_list_action_items、office_submit_minutes_draft、kb_search。
+"""
+
+OFFICE_EXPENSE_PROMPT = """你是星河控股行政「差旅报销预审」专员（Demo）。
+职责：核对差旅单与报销明细，对照《差旅与费用报销制度》给出合规结论。
+规则：禁止编造金额；输出明细对照表；正式预审意见用 office_submit_expense_review_note。
+可用工具：office_list_travel、office_get_expense_claim、office_submit_expense_review_note、kb_search。
+"""
+
+OFFICE_FACILITY_PROMPT = """你是星河控股行政「行政事务」专员（Demo）。
+职责：会议室可用性、用印进度、办公用品库存与补货建议。
+可用工具：office_list_rooms、office_list_seal_requests、office_list_supplies、kb_search。
+"""
+
+OFFICE_COORD_PROMPT = """你是星河控股日常办公 Coordinator。
+职责：将用户行政诉求分派给会议督办 / 报销预审 / 行政事务子 Agent，并汇总可执行结果。
+闲聊或纯制度问答可直接 kb 风格简答；涉及系统数据必须分派或说明需查数。
+"""
+
+PM_RESEARCH_PROMPT = """你是星河控股产品「调研与竞品」专员（Demo）。
+职责：竞品矩阵、用户反馈、访谈证据 → 输出一页纸结论与 backlog 启示。
+禁止编造客户原话；引用 feedback_id / interview_id。
+可用工具：pm_list_competitors、pm_get_competitor_matrix、pm_list_feedback、pm_list_interviews、pm_list_backlog、kb_search。
+"""
+
+PM_ANALYTICS_PROMPT = """你是星河控股产品「数据分析」专员（Demo）。
+职责：日指标、AARRR 漏斗、实验结论 → 洞察与建议动作。
+禁止编造指标；对比须基于工具返回。
+可用工具：pm_query_metrics、pm_query_funnel、pm_list_experiments、pm_list_events、pm_list_roadmap。
+"""
+
+PM_PRD_PROMPT = """你是星河控股产品「PRD 撰写」专员（Demo）。
+职责：综合 backlog/反馈/访谈/埋点，按规范起草 PRD；提交草案需审批。
+可用工具：pm_list_backlog、pm_list_feedback、pm_list_interviews、pm_list_events、pm_list_prds、pm_submit_prd_draft、kb_search。
+"""
+
+PM_COORD_PROMPT = """你是星河控股产品经理工作台 Coordinator。
+典型链路：调研竞品/反馈 → 数据验证 →（需要时）PRD 起草。
+汇总时保留证据 ID（FB/RI/BL/EV）；交付 PRD 前可能触发 HITL。
+"""
+
 
 def seed_all() -> Dict[str, Any]:
     init_db()
     _build_sqlite("audit")
     _build_sqlite("hr")
+    _build_sqlite("office")
+    _build_sqlite("pm")
 
     db = SessionLocal()
     summary: Dict[str, Any] = {"agents": {}, "skills": [], "kbs": [], "tools": []}
@@ -567,10 +908,9 @@ def seed_all() -> Dict[str, Any]:
 
         # Skills
         skill_map: Dict[str, SkillPack] = {}
-        for path in sorted((_DEMOS / "audit" / "skills").glob("*.md")):
-            skill_map[path.stem] = _upsert_skill(db, path)
-        for path in sorted((_DEMOS / "hr" / "skills").glob("*.md")):
-            skill_map[path.stem] = _upsert_skill(db, path)
+        for domain in ("audit", "hr", "office", "pm"):
+            for path in sorted((_DEMOS / domain / "skills").glob("*.md")):
+                skill_map[path.stem] = _upsert_skill(db, path)
         summary["skills"] = list(skill_map.keys())
 
         # KBs
@@ -602,7 +942,44 @@ def seed_all() -> Dict[str, Any]:
             "JD 与候选人简历（Demo）",
             _DEMOS / "hr" / "kb" / "jd-resume",
         )
-        summary["kbs"] = [kb_reg.name, kb_tpl.name, kb_pol.name, kb_jd.name]
+        kb_office_pol = _upsert_kb(
+            db,
+            ks,
+            "demo-office-policies",
+            "行政制度：会议督办/差旅报销/用印/物资（Demo）",
+            _DEMOS / "office" / "kb" / "policies",
+        )
+        kb_office_tpl = _upsert_kb(
+            db,
+            ks,
+            "demo-office-templates",
+            "行政模板：会议纪要等（Demo）",
+            _DEMOS / "office" / "kb" / "templates",
+        )
+        kb_pm_play = _upsert_kb(
+            db,
+            ks,
+            "demo-pm-playbooks",
+            "产品方法论：PRD/竞品/埋点/访谈（Demo）",
+            _DEMOS / "pm" / "kb" / "playbooks",
+        )
+        kb_pm_art = _upsert_kb(
+            db,
+            ks,
+            "demo-pm-artifacts",
+            "产品制品：竞品快报/PRD摘录/访谈纪要（Demo）",
+            _DEMOS / "pm" / "kb" / "artifacts",
+        )
+        summary["kbs"] = [
+            kb_reg.name,
+            kb_tpl.name,
+            kb_pol.name,
+            kb_jd.name,
+            kb_office_pol.name,
+            kb_office_tpl.name,
+            kb_pm_play.name,
+            kb_pm_art.name,
+        ]
 
         # Tools
         audit_tools: Dict[str, Tool] = {}
@@ -625,7 +1002,29 @@ def seed_all() -> Dict[str, Any]:
                 function=fn,
                 parameters_schema=schema,
             )
-        summary["tools"] = list(audit_tools) + list(hr_tools)
+        office_tools: Dict[str, Tool] = {}
+        for name, display, desc, fn, schema in OFFICE_TOOLS_SPEC:
+            office_tools[name] = _upsert_tool(
+                db,
+                name=name,
+                display_name=display,
+                description=desc,
+                function=fn,
+                parameters_schema=schema,
+            )
+        pm_tools: Dict[str, Tool] = {}
+        for name, display, desc, fn, schema in PM_TOOLS_SPEC:
+            pm_tools[name] = _upsert_tool(
+                db,
+                name=name,
+                display_name=display,
+                description=desc,
+                function=fn,
+                parameters_schema=schema,
+            )
+        summary["tools"] = (
+            list(audit_tools) + list(hr_tools) + list(office_tools) + list(pm_tools)
+        )
         db.commit()
 
         # --- Audit specialists ---
@@ -774,12 +1173,262 @@ def seed_all() -> Dict[str, Any]:
         _publish(db, hr)
         db.commit()
 
+        # --- Office COMPOSITE ---
+        office_meeting = _upsert_agent(
+            db,
+            name="demo-office-meeting",
+            description="日常办公·会议督办 Specialist",
+            model_service_id=model_service_id,
+            system_prompt=OFFICE_MEETING_PROMPT,
+            agent_type="SINGLE",
+            tags=["demo", "demo-office", "specialist"],
+            skill_ids=[skill_map["demo-office-meeting-followup"].skill_pack_id],
+            kb_ids=[kb_office_pol.kb_id, kb_office_tpl.kb_id],
+            tool_bindings=[
+                (office_tools["office_list_meetings"].tool_id, False),
+                (office_tools["office_get_meeting"].tool_id, False),
+                (office_tools["office_list_action_items"].tool_id, False),
+                (office_tools["office_submit_minutes_draft"].tool_id, True),
+            ],
+            composition_config=dict(_EAGER_TOOLS),
+        )
+        _publish(db, office_meeting)
+
+        office_expense = _upsert_agent(
+            db,
+            name="demo-office-expense",
+            description="日常办公·差旅报销预审 Specialist",
+            model_service_id=model_service_id,
+            system_prompt=OFFICE_EXPENSE_PROMPT,
+            agent_type="SINGLE",
+            tags=["demo", "demo-office", "specialist"],
+            skill_ids=[skill_map["demo-office-expense-check"].skill_pack_id],
+            kb_ids=[kb_office_pol.kb_id],
+            tool_bindings=[
+                (office_tools["office_list_travel"].tool_id, False),
+                (office_tools["office_get_expense_claim"].tool_id, False),
+                (office_tools["office_submit_expense_review_note"].tool_id, True),
+            ],
+            composition_config=dict(_EAGER_TOOLS),
+        )
+        _publish(db, office_expense)
+
+        office_facility = _upsert_agent(
+            db,
+            name="demo-office-facility",
+            description="日常办公·会议室/用印/物资 Specialist",
+            model_service_id=model_service_id,
+            system_prompt=OFFICE_FACILITY_PROMPT,
+            agent_type="SINGLE",
+            tags=["demo", "demo-office", "specialist"],
+            skill_ids=[skill_map["demo-office-facility-ops"].skill_pack_id],
+            kb_ids=[kb_office_pol.kb_id],
+            tool_bindings=[
+                (office_tools["office_list_rooms"].tool_id, False),
+                (office_tools["office_list_seal_requests"].tool_id, False),
+                (office_tools["office_list_supplies"].tool_id, False),
+            ],
+            composition_config=dict(_EAGER_TOOLS),
+        )
+        _publish(db, office_facility)
+
+        office_coord_cfg = {
+            "dispatch_strategy": "llm",
+            "max_dispatch_rounds": 3,
+            "result_integration": "coordinator",
+            "hitl_before_delivery": True,
+            "total_token_budget": 800000,
+            "max_a2a_calls": 12,
+            "max_calls_per_agent": 2,
+            "child_max_iterations": 6,
+            "min_tokens_for_dispatch": 40000,
+            **_EAGER_TOOLS,
+        }
+        office_coord = _upsert_agent(
+            db,
+            name="demo-office-coordinator",
+            description="日常办公 Coordinator（会议/报销/行政 COMPOSITE Demo）",
+            model_service_id=model_service_id,
+            system_prompt=OFFICE_COORD_PROMPT,
+            agent_type="COMPOSITE",
+            tags=["demo", "demo-office", "coordinator"],
+            skill_ids=[],
+            kb_ids=[kb_office_pol.kb_id],
+            tool_bindings=[],
+            composition_config=office_coord_cfg,
+            max_iterations=8,
+        )
+        _ensure_composition(
+            db,
+            office_coord,
+            [
+                {
+                    "agent_id": office_meeting.agent_id,
+                    "role_name": "会议督办",
+                    "role_description": "会议查询、纪要与督办闭环",
+                    "task_keywords": [
+                        "会议", "纪要", "督办", "待办", "周会", "逾期", "行动项",
+                    ],
+                },
+                {
+                    "agent_id": office_expense.agent_id,
+                    "role_name": "报销预审",
+                    "role_description": "差旅与费用报销合规预审",
+                    "task_keywords": [
+                        "报销", "差旅", "费用", "发票", "招待", "超标", "驳回",
+                    ],
+                },
+                {
+                    "agent_id": office_facility.agent_id,
+                    "role_name": "行政事务",
+                    "role_description": "会议室、用印、办公用品",
+                    "task_keywords": [
+                        "会议室", "用印", "印章", "办公用品", "库存", "碳粉", "物资",
+                    ],
+                },
+            ],
+        )
+        db.commit()
+        _publish(db, office_coord)
+
+        # --- PM COMPOSITE ---
+        pm_research = _upsert_agent(
+            db,
+            name="demo-pm-research",
+            description="产品经理·调研竞品 Specialist",
+            model_service_id=model_service_id,
+            system_prompt=PM_RESEARCH_PROMPT,
+            agent_type="SINGLE",
+            tags=["demo", "demo-pm", "specialist"],
+            skill_ids=[skill_map["demo-pm-competitor-brief"].skill_pack_id],
+            kb_ids=[kb_pm_play.kb_id, kb_pm_art.kb_id],
+            tool_bindings=[
+                (pm_tools["pm_list_competitors"].tool_id, False),
+                (pm_tools["pm_get_competitor_matrix"].tool_id, False),
+                (pm_tools["pm_list_feedback"].tool_id, False),
+                (pm_tools["pm_list_interviews"].tool_id, False),
+                (pm_tools["pm_list_backlog"].tool_id, False),
+            ],
+            composition_config=dict(_EAGER_TOOLS),
+        )
+        _publish(db, pm_research)
+
+        pm_analytics = _upsert_agent(
+            db,
+            name="demo-pm-analytics",
+            description="产品经理·数据分析 Specialist",
+            model_service_id=model_service_id,
+            system_prompt=PM_ANALYTICS_PROMPT,
+            agent_type="SINGLE",
+            tags=["demo", "demo-pm", "specialist"],
+            skill_ids=[skill_map["demo-pm-metrics-insight"].skill_pack_id],
+            kb_ids=[kb_pm_play.kb_id],
+            tool_bindings=[
+                (pm_tools["pm_query_metrics"].tool_id, False),
+                (pm_tools["pm_query_funnel"].tool_id, False),
+                (pm_tools["pm_list_experiments"].tool_id, False),
+                (pm_tools["pm_list_events"].tool_id, False),
+                (pm_tools["pm_list_roadmap"].tool_id, False),
+            ],
+            composition_config=dict(_EAGER_TOOLS),
+        )
+        _publish(db, pm_analytics)
+
+        pm_prd = _upsert_agent(
+            db,
+            name="demo-pm-prd",
+            description="产品经理·PRD撰写 Specialist",
+            model_service_id=model_service_id,
+            system_prompt=PM_PRD_PROMPT,
+            agent_type="SINGLE",
+            tags=["demo", "demo-pm", "specialist"],
+            skill_ids=[skill_map["demo-pm-prd-draft"].skill_pack_id],
+            kb_ids=[kb_pm_play.kb_id, kb_pm_art.kb_id],
+            tool_bindings=[
+                (pm_tools["pm_list_backlog"].tool_id, False),
+                (pm_tools["pm_list_feedback"].tool_id, False),
+                (pm_tools["pm_list_interviews"].tool_id, False),
+                (pm_tools["pm_list_events"].tool_id, False),
+                (pm_tools["pm_list_prds"].tool_id, False),
+                (pm_tools["pm_submit_prd_draft"].tool_id, True),
+            ],
+            composition_config=dict(_EAGER_TOOLS),
+        )
+        _publish(db, pm_prd)
+
+        pm_coord_cfg = {
+            "dispatch_strategy": "llm",
+            "max_dispatch_rounds": 3,
+            "result_integration": "coordinator",
+            "hitl_before_delivery": True,
+            "total_token_budget": 800000,
+            "max_a2a_calls": 12,
+            "max_calls_per_agent": 2,
+            "child_max_iterations": 6,
+            "min_tokens_for_dispatch": 40000,
+            **_EAGER_TOOLS,
+        }
+        pm_coord = _upsert_agent(
+            db,
+            name="demo-pm-coordinator",
+            description="产品经理工作台 Coordinator（调研/数据/PRD COMPOSITE Demo）",
+            model_service_id=model_service_id,
+            system_prompt=PM_COORD_PROMPT,
+            agent_type="COMPOSITE",
+            tags=["demo", "demo-pm", "coordinator"],
+            skill_ids=[],
+            kb_ids=[kb_pm_play.kb_id],
+            tool_bindings=[],
+            composition_config=pm_coord_cfg,
+            max_iterations=8,
+        )
+        _ensure_composition(
+            db,
+            pm_coord,
+            [
+                {
+                    "agent_id": pm_research.agent_id,
+                    "role_name": "调研竞品",
+                    "role_description": "竞品、反馈、访谈证据与 backlog 启示",
+                    "task_keywords": [
+                        "竞品", "对标", "反馈", "访谈", "用户研究", "一页纸", "FlowApprove",
+                    ],
+                },
+                {
+                    "agent_id": pm_analytics.agent_id,
+                    "role_name": "数据分析",
+                    "role_description": "指标、漏斗、实验洞察",
+                    "task_keywords": [
+                        "指标", "DAU", "漏斗", "留存", "NPS", "实验", "AARRR", "数据",
+                    ],
+                },
+                {
+                    "agent_id": pm_prd.agent_id,
+                    "role_name": "PRD撰写",
+                    "role_description": "起草 PRD 与埋点方案",
+                    "task_keywords": [
+                        "PRD", "需求", "埋点", "用户故事", "验收", "草案", "文档",
+                    ],
+                },
+            ],
+        )
+        db.commit()
+        _publish(db, pm_coord)
+
         summary["agents"] = {
             "demo-audit-coordinator": coordinator.agent_id,
             "demo-audit-collector": collector.agent_id,
             "demo-audit-risk": risk.agent_id,
             "demo-audit-reporter": reporter.agent_id,
             "demo-hr-assistant": hr.agent_id,
+            "demo-office-coordinator": office_coord.agent_id,
+            "demo-office-meeting": office_meeting.agent_id,
+            "demo-office-expense": office_expense.agent_id,
+            "demo-office-facility": office_facility.agent_id,
+            "demo-pm-coordinator": pm_coord.agent_id,
+            "demo-pm-research": pm_research.agent_id,
+            "demo-pm-analytics": pm_analytics.agent_id,
+            "demo-pm-prd": pm_prd.agent_id,
         }
         summary["model_service_id"] = model_service_id
         return summary
@@ -799,6 +1448,14 @@ def main() -> None:
     print(
         "  [HR 助手] 帮我看看候选人李娜是否适合后端高级工程师，"
         "并对照招聘与试用期制度给出面试建议；另外查一下研发中心剩余年假最多的 3 人。"
+    )
+    print(
+        "  [办公 Coordinator] 汇总本周逾期督办，并预审徐娜的差旅报销单 E001 是否合规；"
+        "同时看看哪些办公用品低于安全库存。"
+    )
+    print(
+        "  [产品 Coordinator] 针对审批中心：结合 FlowApprove 竞品与用户反馈，"
+        "用数据验证优先级，并起草「批量导出」PRD 草案。"
     )
 
 

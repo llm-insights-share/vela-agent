@@ -1515,7 +1515,7 @@ class AgentLoop:
         if self.active_skill_name:
             self.story.add_skill_match(self.active_skill_name, self._run_metrics.get("skill_relevance"))
         if self.knowledge_context:
-            self.story.add_knowledge(self.knowledge_context.strip()[:400])
+            self.story.add_knowledge(self.knowledge_context.strip())
             self.story.complete_phase("gather", "已准备知识库上下文")
         await self._ensure_memory_loaded()
         if self.story.phases["gather"]["steps"]:
@@ -3510,14 +3510,15 @@ class AgentLoop:
             msg = choice.get("message", {})
 
             if msg.get("content"):
-                preview = self._content_to_str(msg.get("content"))[:300]
+                content_full = self._content_to_str(msg.get("content"))
+                # thinking_log keeps a short line; execution_story stores full text for UI expand.
                 if not planning_done and iteration == 1:
-                    self.thinking_log.append(f"[规划] {preview}")
-                    self.story.add_thought(preview, phase_id="act")
+                    self.thinking_log.append(f"[规划] {content_full[:500]}")
+                    self.story.add_thought(content_full, phase_id="act")
                     planning_done = True
                 else:
-                    self.thinking_log.append(f"思考: {preview[:200]}")
-                    self.story.add_thought(preview[:400], phase_id="act")
+                    self.thinking_log.append(f"思考: {content_full[:500]}")
+                    self.story.add_thought(content_full, phase_id="act")
 
             tool_calls = self._parse_tool_calls(msg)
 

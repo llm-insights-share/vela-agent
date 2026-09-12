@@ -11,7 +11,7 @@
     <div v-if="expanded" class="exec-story-body">
       <div v-if="liveThinking" class="exec-live-thinking">
         <div class="exec-live-thinking-label">实时思考</div>
-        <pre class="exec-live-thinking-text">{{ liveThinking }}</pre>
+        <div class="exec-step-md" v-html="renderStepMarkdown(liveThinking)"></div>
       </div>
 
       <div
@@ -45,16 +45,28 @@
                 @click.stop="toggleStep(step.id)"
               >{{ openSteps.has(step.id) ? '收起' : '详情' }}</a-button>
             </div>
+            <!-- Expanded / short: full markdown preview, no truncation -->
             <div
               v-if="step.detail && (openSteps.has(step.id) || step.detail.length <= 80)"
-              class="exec-step-detail"
-            >{{ step.detail }}</div>
+              class="exec-step-detail exec-step-md"
+              v-html="renderStepMarkdown(step.detail)"
+            ></div>
+            <!-- Collapsed preview only -->
             <div
               v-else-if="step.detail && !openSteps.has(step.id)"
               class="exec-step-detail muted"
-            >{{ step.detail.slice(0, 80) }}…</div>
-            <div v-if="step.evidence?.type === 'search' && step.evidence.preview" class="exec-step-evidence">
-              <pre class="exec-step-detail">{{ step.evidence.preview.slice(0, 600) }}</pre>
+            >{{ plainPreview(step.detail, 80) }}…</div>
+            <div
+              v-if="step.evidence?.preview && (openSteps.has(step.id) || !step.detail || step.detail.length <= 80)"
+              class="exec-step-evidence"
+            >
+              <div class="exec-step-md" v-html="renderStepMarkdown(step.evidence.preview)"></div>
+            </div>
+            <div
+              v-else-if="step.evidence?.preview && !openSteps.has(step.id)"
+              class="exec-step-evidence"
+            >
+              <div class="exec-step-detail muted">{{ plainPreview(step.evidence.preview, 80) }}…</div>
             </div>
           </div>
         </div>
@@ -66,6 +78,12 @@
 <script setup>
 import { computed, reactive, ref, watch } from 'vue'
 import { CaretDownOutlined, CaretRightOutlined } from '@ant-design/icons-vue'
+import { marked } from 'marked'
+
+marked.setOptions({
+  gfm: true,
+  breaks: true,
+})
 
 const props = defineProps({
   story: { type: Object, default: null },
@@ -145,6 +163,32 @@ const headerSummary = computed(() => {
   if (props.liveThinking && !parts.length) parts.push('模型思考中…')
   return parts.join(' · ')
 })
+
+function plainPreview(text, maxLen = 80) {
+  const plain = String(text || '')
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/`[^`]*`/g, ' ')
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
+    .replace(/\[[^\]]*\]\([^)]*\)/g, ' ')
+    .replace(/^#{1,6}\s+/gm, '')
+    .replace(/[*_~>|-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return plain.length > maxLen ? plain.slice(0, maxLen) : plain
+}
+
+function renderStepMarkdown(text) {
+  if (!text) return ''
+  try {
+    return marked.parse(String(text))
+  } catch {
+    return String(text)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/\n/g, '<br>')
+  }
+}
 
 function phaseMarker(phase) {
   if (phase.status === 'done') return '✓'
@@ -269,7 +313,7 @@ function toggleStep(id) {
 }
 .exec-story-body {
   padding: 4px 12px 12px;
-  max-height: 420px;
+  max-height: 560px;
   overflow-y: auto;
   border-top: 1px solid #eef0f3;
 }
@@ -285,17 +329,6 @@ function toggleStep(id) {
   color: #9e9590;
   margin-bottom: 4px;
   font-weight: 500;
-}
-.exec-live-thinking-text {
-  margin: 0;
-  font-size: 12px;
-  line-height: 1.55;
-  color: #5c5650;
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  max-height: 220px;
-  overflow-y: auto;
 }
 .exec-phase {
   margin-top: 8px;
@@ -361,11 +394,98 @@ function toggleStep(id) {
   border-radius: 4px;
   font-size: 12px;
   color: #555;
-  white-space: pre-wrap;
   word-break: break-word;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 .exec-step-detail.muted {
   color: #999;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+.exec-step-md {
+  font-size: 12px;
+  line-height: 1.6;
+  color: #444;
+  overflow-x: auto;
+}
+.exec-step-md :deep(p) {
+  margin: 0 0 8px;
+}
+.exec-step-md :deep(p:last-child) {
+  margin-bottom: 0;
+}
+.exec-step-md :deep(h1),
+.exec-step-md :deep(h2),
+.exec-step-md :deep(h3),
+.exec-step-md :deep(h4) {
+  margin: 10px 0 6px;
+  font-weight: 600;
+  color: #222;
+  line-height: 1.35;
+}
+.exec-step-md :deep(h1) { font-size: 15px; }
+.exec-step-md :deep(h2) { font-size: 14px; }
+.exec-step-md :deep(h3),
+.exec-step-md :deep(h4) { font-size: 13px; }
+.exec-step-md :deep(ul),
+.exec-step-md :deep(ol) {
+  margin: 0 0 8px;
+  padding-left: 1.4em;
+}
+.exec-step-md :deep(li) {
+  margin: 2px 0;
+}
+.exec-step-md :deep(table) {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 8px 0;
+  font-size: 12px;
+}
+.exec-step-md :deep(th),
+.exec-step-md :deep(td) {
+  border: 1px solid #e8e4dc;
+  padding: 4px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+.exec-step-md :deep(th) {
+  background: #f5f3ef;
+  font-weight: 600;
+}
+.exec-step-md :deep(code) {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  background: #f3f0e8;
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+.exec-step-md :deep(pre) {
+  margin: 6px 0;
+  padding: 8px;
+  background: #f6f4ef;
+  border-radius: 4px;
+  overflow-x: auto;
+}
+.exec-step-md :deep(pre code) {
+  background: transparent;
+  padding: 0;
+}
+.exec-step-md :deep(blockquote) {
+  margin: 6px 0;
+  padding: 2px 10px;
+  border-left: 3px solid #d9d3c7;
+  color: #666;
+}
+.exec-step-md :deep(hr) {
+  border: none;
+  border-top: 1px solid #e8e4dc;
+  margin: 10px 0;
+}
+.exec-step-md :deep(a) {
+  color: #1677ff;
+}
+.exec-step-evidence {
+  margin-top: 4px;
 }
 </style>

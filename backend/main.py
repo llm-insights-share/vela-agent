@@ -145,6 +145,26 @@ def _recover_stale_running_sessions():
         running_sessions = db.query(SessionModel).filter(
             SessionModel.status == SessionStatus.RUNNING
         ).all()
+        # #region agent log
+        try:
+            import json as _json, time as _time
+            with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-0e582a.log", "a") as _f:
+                _f.write(_json.dumps({
+                    "sessionId": "0e582a",
+                    "runId": "startup-recover",
+                    "hypothesisId": "H1",
+                    "location": "main.py:_recover_stale_running_sessions",
+                    "message": "recover stale RUNNING sessions on startup",
+                    "data": {
+                        "count": len(running_sessions),
+                        "session_ids": [s.session_id for s in running_sessions][:20],
+                        "titles": [(s.title or "")[:40] for s in running_sessions][:10],
+                    },
+                    "timestamp": int(_time.time() * 1000),
+                }, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+        # #endregion
         for session in running_sessions:
             messages = list(session.messages or [])
             messages.append({

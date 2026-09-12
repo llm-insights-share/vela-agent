@@ -81,6 +81,26 @@ async def _run_session_chat_background(session_id: str, request_data: Dict[str, 
         )
     except Exception as e:
         traceback.print_exc()
+        # #region agent log
+        try:
+            import json as _json, time as _time
+            with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-0e582a.log", "a") as _f:
+                _f.write(_json.dumps({
+                    "sessionId": "0e582a",
+                    "runId": "chat-bg",
+                    "hypothesisId": "H3",
+                    "location": "sessions.py:_run_session_chat_background:except",
+                    "message": "background chat raised before finalize",
+                    "data": {
+                        "session_id": session_id,
+                        "error_type": type(e).__name__,
+                        "error": (str(e) or "")[:300],
+                    },
+                    "timestamp": int(_time.time() * 1000),
+                }, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+        # #endregion
         try:
             session = db.query(SessionModel).filter(
                 SessionModel.session_id == session_id
@@ -496,6 +516,27 @@ async def chat_async(
     session.status = SessionStatus.RUNNING
     session.last_active_at = now_utc()
     db.commit()
+
+    # #region agent log
+    try:
+        import json as _json, time as _time
+        with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-0e582a.log", "a") as _f:
+            _f.write(_json.dumps({
+                "sessionId": "0e582a",
+                "runId": "chat-async",
+                "hypothesisId": "H1",
+                "location": "sessions.py:chat_async",
+                "message": "chat/async accepted, session marked RUNNING",
+                "data": {
+                    "session_id": session_id,
+                    "agent_id": session.agent_id,
+                    "message_preview": (data.message or "")[:80],
+                },
+                "timestamp": int(_time.time() * 1000),
+            }, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+    # #endregion
 
     request_data = {
         "message": data.message,

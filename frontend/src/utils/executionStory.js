@@ -116,10 +116,11 @@ export function synthesizeStoryFromTurns(turns, { status = 'done', metrics = nul
       kind: toolCalls.length || toolResults.length ? 'tool' : 'thought',
       title: headline || `第 ${seq} 轮`,
       detail: [
-        turn.thinking ? `思考: ${String(turn.thinking).slice(0, 400)}` : '',
+        turn.thinking ? `思考: ${String(turn.thinking)}` : '',
         toolCalls.length ? `工具调用: ${toolCalls.map((t) => t.name).join(', ')}` : '',
         turn.response?.raw_error ? `错误: ${turn.response.raw_error}` : '',
-      ].filter(Boolean).join('\n'),
+        !toolCalls.length && turn.response?.content ? String(turn.response.content) : '',
+      ].filter(Boolean).join('\n\n'),
       tool_name: toolCalls[0]?.name || null,
       status: turn.response?.raw_error ? 'fail' : 'ok',
       duration_ms: turn.duration_ms,
@@ -129,7 +130,7 @@ export function synthesizeStoryFromTurns(turns, { status = 'done', metrics = nul
         id: `turn_${turn.turn_id || seq}_tool_${tr.name}`,
         kind: tr.code_exec ? 'code' : 'tool',
         title: tr.ok === false ? `${tr.name} 失败` : `调用 ${tr.name}`,
-        detail: (tr.content_preview || '').slice(0, 800),
+        detail: tr.content_preview || tr.content || '',
         tool_name: tr.name,
         status: tr.ok === false ? 'fail' : 'ok',
       })

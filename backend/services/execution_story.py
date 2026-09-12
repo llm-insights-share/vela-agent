@@ -82,7 +82,8 @@ class ExecutionStoryBuilder:
             "id": _new_id(),
             "kind": kind,
             "title": title,
-            "detail": (detail or "")[:4000],
+            # Keep full step bodies for expanded UI (markdown preview); soft cap only.
+            "detail": (detail or "")[:100_000],
             "tool_name": tool_name or None,
             "tool_call_id": tool_call_id or None,
             "status": status,
@@ -103,7 +104,7 @@ class ExecutionStoryBuilder:
         title = "任务理解"
         if skill:
             title = f"任务理解 · Skill {skill}"
-        self.add_step("understand", "intent", title, detail=detail[:800], status="ok")
+        self.add_step("understand", "intent", title, detail=detail[:20_000], status="ok")
         self.complete_phase("understand", detail[:120] if detail else "已理解用户请求")
 
     def add_rewrite(self, summary: str, original: str = "", rewritten: str = "") -> None:
@@ -135,7 +136,7 @@ class ExecutionStoryBuilder:
         self.add_step("understand", "skill", f"启用 Skill · {name}", detail=detail, status="ok")
 
     def add_knowledge(self, note: str) -> None:
-        self.add_step("gather", "knowledge", "知识库上下文", detail=note[:500], status="ok")
+        self.add_step("gather", "knowledge", "知识库上下文", detail=(note or "")[:20_000], status="ok")
 
     def mark_iteration(self, iteration: int, max_iter: int) -> None:
         self._iteration = iteration
@@ -146,7 +147,8 @@ class ExecutionStoryBuilder:
         preview = (text or "").strip()
         if not preview:
             return
-        self.add_step(phase_id, "thought", "思考", detail=preview[:600], status="ok")
+        # Full text for expanded markdown preview (add_step applies soft cap).
+        self.add_step(phase_id, "thought", "思考", detail=preview, status="ok")
 
     def add_tool_result(
         self,
@@ -169,14 +171,14 @@ class ExecutionStoryBuilder:
             title = f"{tool_name} 失败"
         evidence = None
         if tool_name in ("tavily_web_search", "duckduckgo_web_search", "web_extract") and result_preview:
-            evidence = {"type": "search", "preview": result_preview[:1200]}
+            evidence = {"type": "search", "preview": result_preview[:50_000]}
         elif tool_name == "tool_search" and result_preview:
-            evidence = {"type": "tool_search", "preview": result_preview[:1200]}
+            evidence = {"type": "tool_search", "preview": result_preview[:50_000]}
         self.add_step(
             "act",
             kind,
             title,
-            detail=result_preview[:2000],
+            detail=(result_preview or "")[:50_000],
             tool_name=tool_name,
             tool_call_id=tool_call_id,
             status=status,
