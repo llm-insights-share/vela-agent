@@ -128,6 +128,7 @@
       <a-layout-content class="content">
         <router-view />
       </a-layout-content>
+      <OpsCommandFab />
     </a-layout>
   </a-layout>
 </template>
@@ -158,6 +159,7 @@ import {
 import { useAuthStore } from './stores/auth'
 import { inboxApi } from './api'
 import { formatDateTimeShort } from './utils/datetime'
+import OpsCommandFab from './components/OpsCommandFab.vue'
 
 const router = useRouter()
 const route = useRoute()

@@ -1,6 +1,6 @@
 <template>
   <div v-if="visible" class="exec-story">
-    <div class="exec-story-header" @click="expanded = !expanded">
+    <div class="exec-story-header" @click="onHeaderClick">
       <CaretRightOutlined v-if="!expanded" style="font-size: 10px;" />
       <CaretDownOutlined v-else style="font-size: 10px;" />
       <span class="exec-story-title">思考与执行过程</span>
@@ -89,6 +89,8 @@ const props = defineProps({
   story: { type: Object, default: null },
   /** When running/hitl, expand by default so user sees live progress */
   defaultExpanded: { type: Boolean, default: false },
+  /** While true, keep the panel open (ignore user collapse) */
+  forceExpanded: { type: Boolean, default: false },
   extraSummary: { type: String, default: '' },
   /** Streaming thinking text for the current LLM turn */
   liveThinking: { type: String, default: '' },
@@ -96,14 +98,14 @@ const props = defineProps({
 
 const emit = defineEmits(['expand-change'])
 
-const expanded = ref(!!props.defaultExpanded)
+const expanded = ref(!!props.defaultExpanded || !!props.forceExpanded)
 const openPhases = reactive(new Set())
 const openSteps = reactive(new Set())
 
 watch(
   () => props.story?.status,
   (status) => {
-    if (props.defaultExpanded && (status === 'running' || status === 'hitl_wait')) {
+    if ((props.defaultExpanded || props.forceExpanded) && (status === 'running' || status === 'hitl_wait')) {
       expanded.value = true
     }
   },
@@ -112,7 +114,18 @@ watch(
 watch(
   () => props.defaultExpanded,
   (v) => {
+    if (props.forceExpanded) {
+      expanded.value = true
+      return
+    }
     expanded.value = !!v
+  },
+)
+
+watch(
+  () => props.forceExpanded,
+  (v) => {
+    if (v) expanded.value = true
   },
 )
 
@@ -124,6 +137,14 @@ watch(
 )
 
 watch(expanded, (v) => emit('expand-change', v))
+
+function onHeaderClick() {
+  if (props.forceExpanded) {
+    expanded.value = true
+    return
+  }
+  expanded.value = !expanded.value
+}
 
 const visible = computed(() => {
   if (props.liveThinking) return true

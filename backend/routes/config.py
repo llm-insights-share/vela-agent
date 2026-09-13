@@ -568,3 +568,115 @@ def update_contextual_retrieval_config(data: ContextualRetrievalConfigUpdate):
         min_chunk_length=merged.min_chunk_length,
         document_excerpt_max_chars=merged.document_excerpt_max_chars,
     )
+
+
+from services.platform_agents import OPS_AGENT_NAME
+
+
+class OpsAgentConfigUpdate(BaseModel):
+    model_service_id: str
+
+
+def _ops_agent_payload(db: Session, agent: Agent) -> dict:
+    from models import ModelService, ModelProvider
+
+    ms = (
+        db.query(ModelService)
+        .filter(ModelService.model_service_id == agent.model_service_id)
+        .first()
+    )
+    provider_id = ""
+    provider_name = ""
+    model_name = ""
+    model_display = ""
+    if ms:
+        model_name = ms.model_name or ""
+        model_display = ms.display_name or ms.model_name or ""
+        provider_id = ms.provider_id or ""
+        if ms.provider_id:
+            p = (
+                db.query(ModelProvider)
+                .filter(ModelProvider.provider_id == ms.provider_id)
+                .first()
+            )
+            if p:
+                provider_name = p.display_name or p.provider_code or ""
+    return {
+        "found": True,
+        "agent_id": agent.agent_id,
+        "name": agent.name,
+        "status": agent.status.value if hasattr(agent.status, "value") else str(agent.status),
+        "model_service_id": agent.model_service_id or "",
+        "model_name": model_name,
+        "model_display_name": model_display,
+        "provider_id": provider_id,
+        "provider_name": provider_name,
+        "description": agent.description or "",
+    }
+
+
+@router.get("/ops-agent")
+def get_ops_agent_config(db: Session = Depends(get_db)):
+    """应用操作智能体（vela-ops-assistant）模型配置。"""
+    agent = (
+        db.query(Agent)
+        .filter(Agent.name == OPS_AGENT_NAME, Agent.status != AgentStatus.DELETED)
+        .first()
+    )
+    if not agent:
+        return {
+            "found": False,
+            "agent_id": "",
+            "name": OPS_AGENT_NAME,
+            "status": "",
+            "model_service_id": "",
+            "model_name": "",
+            "model_display_name": "",
+            "provider_id": "",
+            "provider_name": "",
+            "description": "",
+            "hint": "未找到已发布的应用操作智能体，请先运行 python -m scripts.seed_demo",
+        }
+    return _ops_agent_payload(db, agent)
+
+
+@router.put("/ops-agent")
+def update_ops_agent_config(data: OpsAgentConfigUpdate, db: Session = Depends(get_db)):
+    """更新应用操作智能体绑定的模型服务。"""
+    from models import ModelService
+    from schemas import AgentUpdate
+    from services.agent_service import AgentService
+
+    ms_id = (data.model_service_id or "").strip()
+    if not ms_id:
+        raise HTTPException(status_code=400, detail="model_service_id 不能为空")
+    ms = db.query(ModelService).filter(ModelService.model_service_id == ms_id).first()
+    if not ms:
+        raise HTTPException(status_code=400, detail="模型服务不存在")
+
+    agent = (
+        db.query(Agent)
+        .filter(Agent.name == OPS_AGENT_NAME, Agent.status != AgentStatus.DELETED)
+        .first()
+    )
+    if not agent:
+        raise HTTPException(
+            status_code=404,
+            detail="未找到应用操作智能体 vela-ops-assistant，请先运行 seed",
+        )
+
+    updated = AgentService.update_agent(
+        db,
+        agent.agent_id,
+        AgentUpdate(
+            model_service_id=ms_id,
+            change_summary="系统配置：更新应用操作智能体模型",
+        ),
+    )
+    if not updated:
+        raise HTTPException(status_code=500, detail="更新失败")
+    db.commit()
+    db.refresh(updated)
+    payload = _ops_agent_payload(db, updated)
+    payload["message"] = "应用操作智能体模型已更新"
+    return payload

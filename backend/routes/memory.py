@@ -101,18 +101,11 @@ def list_or_search_passages(
             p for p in all_items
             if set(tag_list).intersection(set(p.get("tags") or []))
         ]
+    # Drop blank passages so clients never render empty memory rows
+    all_items = [p for p in (all_items or []) if str(p.get("content") or p.get("text") or "").strip()]
     total = len(all_items)
     start = (page - 1) * page_size
     page_items = all_items[start: start + page_size]
-    # #region agent log
-    try:
-        import json as _j, time as _t
-        blob = " ".join((p.get("content") or "") for p in (all_items or []))
-        with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-5cb12e.log", "a") as _f:
-            _f.write(_j.dumps({"sessionId":"5cb12e","runId":"pre-fix","hypothesisId":"H5","location":"memory.py:list_passages","message":"passages listed","data":{"user_id_prefix":(user_id or "")[:12] or "empty","n":len(all_items or []),"has_birthday":("生日" in blob or "1月15" in blob),"query":bool(query)},"timestamp":int(_t.time()*1000)},ensure_ascii=False)+"\n")
-    except Exception:
-        pass
-    # #endregion
     return PaginatedResponse(
         total=total,
         page=page,
@@ -131,7 +124,15 @@ def create_passage(data: MemoryPassageCreate, db: Session = Depends(get_db)):
         tags=data.tags or None,
     )
     if not created:
-        raise HTTPException(status_code=502, detail="写入归档记忆失败（Letta 不可用）")
+        health = letta_store.health()
+        detail = "写入归档记忆失败"
+        if not health.get("enabled"):
+            detail = "写入归档记忆失败（记忆服务未启用）"
+        elif not health.get("healthy"):
+            detail = f"写入归档记忆失败（Letta 不可用: {health.get('error') or 'unknown'}）"
+        else:
+            detail = "写入归档记忆失败（创建记忆作用域超时或失败，请重试）"
+        raise HTTPException(status_code=502, detail=detail)
     return MemoryPassageResponse(**created)
 
 

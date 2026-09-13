@@ -5,7 +5,8 @@
       <a-space>
         <a-button v-if="agent.status !== 'PUBLISHED'" @click="$router.push(`/agents/${agent.agent_id}/edit`)">编辑</a-button>
         <a-button v-if="agent.status === 'DRAFT'" type="primary" @click="handlePublish">发布</a-button>
-        <a-button v-if="agent.status === 'PUBLISHED'" @click="handleDeprecate">下架</a-button>
+        <a-tag v-if="isBuiltinOpsAgent" color="orange">内置</a-tag>
+        <a-button v-if="agent.status === 'PUBLISHED' && !isBuiltinOpsAgent" @click="handleDeprecate">下架</a-button>
         <a-button v-if="agent.status === 'DEPRECATED'" type="primary" @click="handleRepublish">重新上架</a-button>
         <a-button @click="handleValidate">校验</a-button>
         <a-button @click="$router.push(`/agents/${agent.agent_id}/chat`)" v-if="agent.status === 'PUBLISHED'">对话测试</a-button>
@@ -150,7 +151,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, computed, reactive, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { agentApi, scheduleApi } from '../../api'
 import { message } from 'ant-design-vue'
@@ -219,7 +220,14 @@ async function handlePublish() {
   }
 }
 
+const OPS_AGENT_NAME = 'vela-ops-assistant'
+const isBuiltinOpsAgent = computed(() => agent.name === OPS_AGENT_NAME)
+
 async function handleDeprecate() {
+  if (isBuiltinOpsAgent.value) {
+    message.warning('内置智能体不可下架')
+    return
+  }
   try {
     await agentApi.deprecate(agentId)
     message.success('已下架')

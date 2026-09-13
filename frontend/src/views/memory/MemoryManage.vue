@@ -261,9 +261,12 @@
 
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import { message } from 'ant-design-vue'
 import { agentApi, memoryApi } from '../../api'
 import { formatDateTime } from '../../utils/datetime'
+
+const route = useRoute()
 
 const activeTab = ref('blocks')
 const agentOptions = ref([])
@@ -596,11 +599,25 @@ function onTabChange(key) {
 onMounted(async () => {
   await loadAgents()
   await refreshStatus()
-  if (scopes.value.length) {
+  const qAgent = route.query.agent_id
+  const qUser = route.query.user_id
+  const qTab = route.query.tab
+  if (qAgent) {
+    scope.agent_id = String(qAgent)
+    scope.user_id = qUser != null && qUser !== '' ? String(qUser) : undefined
+  } else if (scopes.value.length) {
     scope.agent_id = scopes.value[0].agent_id
     scope.user_id = scopes.value[0].user_id || undefined
   }
-  await fetchBlocks()
+  if (qTab === 'passages' || qTab === 'blocks' || qTab === 'episodes' || qTab === 'status') {
+    activeTab.value = String(qTab)
+  } else if (qAgent) {
+    activeTab.value = 'passages'
+  }
+  if (activeTab.value === 'blocks') await fetchBlocks()
+  else if (activeTab.value === 'passages') await fetchPassages()
+  else if (activeTab.value === 'episodes') await fetchEpisodes()
+  else await fetchBlocks()
 })
 </script>
 

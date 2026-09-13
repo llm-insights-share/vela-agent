@@ -589,9 +589,14 @@ def _execute_pending_tool(db: Session, session: AgentSession, tool_name: str, to
             return f"工具 {tool_name} 未找到"
 
         from services.tool_service import tool_execution_service
-        result = __import__("asyncio").run(
-            tool_execution_service.execute_tool(tool, tool_args, timeout_seconds=60)
-        )
+        from services.tool_runtime_context import mint_token_for_caller, tool_auth_context
+
+        caller_id = getattr(session, "caller_id", None) or ""
+        api_token = mint_token_for_caller(db, caller_id)
+        with tool_auth_context(api_token, caller_id):
+            result = __import__("asyncio").run(
+                tool_execution_service.execute_tool(tool, tool_args, timeout_seconds=60)
+            )
         if isinstance(result, dict) and result.get("success"):
             return result.get("result", "")
         return f"工具执行错误: {result.get('error') if isinstance(result, dict) else result}"

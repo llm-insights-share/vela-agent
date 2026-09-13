@@ -97,14 +97,6 @@ class MemoryProcessor:
             "tool_profile_updated": tool_profile_updated,
             "distill": distill_result,
         }
-        # #region agent log
-        try:
-            import json as _j, time as _t
-            with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-5cb12e.log", "a") as _f:
-                _f.write(_j.dumps({"sessionId":"5cb12e","runId":"pre-fix","hypothesisId":"H1","location":"processor.py:process_session","message":"process finished","data":{"session_id":session_id,"user_id_prefix":(user_id or "")[:12],"transcript_len":len(transcript or ""),"distill_ok":bool((distill_result or {}).get("ok")),"distill_error":str((distill_result or {}).get("error") or "")[:200]},"timestamp":int(_t.time()*1000)},ensure_ascii=False)+"\n")
-        except Exception:
-            pass
-        # #endregion
         return result
 
     @staticmethod

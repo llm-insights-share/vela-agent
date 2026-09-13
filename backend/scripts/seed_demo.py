@@ -172,9 +172,10 @@ def _upsert_tool(
     description: str,
     function: str,
     parameters_schema: Dict[str, Any],
+    module: str = "demo_tools",
 ) -> Tool:
     config = {
-        "module": "demo_tools",
+        "module": module,
         "function": function,
     }
     tool = db.query(Tool).filter(Tool.name == name).first()
@@ -811,6 +812,424 @@ PM_TOOLS_SPEC = [
 ]
 
 
+# --- Platform ops assistant (vela CLI wrappers) ---
+# Tuple: name, display, desc, function, schema, require_approval
+OPS_TOOLS_SPEC = [
+    (
+        "vela_run",
+        "Vela·通用CLI",
+        "执行任意 vela CLI 子命令。subcommand 如 'agents list'；args_json 为额外参数 JSON 数组。",
+        "vela_run",
+        {
+            "type": "object",
+            "properties": {
+                "subcommand": {"type": "string", "description": "如 agents list / tools get"},
+                "args_json": {"type": "string", "description": 'JSON 数组，如 ["--page","1"] 或 ["agent_id"]'},
+            },
+            "required": ["subcommand"],
+        },
+        False,
+    ),
+    (
+        "vela_agents_list",
+        "Vela·列出智能体",
+        "列出平台 Agent",
+        "vela_agents_list",
+        {
+            "type": "object",
+            "properties": {
+                "page": {"type": "integer", "default": 1},
+                "page_size": {"type": "integer", "default": 50},
+                "keyword": {"type": "string"},
+                "status": {"type": "string"},
+            },
+        },
+        False,
+    ),
+    (
+        "vela_agents_get",
+        "Vela·获取智能体",
+        "按 agent_id 获取详情",
+        "vela_agents_get",
+        {
+            "type": "object",
+            "properties": {"agent_id": {"type": "string"}},
+            "required": ["agent_id"],
+        },
+        False,
+    ),
+    (
+        "vela_agents_create",
+        "Vela·创建智能体",
+        "创建 Agent（草稿）。可传 json_body 覆盖字段，或用 name+model_service_id。",
+        "vela_agents_create",
+        {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "model_service_id": {"type": "string"},
+                "description": {"type": "string"},
+                "system_prompt": {"type": "string"},
+                "agent_type": {"type": "string", "default": "SINGLE"},
+                "json_body": {"type": "string", "description": "完整 AgentCreate JSON 字符串"},
+            },
+        },
+        True,
+    ),
+    (
+        "vela_agents_update",
+        "Vela·更新智能体",
+        "更新 Agent，json_body 为 AgentUpdate JSON",
+        "vela_agents_update",
+        {
+            "type": "object",
+            "properties": {
+                "agent_id": {"type": "string"},
+                "json_body": {"type": "string"},
+            },
+            "required": ["agent_id", "json_body"],
+        },
+        True,
+    ),
+    (
+        "vela_agents_delete",
+        "Vela·删除智能体",
+        "删除 Agent（禁止删除 vela-ops-assistant）",
+        "vela_agents_delete",
+        {
+            "type": "object",
+            "properties": {"agent_id": {"type": "string"}},
+            "required": ["agent_id"],
+        },
+        True,
+    ),
+    (
+        "vela_agents_publish",
+        "Vela·发布智能体",
+        "发布 Agent",
+        "vela_agents_publish",
+        {
+            "type": "object",
+            "properties": {
+                "agent_id": {"type": "string"},
+                "change_summary": {"type": "string"},
+            },
+            "required": ["agent_id"],
+        },
+        True,
+    ),
+    (
+        "vela_agents_bind_tools",
+        "Vela·绑定工具",
+        "替换 Agent 工具绑定；json_body 为 tool_id 列表或绑定对象列表",
+        "vela_agents_bind_tools",
+        {
+            "type": "object",
+            "properties": {
+                "agent_id": {"type": "string"},
+                "json_body": {"type": "string"},
+            },
+            "required": ["agent_id", "json_body"],
+        },
+        True,
+    ),
+    (
+        "vela_tools_list",
+        "Vela·列出工具",
+        "列出平台工具",
+        "vela_tools_list",
+        {
+            "type": "object",
+            "properties": {
+                "page": {"type": "integer", "default": 1},
+                "page_size": {"type": "integer", "default": 50},
+                "keyword": {"type": "string"},
+            },
+        },
+        False,
+    ),
+    (
+        "vela_tools_get",
+        "Vela·获取工具",
+        "按 tool_id 获取工具",
+        "vela_tools_get",
+        {
+            "type": "object",
+            "properties": {"tool_id": {"type": "string"}},
+            "required": ["tool_id"],
+        },
+        False,
+    ),
+    (
+        "vela_tools_create",
+        "Vela·创建工具",
+        "创建工具；json_body 为 ToolCreate JSON",
+        "vela_tools_create",
+        {
+            "type": "object",
+            "properties": {"json_body": {"type": "string"}},
+            "required": ["json_body"],
+        },
+        True,
+    ),
+    (
+        "vela_tools_update",
+        "Vela·更新工具",
+        "更新工具",
+        "vela_tools_update",
+        {
+            "type": "object",
+            "properties": {
+                "tool_id": {"type": "string"},
+                "json_body": {"type": "string"},
+            },
+            "required": ["tool_id", "json_body"],
+        },
+        True,
+    ),
+    (
+        "vela_tools_delete",
+        "Vela·删除工具",
+        "删除工具",
+        "vela_tools_delete",
+        {
+            "type": "object",
+            "properties": {"tool_id": {"type": "string"}},
+            "required": ["tool_id"],
+        },
+        True,
+    ),
+    (
+        "vela_skills_list",
+        "Vela·列出Skill",
+        "列出 Skill 包",
+        "vela_skills_list",
+        {
+            "type": "object",
+            "properties": {
+                "page": {"type": "integer", "default": 1},
+                "page_size": {"type": "integer", "default": 50},
+                "keyword": {"type": "string"},
+            },
+        },
+        False,
+    ),
+    (
+        "vela_skills_get",
+        "Vela·获取Skill",
+        "获取 Skill 包详情",
+        "vela_skills_get",
+        {
+            "type": "object",
+            "properties": {"skill_pack_id": {"type": "string"}},
+            "required": ["skill_pack_id"],
+        },
+        False,
+    ),
+    (
+        "vela_kb_list",
+        "Vela·列出知识库",
+        "列出知识库",
+        "vela_kb_list",
+        {
+            "type": "object",
+            "properties": {
+                "page": {"type": "integer", "default": 1},
+                "page_size": {"type": "integer", "default": 50},
+                "keyword": {"type": "string"},
+            },
+        },
+        False,
+    ),
+    (
+        "vela_kb_get",
+        "Vela·获取知识库",
+        "获取知识库详情",
+        "vela_kb_get",
+        {
+            "type": "object",
+            "properties": {"kb_id": {"type": "string"}},
+            "required": ["kb_id"],
+        },
+        False,
+    ),
+    (
+        "vela_approvals_list",
+        "Vela·列出审批",
+        "列出审批中心工单",
+        "vela_approvals_list",
+        {
+            "type": "object",
+            "properties": {
+                "page": {"type": "integer", "default": 1},
+                "page_size": {"type": "integer", "default": 50},
+                "status": {"type": "string", "default": "PENDING"},
+                "category": {"type": "string"},
+            },
+        },
+        False,
+    ),
+    (
+        "vela_approvals_get",
+        "Vela·获取审批",
+        "获取审批详情",
+        "vela_approvals_get",
+        {
+            "type": "object",
+            "properties": {"approval_id": {"type": "string"}},
+            "required": ["approval_id"],
+        },
+        False,
+    ),
+    (
+        "vela_approvals_approve",
+        "Vela·批准审批",
+        "批准 HITL 审批（需 session_id + approval_id）",
+        "vela_approvals_approve",
+        {
+            "type": "object",
+            "properties": {
+                "approval_id": {"type": "string"},
+                "session_id": {"type": "string"},
+                "reviewer": {"type": "string"},
+                "comment": {"type": "string"},
+            },
+            "required": ["approval_id", "session_id"],
+        },
+        True,
+    ),
+    (
+        "vela_approvals_reject",
+        "Vela·拒绝审批",
+        "拒绝 HITL 审批",
+        "vela_approvals_reject",
+        {
+            "type": "object",
+            "properties": {
+                "approval_id": {"type": "string"},
+                "session_id": {"type": "string"},
+                "reviewer": {"type": "string"},
+                "comment": {"type": "string"},
+            },
+            "required": ["approval_id", "session_id"],
+        },
+        True,
+    ),
+    (
+        "vela_sessions_list",
+        "Vela·列出会话",
+        "列出会话（只读）",
+        "vela_sessions_list",
+        {
+            "type": "object",
+            "properties": {
+                "page": {"type": "integer", "default": 1},
+                "page_size": {"type": "integer", "default": 20},
+                "agent_id": {"type": "string"},
+                "status": {"type": "string"},
+            },
+        },
+        False,
+    ),
+    (
+        "vela_models_list",
+        "Vela·列出模型服务",
+        "列出模型服务",
+        "vela_models_list",
+        {
+            "type": "object",
+            "properties": {
+                "page": {"type": "integer", "default": 1},
+                "page_size": {"type": "integer", "default": 50},
+            },
+        },
+        False,
+    ),
+    (
+        "vela_schedules_list",
+        "Vela·列出定时任务",
+        "列出定时任务",
+        "vela_schedules_list",
+        {
+            "type": "object",
+            "properties": {
+                "page": {"type": "integer", "default": 1},
+                "page_size": {"type": "integer", "default": 50},
+            },
+        },
+        False,
+    ),
+    (
+        "vela_connectors_list",
+        "Vela·列出连接器",
+        "列出连接器",
+        "vela_connectors_list",
+        {"type": "object", "properties": {}},
+        False,
+    ),
+    (
+        "vela_memory_scopes_list",
+        "Vela·记忆作用域",
+        "列出记忆管理中的 Agent/用户作用域（Letta scopes）。无入参时 arguments 请传 {}。",
+        "vela_memory_scopes_list",
+        {"type": "object", "properties": {"_unused": {"type": "string", "description": "忽略，保持为空"}}, "additionalProperties": False},
+        False,
+    ),
+    (
+        "vela_memory_passages_list",
+        "Vela·列出归档记忆",
+        "列出指定智能体作用下的归档记忆（记忆管理页面数据）",
+        "vela_memory_passages_list",
+        {
+            "type": "object",
+            "properties": {
+                "agent_id": {"type": "string"},
+                "user_id": {"type": "string"},
+                "page": {"type": "integer", "default": 1},
+                "page_size": {"type": "integer", "default": 50},
+                "query": {"type": "string"},
+            },
+            "required": ["agent_id"],
+        },
+        False,
+    ),
+    (
+        "vela_memory_passages_create",
+        "Vela·新增归档记忆",
+        "在记忆管理中为指定智能体新增一条归档记忆。必填 agent_id、text；缺参时不要猜测，应提示用户补全。",
+        "vela_memory_passages_create",
+        {
+            "type": "object",
+            "properties": {
+                "agent_id": {"type": "string", "description": "目标智能体 ID"},
+                "text": {"type": "string", "description": "记忆正文"},
+                "user_id": {"type": "string", "description": "可选用户作用域"},
+                "tags": {"type": "string", "description": "可选，逗号分隔标签"},
+            },
+            "required": ["agent_id", "text"],
+        },
+        False,
+    ),
+]
+
+OPS_PROMPT = """你是 Vela 平台「应用操作助手」(vela-ops-assistant)。
+你通过 vela_* 工具调用真实的 `vela` CLI（再调用 /api/v1），完成智能体、工具、Skill、知识库、审批、模型服务、定时任务、连接器、记忆管理等平台操作。
+
+硬性规则：
+1. 必须使用工具获取/变更数据，禁止编造 ID、列表或操作结果；禁止声称已成功但未调用对应工具。
+2. 写操作（create/update/delete/publish/approve/reject/bind/记忆写入）若缺少必填参数，必须先向用户追问补全，禁止自行猜测后宣称成功。
+3. 禁止删除、下线或重命名名为 vela-ops-assistant 的智能体。
+4. 不要对本会话自己的 HITL 审批做无意义的递归批准；审批其他会话时需用户明确授权并提供 session_id。
+5. 优先使用专用工具（vela_agents_list、vela_memory_passages_create 等）；未知命令可用 vela_run。
+6. 「记忆管理」必须使用 vela_memory_* 工具写入平台归档记忆（Letta passages），禁止使用名为 memory 的本地文件工具。
+7. 写入记忆前必须确认 agent_id（可先 vela_agents_list 或 vela_memory_scopes_list）；text 为记忆正文；user_id/tags 可选。
+8. 缺 agent_id 时：只调用一次 vela_agents_list（不要同时 scopes_list + agents_list），列出后立即停止本轮，仅用一两句话请用户选择；禁止继续调用 passages_list / 不要罗列全部记忆内容。等用户回复确认后再执行写入。
+9. 仅当用户明确要求「查看/列出记忆」时才调用 vela_memory_passages_list；写入流程不要先拉全量 passages。
+10. 写入失败时如实说明错误，禁止声称成功；不要用 vela_run 重复同一写入。
+11. 回复简洁，用中文；展示工具返回的关键非空字段即可，忽略空值字段。
+"""
+
+
 # Demo agents force eager tool loading so bound local_python tools are visible
 # without tool_search (system default may be deferred).
 _EAGER_TOOLS = {"tool_loading": {"enabled": True, "mode": "eager"}}
@@ -1022,8 +1441,26 @@ def seed_all() -> Dict[str, Any]:
                 function=fn,
                 parameters_schema=schema,
             )
+        ops_tools: Dict[str, Tool] = {}
+        ops_bindings: List[Tuple[str, bool]] = []
+        for name, display, desc, fn, schema, require_approval in OPS_TOOLS_SPEC:
+            t = _upsert_tool(
+                db,
+                name=name,
+                display_name=display,
+                description=desc,
+                function=fn,
+                parameters_schema=schema,
+                module="services.ops_cli_tools",
+            )
+            ops_tools[name] = t
+            ops_bindings.append((t.tool_id, bool(require_approval)))
         summary["tools"] = (
-            list(audit_tools) + list(hr_tools) + list(office_tools) + list(pm_tools)
+            list(audit_tools)
+            + list(hr_tools)
+            + list(office_tools)
+            + list(pm_tools)
+            + list(ops_tools)
         )
         db.commit()
 
@@ -1415,6 +1852,24 @@ def seed_all() -> Dict[str, Any]:
         db.commit()
         _publish(db, pm_coord)
 
+        # --- Platform ops assistant ---
+        ops = _upsert_agent(
+            db,
+            name="vela-ops-assistant",
+            description="应用操作助手：通过 vela CLI 管理智能体、工具、审批等平台资源",
+            model_service_id=model_service_id,
+            system_prompt=OPS_PROMPT,
+            tags=["platform", "ops", "builtin"],
+            skill_ids=[],
+            kb_ids=[],
+            tool_bindings=ops_bindings,
+            agent_type="SINGLE",
+            composition_config=dict(_EAGER_TOOLS),
+            max_iterations=20,
+        )
+        db.commit()
+        _publish(db, ops)
+
         summary["agents"] = {
             "demo-audit-coordinator": coordinator.agent_id,
             "demo-audit-collector": collector.agent_id,
@@ -1429,6 +1884,7 @@ def seed_all() -> Dict[str, Any]:
             "demo-pm-research": pm_research.agent_id,
             "demo-pm-analytics": pm_analytics.agent_id,
             "demo-pm-prd": pm_prd.agent_id,
+            "vela-ops-assistant": ops.agent_id,
         }
         summary["model_service_id"] = model_service_id
         return summary
@@ -1456,6 +1912,9 @@ def main() -> None:
     print(
         "  [产品 Coordinator] 针对审批中心：结合 FlowApprove 竞品与用户反馈，"
         "用数据验证优先级，并起草「批量导出」PRD 草案。"
+    )
+    print(
+        "  [应用操作助手] 列出当前所有已发布的智能体，并说明如何创建一个新草稿 Agent。"
     )
 
 

@@ -1022,7 +1022,12 @@ class AgentService:
                     available_tools.append(tool)
 
 
-            available_tools.extend(get_builtin_tools_for_runtime())
+            _builtins = list(get_builtin_tools_for_runtime())
+            # Ops assistant must use vela_memory_* (Letta), not local-file builtin memory
+            from services.platform_agents import is_protected_agent_name
+            if is_protected_agent_name(getattr(agent, "name", None)):
+                _builtins = [t for t in _builtins if getattr(t, "name", None) != "memory"]
+            available_tools.extend(_builtins)
 
             from services.connector_service import (
                 connector_context_for_agent,
@@ -2113,8 +2118,16 @@ class AgentLoop:
                 args_str = json.dumps(args_str, ensure_ascii=False)
             except (TypeError, ValueError):
                 return {}
+        stripped = args_str.strip()
+        if stripped in ("null", "None", "undefined", "{}"):
+            return {}
         try:
-            return json.loads(args_str)
+            obj = json.loads(args_str)
+            if obj is None:
+                return {}
+            if isinstance(obj, dict):
+                return obj
+            return {}
         except json.JSONDecodeError:
             pass
 
@@ -2186,6 +2199,77 @@ class AgentLoop:
         if len(compact) > 16000:
             compact = compact[:16000] + "…[truncated]"
         return compact
+
+    @staticmethod
+    def _story_detail_for_tool(tool_name: str, raw_result: str, compacted: str) -> str:
+        """Build execution_story tool detail.
+
+        Ops (vela_*) cards need parseable JSON with items; do not hard-truncate mid-JSON.
+        Other tools keep a short preview for the process panel.
+        """
+        name = str(tool_name or "")
+        if not name.startswith("vela_"):
+            return (compacted or raw_result or "")[:800]
+
+        text = raw_result or compacted or ""
+        if not text:
+            return ""
+
+        def _slim_entity(it: Any) -> Any:
+            if not isinstance(it, dict):
+                return it
+            prefer = (
+                "agent_id", "tool_id", "skill_pack_id", "kb_id", "approval_id",
+                "session_id", "schedule_id", "connector_id", "model_service_id",
+                "name", "display_name", "agent_type", "tool_type", "status",
+                "description", "category", "tool_name", "version", "scope",
+                "cron_expression", "model_name",
+            )
+            slim: Dict[str, Any] = {}
+            for k in prefer:
+                if k not in it or it[k] is None:
+                    continue
+                v = it[k]
+                if isinstance(v, str) and len(v) > 240:
+                    v = v[:240] + "…"
+                slim[k] = v
+            if not slim:
+                for k, v in list(it.items())[:8]:
+                    if isinstance(v, (dict, list)):
+                        continue
+                    if isinstance(v, str) and len(v) > 240:
+                        v = v[:240] + "…"
+                    slim[k] = v
+            return slim
+
+        def _slim_payload(obj: Any, max_items: int) -> Any:
+            if not isinstance(obj, dict):
+                return obj
+            out = dict(obj)
+            if isinstance(out.get("items"), list):
+                items = out["items"]
+                out["items"] = [_slim_entity(x) for x in items[:max_items]]
+                if "total" not in out:
+                    out["total"] = len(items)
+            if isinstance(out.get("result"), dict):
+                out["result"] = _slim_payload(out["result"], max_items)
+            return out
+
+        data = None
+        if text.lstrip().startswith("{"):
+            try:
+                data = json.loads(text)
+            except json.JSONDecodeError:
+                data = None
+
+        if isinstance(data, dict):
+            for max_items in (200, 100, 50, 20, 8):
+                encoded = json.dumps(_slim_payload(data, max_items), ensure_ascii=False)
+                if len(encoded) <= 50_000:
+                    return encoded
+            return json.dumps(_slim_payload(data, 5), ensure_ascii=False)[:50_000]
+
+        return text[:50_000]
 
     @staticmethod
     def _parse_screenpilot_blocker(tool_result: str) -> Optional[Dict[str, Any]]:
@@ -2828,13 +2912,18 @@ class AgentLoop:
             return truncate_tool_result(result)
 
         from services.tool_service import tool_execution_service
+        from services.tool_runtime_context import mint_token_for_caller, tool_auth_context
+
+        caller_id = getattr(self.session, "caller_id", None) or ""
+        api_token = mint_token_for_caller(self.db, caller_id)
 
         last_error = None
         for attempt in range(self.tool_retry_count + 1):
             try:
-                result = await tool_execution_service.execute_tool(
-                    tool, args, timeout_seconds=self.step_timeout
-                )
+                with tool_auth_context(api_token, caller_id):
+                    result = await tool_execution_service.execute_tool(
+                        tool, args, timeout_seconds=self.step_timeout
+                    )
                 sp_approval = self._check_screenpilot_hitl_pending(tool, result)
                 if sp_approval:
                     hitl_tool = tool.name
@@ -3554,8 +3643,10 @@ class AgentLoop:
                     func_args = self._safe_parse_tool_args(raw_args)
                     exec_result: Optional[Dict[str, Any]] = None
 
-                    parse_failed = bool(raw_args) and not func_args
-
+                    func_args = func_args if isinstance(func_args, dict) else {}
+                    _raw = (raw_args if isinstance(raw_args, str) else str(raw_args or "")).strip()
+                    # Empty object/nullish args are valid (tools with no parameters)
+                    parse_failed = bool(_raw) and _raw not in ("{}", "null", "None", "undefined") and not func_args
 
                     tool = next((t for t in self.available_tools if t.name == func_name), None)
                     if tool:
@@ -3602,10 +3693,12 @@ class AgentLoop:
                                     ):
                                         self._last_ui_skill_result = payload
                                 self._extract_files_from_result(tool_result_str)
+                                raw_for_story = tool_result_str
                                 tool_result_str = self._compact_tool_result_for_llm(func_name, tool_result_str)
+                                story_detail = self._story_detail_for_tool(func_name, raw_for_story, tool_result_str)
                                 self.story.add_tool_result(
                                     func_name,
-                                    tool_result_str[:800],
+                                    story_detail,
                                     ok=bool(exec_result.get("success")),
                                     tool_call_id=tc.get("id") or "",
                                 )
@@ -3806,7 +3899,10 @@ class AgentLoop:
                         raw_args = tc["function"].get("arguments", "")
                         func_args = self._safe_parse_tool_args(raw_args)
 
-                        parse_failed = bool(raw_args) and not func_args
+                        func_args = func_args if isinstance(func_args, dict) else {}
+                        _raw = (raw_args if isinstance(raw_args, str) else str(raw_args or "")).strip()
+                        # Empty object/nullish args are valid (tools with no parameters)
+                        parse_failed = bool(_raw) and _raw not in ("{}", "null", "None", "undefined") and not func_args
 
                         tool = next((t for t in self.available_tools if t.name == func_name), None)
                         if tool:

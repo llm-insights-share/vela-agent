@@ -41,7 +41,8 @@
               <a v-if="record.agent_type === 'WORKFLOW'" @click="$router.push(`/agents/${record.agent_id}/workflow`)">工作流配置</a>
               <a v-if="record.status === 'DEPRECATED'" @click="handleRepublish(record.agent_id)">重新上架</a>
               <a @click="$router.push(`/agents/${record.agent_id}/chat`)" v-if="record.status === 'PUBLISHED'">对话</a>
-              <a-popconfirm title="确认删除?" @confirm="handleDelete(record.agent_id)">
+              <a-tag v-if="isBuiltinOpsAgent(record)" color="orange" size="small">内置</a-tag>
+              <a-popconfirm v-else title="确认删除?" @confirm="handleDelete(record.agent_id)">
                 <a style="color: #b5341c">删除</a>
               </a-popconfirm>
             </a-space>
@@ -109,7 +110,18 @@ function onTableChange(pag) {
   fetchAgents()
 }
 
+const OPS_AGENT_NAME = 'vela-ops-assistant'
+
+function isBuiltinOpsAgent(record) {
+  return record?.name === OPS_AGENT_NAME
+}
+
 async function handleDelete(id) {
+  const row = agents.value.find((a) => a.agent_id === id)
+  if (isBuiltinOpsAgent(row)) {
+    message.warning('内置智能体不可删除')
+    return
+  }
   try {
     await agentApi.delete(id)
     message.success('已删除')

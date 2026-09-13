@@ -360,15 +360,46 @@ class ToolExecutionService:
 
         try:
             import importlib
+            import inspect
             mod = importlib.import_module(module_path)
             func = getattr(mod, function_name)
 
+            # Drop unexpected kwargs (models often invent placeholders like _unused)
+            call_params = dict(parameters or {})
+            try:
+                sig = inspect.signature(func)
+                accepts_var_kw = any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+                )
+                if not accepts_var_kw:
+                    allowed = {
+                        name for name, p in sig.parameters.items()
+                        if p.kind in (
+                            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                            inspect.Parameter.KEYWORD_ONLY,
+                        )
+                    }
+                    call_params = {k: v for k, v in call_params.items() if k in allowed}
+            except (TypeError, ValueError):
+                pass
+
             if asyncio.iscoroutinefunction(func):
-                result = await asyncio.wait_for(func(**parameters), timeout=timeout_seconds)
+                result = await asyncio.wait_for(func(**call_params), timeout=timeout_seconds)
             else:
                 result = await asyncio.wait_for(
-                    asyncio.to_thread(func, **parameters), timeout=timeout_seconds
+                    asyncio.to_thread(func, **call_params), timeout=timeout_seconds
                 )
+
+            # Propagate business-level failure for CLI wrappers ({"success": false, ...})
+            if isinstance(result, dict) and result.get("success") is False:
+                err = result.get("error") or result.get("message") or "工具返回失败"
+                if isinstance(err, dict):
+                    err = err.get("detail") or err.get("message") or str(err)
+                return {
+                    "success": False,
+                    "error": str(err),
+                    "result": json.dumps(result, ensure_ascii=False),
+                }
 
             if isinstance(result, dict):
                 return {"success": True, "result": json.dumps(result, ensure_ascii=False)}

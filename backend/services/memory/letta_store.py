@@ -84,7 +84,7 @@ def get_client():
     if not is_letta_enabled():
         return None
     cfg = load_letta_config()
-    key = (cfg.get("base_url"), cfg.get("password"))
+    key = (cfg.get("base_url"), cfg.get("password"), 60.0)
     if _client_cache is not None and _client_cfg_key == key:
         return _client_cache
     try:
@@ -96,7 +96,7 @@ def get_client():
         client = Letta(
             base_url=cfg["base_url"],
             api_key=cfg.get("password") or None,
-            timeout=15.0,
+            timeout=60.0,
             max_retries=1,
         )
         _client_cache = client
@@ -446,9 +446,14 @@ def insert_passage(
     try:
         letta_id = ensure_memory_agent(db, agent_id, user_id)
         if not letta_id:
+            logger.warning(
+                "[letta_store] insert_passage: no memory agent for %s/%s",
+                agent_id[:12], (user_id or "")[:12] or "anon",
+            )
             return None
         client = get_client()
         if client is None:
+            logger.warning("[letta_store] insert_passage: client unavailable")
             return None
         kwargs: Dict[str, Any] = {"text": text}
         if tags:
@@ -510,25 +515,9 @@ def distill_session(
             agent_id=letta_id,
             messages=[{"role": "user", "content": content}],
         )
-        # #region agent log
-        try:
-            import json as _j, time as _t
-            with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-5cb12e.log", "a") as _f:
-                _f.write(_j.dumps({"sessionId":"5cb12e","runId":"pre-fix","hypothesisId":"H2","location":"letta_store.py:distill_session","message":"distill ok","data":{"session_id":session_id,"user_id_prefix":(user_id or "")[:12],"letta_id":str(letta_id)[:12],"transcript_len":len(transcript or "")},"timestamp":int(_t.time()*1000)},ensure_ascii=False)+"\n")
-        except Exception:
-            pass
-        # #endregion
         return {"ok": True, "response": str(resp)[:500]}
     except Exception as e:
         logger.warning(f"[letta_store] distill_session failed: {e}")
-        # #region agent log
-        try:
-            import json as _j, time as _t
-            with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-5cb12e.log", "a") as _f:
-                _f.write(_j.dumps({"sessionId":"5cb12e","runId":"pre-fix","hypothesisId":"H2","location":"letta_store.py:distill_session","message":"distill failed","data":{"session_id":session_id,"user_id_prefix":(user_id or "")[:12],"error":str(e)[:280]},"timestamp":int(_t.time()*1000)},ensure_ascii=False)+"\n")
-        except Exception:
-            pass
-        # #endregion
         return {"ok": False, "error": str(e)}
 
 

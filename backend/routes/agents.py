@@ -71,6 +71,13 @@ def get_agent(agent_id: str, db: Session = Depends(get_db)):
 
 @router.put("/{agent_id}", response_model=AgentResponse)
 def update_agent(agent_id: str, data: AgentUpdate, db: Session = Depends(get_db)):
+    from services.platform_agents import OPS_AGENT_NAME, is_protected_agent_name
+    existing = db.query(Agent).filter(Agent.agent_id == agent_id).first()
+    if not existing:
+        raise HTTPException(status_code=404, detail="Agent 不存在")
+    if is_protected_agent_name(existing.name):
+        if data.name is not None and data.name != existing.name:
+            raise HTTPException(status_code=403, detail=f"内置智能体 {OPS_AGENT_NAME} 不可重命名")
     agent = agent_service.update_agent(db, agent_id, data)
     if not agent:
         raise HTTPException(status_code=404, detail="Agent 不存在")
@@ -79,9 +86,14 @@ def update_agent(agent_id: str, data: AgentUpdate, db: Session = Depends(get_db)
 
 @router.delete("/{agent_id}")
 def delete_agent(agent_id: str, db: Session = Depends(get_db)):
+    from services.platform_agents import assert_agent_mutable
     agent = db.query(Agent).filter(Agent.agent_id == agent_id).first()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent 不存在")
+    try:
+        assert_agent_mutable(agent, action="删除")
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     agent.status = AgentStatus.DELETED
     db.commit()
     return {"message": "Agent 已删除"}
@@ -89,9 +101,14 @@ def delete_agent(agent_id: str, db: Session = Depends(get_db)):
 
 @router.post("/{agent_id}/deprecate")
 def deprecate_agent(agent_id: str, db: Session = Depends(get_db)):
+    from services.platform_agents import assert_agent_mutable
     agent = db.query(Agent).filter(Agent.agent_id == agent_id).first()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent 不存在")
+    try:
+        assert_agent_mutable(agent, action="下架")
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     agent.status = AgentStatus.DEPRECATED
     db.commit()
     return {"message": "Agent 已下架"}

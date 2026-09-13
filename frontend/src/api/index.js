@@ -318,6 +318,8 @@ export const configApi = {
   updateObservability: (data) => api.put('/config/observability', data),
   getSelfopt: () => api.get('/config/selfopt'),
   updateSelfopt: (data) => api.put('/config/selfopt', data),
+  getOpsAgent: () => api.get('/config/ops-agent'),
+  updateOpsAgent: (data) => api.put('/config/ops-agent', data),
 }
 
 export const selfoptApi = {

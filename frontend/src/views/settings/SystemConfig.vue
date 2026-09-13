@@ -277,6 +277,86 @@
     </a-card>
 
     <a-card style="margin-bottom: 24px;">
+      <template #title>应用操作智能体</template>
+      <template #extra>
+        <a-button
+          type="text"
+          size="small"
+          :title="cardCollapsed.opsAgent ? '展开' : '收起'"
+          @click.stop="cardCollapsed.opsAgent = !cardCollapsed.opsAgent"
+        >
+          <template #icon>
+            <UpOutlined v-if="!cardCollapsed.opsAgent" />
+            <DownOutlined v-else />
+          </template>
+        </a-button>
+      </template>
+      <div v-show="!cardCollapsed.opsAgent">
+        <div class="field-hint" style="margin-bottom: 12px;">
+          配置右下角「应用操作助手」(<code>vela-ops-assistant</code>) 使用的模型服务。
+          该智能体通过 <code>vela</code> CLI 执行平台操作（智能体 / 工具 / 审批等）。
+        </div>
+        <a-alert
+          v-if="opsAgentMeta.hint && !opsAgentMeta.found"
+          type="warning"
+          show-icon
+          :message="opsAgentMeta.hint"
+          style="margin-bottom: 12px;"
+        />
+        <a-form :model="opsAgentForm" :label-col="{ span: 4 }" :wrapper-col="{ span: 16 }">
+          <a-form-item label="智能体">
+            <a-space>
+              <span>{{ opsAgentMeta.name || 'vela-ops-assistant' }}</span>
+              <a-tag v-if="opsAgentMeta.found" :color="opsAgentMeta.status === 'PUBLISHED' ? 'green' : 'default'">
+                {{ opsAgentMeta.status || '—' }}
+              </a-tag>
+              <a-tag v-else color="orange">未种子</a-tag>
+            </a-space>
+          </a-form-item>
+          <a-form-item label="供应商">
+            <a-select
+              v-model:value="opsAgentProviderId"
+              allow-clear
+              show-search
+              placeholder="选择供应商"
+              :options="opsAgentProviderOptions"
+              :filter-option="filterSelfoptAgent"
+              :disabled="!opsAgentMeta.found"
+              style="width: 100%"
+              @change="onOpsAgentProviderChange"
+            />
+          </a-form-item>
+          <a-form-item label="模型服务">
+            <a-select
+              v-model:value="opsAgentForm.model_service_id"
+              allow-clear
+              show-search
+              placeholder="选择模型服务"
+              :options="opsAgentModelOptions"
+              :filter-option="filterSelfoptAgent"
+              :disabled="!opsAgentMeta.found || !opsAgentProviderId"
+              style="width: 100%"
+            />
+            <div class="field-hint">保存后立即生效于新对话；已发布智能体会自动发版。</div>
+          </a-form-item>
+          <a-form-item :wrapper-col="{ offset: 4, span: 16 }">
+            <a-space>
+              <a-button
+                type="primary"
+                :loading="opsAgentSaving"
+                :disabled="!opsAgentMeta.found || !opsAgentForm.model_service_id"
+                @click="saveOpsAgent"
+              >
+                保存模型配置
+              </a-button>
+              <a-button @click="fetchOpsAgent">刷新</a-button>
+            </a-space>
+          </a-form-item>
+        </a-form>
+      </div>
+    </a-card>
+
+    <a-card style="margin-bottom: 24px;">
       <template #title>代码执行沙箱 (Code Interpreter)</template>
       <template #extra>
         <a-button
@@ -598,6 +678,7 @@ import { message } from 'ant-design-vue'
 const cardCollapsed = reactive({
   tools: true,
   selfopt: true,
+  opsAgent: false,
   codeExec: true,
   contextual: true,
   screenpilot: true,
@@ -638,6 +719,22 @@ const selfoptAllServices = ref([])
 const selfoptReflectProviderId = ref(undefined)
 const selfoptOptionsError = ref('')
 
+const opsAgentForm = reactive({
+  model_service_id: undefined,
+})
+const opsAgentMeta = reactive({
+  found: false,
+  name: 'vela-ops-assistant',
+  status: '',
+  agent_id: '',
+  hint: '',
+})
+const opsAgentSaving = ref(false)
+const opsAgentProviderId = ref(undefined)
+const opsAgentProviderOptions = ref([])
+const opsAgentModelOptions = ref([])
+const opsAgentAllServices = ref([])
+
 function filterSelfoptAgent(input, option) {
   return (option?.label || '').toLowerCase().includes((input || '').toLowerCase())
 }
@@ -660,6 +757,90 @@ function onSelfoptProviderChange(providerId) {
   selfoptForm.reflect_model_service_id = undefined
   syncSelfoptModelOptions(providerId)
 }
+
+function syncOpsAgentModelOptions(providerId) {
+  const pid = providerId || opsAgentProviderId.value
+  if (!pid) {
+    opsAgentModelOptions.value = []
+    return
+  }
+  opsAgentModelOptions.value = (opsAgentAllServices.value || [])
+    .filter((s) => s.provider_id === pid)
+    .map((s) => ({
+      label: `${s.display_name || s.model_name} (${s.model_name})`,
+      value: s.model_service_id,
+    }))
+}
+
+function onOpsAgentProviderChange(providerId) {
+  opsAgentForm.model_service_id = undefined
+  syncOpsAgentModelOptions(providerId)
+}
+
+async function fetchOpsAgentOptions() {
+  try {
+    const [providersRes, servicesRes] = await Promise.all([
+      providerApi.list({ page: 1, page_size: 100 }),
+      serviceApi.list({ page: 1, page_size: 100 }),
+    ])
+    opsAgentProviderOptions.value = (providersRes.items || []).map((p) => ({
+      label: p.display_name || p.provider_code,
+      value: p.provider_id,
+    }))
+    opsAgentAllServices.value = servicesRes.items || []
+    syncOpsAgentModelOptions(opsAgentProviderId.value)
+  } catch (_) {
+    opsAgentProviderOptions.value = []
+    opsAgentAllServices.value = []
+    opsAgentModelOptions.value = []
+  }
+}
+
+async function fetchOpsAgent() {
+  try {
+    const res = await configApi.getOpsAgent()
+    opsAgentMeta.found = !!res.found
+    opsAgentMeta.name = res.name || 'vela-ops-assistant'
+    opsAgentMeta.status = res.status || ''
+    opsAgentMeta.agent_id = res.agent_id || ''
+    opsAgentMeta.hint = res.hint || ''
+    opsAgentForm.model_service_id = res.model_service_id || undefined
+    if (!opsAgentAllServices.value.length) {
+      await fetchOpsAgentOptions()
+    }
+    const msid = opsAgentForm.model_service_id
+    if (msid) {
+      const svc = opsAgentAllServices.value.find((s) => s.model_service_id === msid)
+      opsAgentProviderId.value = svc?.provider_id || res.provider_id || undefined
+    } else {
+      opsAgentProviderId.value = res.provider_id || undefined
+    }
+    syncOpsAgentModelOptions(opsAgentProviderId.value)
+  } catch (e) {
+    opsAgentMeta.found = false
+    opsAgentMeta.hint = e.message || '加载失败'
+  }
+}
+
+async function saveOpsAgent() {
+  if (!opsAgentForm.model_service_id) {
+    message.warning('请选择模型服务')
+    return
+  }
+  opsAgentSaving.value = true
+  try {
+    const res = await configApi.updateOpsAgent({
+      model_service_id: opsAgentForm.model_service_id,
+    })
+    message.success(res.message || '应用操作智能体模型已更新')
+    await fetchOpsAgent()
+  } catch (e) {
+    message.error(e.message)
+  } finally {
+    opsAgentSaving.value = false
+  }
+}
+
 const observabilityEnvHint = computed(() => {
   const parts = []
   if (observabilityMeta.sdk_disabled_by_env) {
@@ -1211,6 +1392,8 @@ onMounted(async () => {
   await fetchObservability()
   await fetchSelfopt()
   await fetchSelfoptOptions()
+  await fetchOpsAgentOptions()
+  await fetchOpsAgent()
   await fetchCodeExecConfig()
   await fetchContextualConfig()
   await fetchScreenpilot()
