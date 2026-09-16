@@ -9,23 +9,49 @@
     </div>
 
     <div v-if="expanded" class="exec-story-body">
-      <div v-if="liveThinking" class="exec-live-thinking">
+      <div v-if="liveThinking && !hasPersistedLiveThinking" class="exec-live-thinking">
         <div class="exec-live-thinking-label">实时思考</div>
         <div class="exec-step-md" v-html="renderStepMarkdown(liveThinking)"></div>
       </div>
 
       <div
-        v-for="phase in visiblePhases"
+        v-for="phase in displayPhases"
         :key="phase.id"
-        :class="['exec-phase', `exec-phase-${phase.status}`]"
+        :class="['exec-phase', `exec-phase-${phase.status}`, phase.id === 'live_thinking' ? 'exec-phase-live_thinking' : '']"
       >
         <div class="exec-phase-head" @click="togglePhase(phase.id)">
-          <span class="exec-phase-marker">{{ phaseMarker(phase) }}</span>
+          <span class="exec-phase-marker">
+            <BulbOutlined v-if="phase.id === 'live_thinking'" class="exec-phase-live-icon" />
+            <template v-else>{{ phaseMarker(phase) }}</template>
+          </span>
           <span class="exec-phase-title">{{ phase.title }}</span>
-          <span v-if="phase.summary" class="exec-phase-summary">{{ phase.summary }}</span>
-          <a-tag :color="phaseStatusColor(phase.status)" size="small">{{ phaseStatusLabel(phase.status) }}</a-tag>
+          <span
+            v-if="phase.id !== 'live_thinking' && phase.summary"
+            class="exec-phase-summary"
+          >{{ phase.summary }}</span>
+          <a-tag
+            v-if="phase.id === 'live_thinking'"
+            color="gold"
+            size="small"
+          >实时思考</a-tag>
+          <a-tag
+            v-else
+            :color="phaseStatusColor(phase.status)"
+            size="small"
+          >{{ phaseStatusLabel(phase.status) }}</a-tag>
+          <CaretRightOutlined v-if="phase.id === 'live_thinking' && !isPhaseOpen(phase)" class="exec-phase-caret" />
+          <CaretDownOutlined v-else-if="phase.id === 'live_thinking'" class="exec-phase-caret" />
         </div>
-        <div v-if="isPhaseOpen(phase)" class="exec-phase-steps">
+
+        <!-- live_thinking: expand shows full original text -->
+        <div v-if="phase.id === 'live_thinking' && isPhaseOpen(phase)" class="exec-phase-steps">
+          <div
+            class="exec-step-detail exec-step-md exec-live-thinking-body"
+            v-html="renderStepMarkdown(liveThinkingDetail(phase))"
+          ></div>
+        </div>
+
+        <div v-else-if="phase.id !== 'live_thinking' && isPhaseOpen(phase)" class="exec-phase-steps">
           <div
             v-for="step in phase.steps || []"
             :key="step.id"
@@ -45,13 +71,11 @@
                 @click.stop="toggleStep(step.id)"
               >{{ openSteps.has(step.id) ? '收起' : '详情' }}</a-button>
             </div>
-            <!-- Expanded / short: full markdown preview, no truncation -->
             <div
               v-if="step.detail && (openSteps.has(step.id) || step.detail.length <= 80)"
               class="exec-step-detail exec-step-md"
               v-html="renderStepMarkdown(step.detail)"
             ></div>
-            <!-- Collapsed preview only -->
             <div
               v-else-if="step.detail && !openSteps.has(step.id)"
               class="exec-step-detail muted"
@@ -77,7 +101,7 @@
 
 <script setup>
 import { computed, reactive, ref, watch } from 'vue'
-import { CaretDownOutlined, CaretRightOutlined } from '@ant-design/icons-vue'
+import { BulbOutlined, CaretDownOutlined, CaretRightOutlined } from '@ant-design/icons-vue'
 import { marked } from 'marked'
 
 marked.setOptions({
@@ -148,13 +172,62 @@ function onHeaderClick() {
 
 const visible = computed(() => {
   if (props.liveThinking) return true
-  return !!(props.story && visiblePhases.value.length)
+  return !!(props.story && displayPhases.value.length)
 })
 
 const visiblePhases = computed(() => {
   const phases = props.story?.phases || []
   return phases.filter((p) => p.status !== 'skipped' || (p.steps && p.steps.length))
 })
+
+/** Lift live_thinking to a peer phase; strip nested steps from understand (legacy). */
+const displayPhases = computed(() => {
+  const raw = visiblePhases.value || []
+  let livePhase = raw.find((p) => p.id === 'live_thinking' && (p.steps || []).some((s) => String(s.detail || '').trim()))
+  const nested = []
+  const rest = []
+  for (const phase of raw) {
+    if (phase.id === 'live_thinking') continue
+    const keep = []
+    for (const step of phase.steps || []) {
+      if (step?.kind === 'live_thinking' && String(step.detail || '').trim()) {
+        nested.push(step)
+      } else {
+        keep.push(step)
+      }
+    }
+    if (phase.status === 'skipped' && !keep.length) continue
+    rest.push({ ...phase, steps: keep })
+  }
+  if (!livePhase && nested.length) {
+    livePhase = {
+      id: 'live_thinking',
+      title: '实时思考',
+      status: 'done',
+      summary: '',
+      steps: nested,
+    }
+  }
+  if (livePhase) {
+    return [{ ...livePhase, title: livePhase.title || '实时思考' }, ...rest]
+  }
+  return rest
+})
+
+const hasPersistedLiveThinking = computed(() => {
+  return displayPhases.value.some((p) => p.id === 'live_thinking'
+    && (p.steps || []).some((s) => String(s.detail || '').trim()))
+})
+
+function liveThinkingDetail(phase) {
+  const steps = phase?.steps || []
+  const parts = steps
+    .filter((s) => s?.kind === 'live_thinking' || phase.id === 'live_thinking')
+    .map((s) => String(s.detail || '').trim())
+    .filter(Boolean)
+  if (parts.length) return parts.join('\n\n')
+  return String(steps[0]?.detail || phase?.summary || '').trim()
+}
 
 const statusTag = computed(() => {
   const s = props.story?.status
@@ -242,6 +315,7 @@ function phaseStatusLabel(status) {
 
 function stepKindColor(kind) {
   return ({
+    live_thinking: 'gold',
     intent: 'cyan',
     memory: 'purple',
     knowledge: 'purple',
@@ -258,6 +332,7 @@ function stepKindColor(kind) {
 }
 
 function stepKindLabel(step) {
+  if (step.kind === 'live_thinking') return '实时思考'
   if (step.kind === 'dispatch') return '调度'
   if (step.kind === 'tool' || step.kind === 'code' || step.kind === 'ui_skill') {
     return step.tool_name || step.kind
@@ -275,12 +350,26 @@ function stepKindLabel(step) {
 }
 
 function isPhaseOpen(phase) {
+  // live_thinking: collapsed by default; only open when explicitly toggled on
+  if (phase.id === 'live_thinking') {
+    return openPhases.has(phase.id) && !openPhases.has(`closed:${phase.id}`)
+  }
   if (openPhases.has(phase.id)) return true
   if (openPhases.has(`closed:${phase.id}`)) return false
   return phase.status === 'active' || phase.status === 'error' || phase.status === 'hitl'
 }
 
 function togglePhase(id) {
+  if (id === 'live_thinking') {
+    if (openPhases.has(id)) {
+      openPhases.delete(id)
+      openPhases.add(`closed:${id}`)
+    } else {
+      openPhases.delete(`closed:${id}`)
+      openPhases.add(id)
+    }
+    return
+  }
   if (openPhases.has(id)) {
     openPhases.delete(id)
     openPhases.add(`closed:${id}`)
@@ -353,6 +442,27 @@ function toggleStep(id) {
 }
 .exec-phase {
   margin-top: 8px;
+}
+.exec-phase-live_thinking {
+  padding: 6px 8px;
+  margin-left: -4px;
+  background: #fffbeb;
+  border-left: 3px solid #f5a623;
+  border-radius: 6px;
+}
+.exec-phase-live-icon {
+  color: #d48806;
+  font-size: 14px;
+}
+.exec-phase-caret {
+  margin-left: auto;
+  font-size: 10px;
+  color: #9e9590;
+}
+.exec-live-thinking-body {
+  margin-top: 6px;
+  max-height: 320px;
+  overflow-y: auto;
 }
 .exec-phase-head {
   display: flex;

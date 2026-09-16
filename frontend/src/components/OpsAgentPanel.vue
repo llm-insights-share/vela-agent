@@ -665,6 +665,17 @@ function handleSessionEvent(evt) {
   }
 }
 
+function isIntermediateOpsMessage(msg) {
+  // Match AgentChat: hide ReAct tool-call shells so they don't render a bare role label.
+  if (!msg || msg.role === 'tool') return true
+  if (msg.role !== 'assistant') return false
+  const toolCalls = msg.tool_calls || msg.toolCalls
+  if (toolCalls && toolCalls.length > 0) return true
+  const hasStory = !!(msg.executionStory || msg.execution_story)
+  const hasContent = !!(msg.content || '').trim()
+  return !hasContent && !hasStory
+}
+
 function normalizeMessage(msg) {
   const pendingApprovalId = msg.pendingApprovalId || msg.pending_approval_id || null
   const approvalStatus = msg.approvalStatus
@@ -684,16 +695,24 @@ function normalizeMessage(msg) {
   }
 }
 
+function mapOpsSessionMessages(raw) {
+  const out = []
+  for (let sourceIndex = 0; sourceIndex < (raw || []).length; sourceIndex++) {
+    const m = raw[sourceIndex]
+    if (m.role !== 'user' && m.role !== 'assistant') continue
+    if (isIntermediateOpsMessage(m)) continue
+    out.push(normalizeMessage({ ...m, sourceIndex }))
+  }
+  return out
+}
+
 async function refreshCurrentSession({ navigate = false } = {}) {
   if (!sessionId.value) return
   try {
     const s = await sessionApi.get(sessionId.value)
     const prev = currentSessionStatus.value
     currentSessionStatus.value = s.status || currentSessionStatus.value
-    const raw = s.messages || []
-    const normalized = raw
-      .filter((m) => m.role === 'user' || m.role === 'assistant')
-      .map((m, idx) => normalizeMessage({ ...m, sourceIndex: idx }))
+    const normalized = mapOpsSessionMessages(s.messages || [])
     const becameIdle = ['RUNNING', 'HITL_WAIT'].includes(prev)
       && currentSessionStatus.value === 'ACTIVE'
     if (becameIdle) armStoryKeep()

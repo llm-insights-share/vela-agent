@@ -260,7 +260,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { message } from 'ant-design-vue'
 import { agentApi, memoryApi } from '../../api'
@@ -475,9 +475,6 @@ async function fetchPassages() {
     const res = await memoryApi.listPassages(params)
     passages.value = res.items || []
     passagePagination.total = res.total || 0
-    // #region agent log
-    fetch('http://127.0.0.1:7619/ingest/e4abc09e-cca5-4895-80e3-3c1a600bc5af',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'5cb12e'},body:JSON.stringify({sessionId:'5cb12e',runId:'pre-fix',hypothesisId:'H5',location:'MemoryManage.vue:fetchPassages',message:'frontend passages',data:{user_id:(scope.user_id||'').slice(0,12)||'empty',n:(res.items||[]).length,total:res.total||0},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
   } catch (e) {
     message.error(e.message)
     passages.value = []
@@ -573,9 +570,6 @@ async function triggerProcess() {
   processing.value = true
   try {
     const res = await memoryApi.processSession(processSessionId.value.trim())
-    // #region agent log
-    fetch('http://127.0.0.1:7619/ingest/e4abc09e-cca5-4895-80e3-3c1a600bc5af',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'5cb12e'},body:JSON.stringify({sessionId:'5cb12e',runId:'pre-fix',hypothesisId:'H1',location:'MemoryManage.vue:triggerProcess',message:'manual distill triggered',data:{session_id:(processSessionId.value||'').slice(0,12),msg:res.message||''},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
     message.success(res.message || '已触发')
   } catch (e) {
     message.error(e.message)
@@ -596,16 +590,14 @@ function onTabChange(key) {
   else if (key === 'status') refreshStatus()
 }
 
-onMounted(async () => {
-  await loadAgents()
-  await refreshStatus()
+function applyRouteScope() {
   const qAgent = route.query.agent_id
   const qUser = route.query.user_id
   const qTab = route.query.tab
   if (qAgent) {
     scope.agent_id = String(qAgent)
     scope.user_id = qUser != null && qUser !== '' ? String(qUser) : undefined
-  } else if (scopes.value.length) {
+  } else if (!scope.agent_id && scopes.value.length) {
     scope.agent_id = scopes.value[0].agent_id
     scope.user_id = scopes.value[0].user_id || undefined
   }
@@ -614,11 +606,29 @@ onMounted(async () => {
   } else if (qAgent) {
     activeTab.value = 'passages'
   }
+}
+
+async function loadActiveTab() {
   if (activeTab.value === 'blocks') await fetchBlocks()
   else if (activeTab.value === 'passages') await fetchPassages()
   else if (activeTab.value === 'episodes') await fetchEpisodes()
   else await fetchBlocks()
+}
+
+onMounted(async () => {
+  await loadAgents()
+  await refreshStatus()
+  applyRouteScope()
+  await loadActiveTab()
 })
+
+watch(
+  () => [route.query.agent_id, route.query.user_id, route.query.tab],
+  async () => {
+    applyRouteScope()
+    await loadActiveTab()
+  },
+)
 </script>
 
 <style scoped>

@@ -183,7 +183,10 @@ export function buildItemPath(domain, item) {
   if (domain === 'sessions') return `/monitor`
   if (domain === 'memory') {
     const aid = item.agent_id
-    return aid ? `/memory?agent_id=${encodeURIComponent(aid)}&tab=passages` : `${meta.list}?tab=passages`
+    if (!aid) return `${meta.list}?tab=passages`
+    const params = new URLSearchParams({ agent_id: aid, tab: 'passages' })
+    if (item.user_id) params.set('user_id', String(item.user_id))
+    return `/memory?${params.toString()}`
   }
   return meta.list
 }
@@ -216,12 +219,20 @@ export function resolveNavigatePath(action) {
   if (domain === 'memory') {
     const aid = payload?.agent_id || payload?.result?.agent_id
       || (Array.isArray(payload?.items) && payload.items[0]?.agent_id)
+    const uid = payload?.user_id || payload?.result?.user_id
+      || (Array.isArray(payload?.items) && payload.items[0]?.user_id) || ''
+    const buildMemoryPath = (agentId, userId) => {
+      if (!agentId) return null
+      const params = new URLSearchParams({ agent_id: agentId, tab: 'passages' })
+      if (userId) params.set('user_id', String(userId))
+      return `/memory?${params.toString()}`
+    }
     // Only navigate after a real write (create) or when a concrete agent scope is known
     if (action.action === 'passages_create' || action.action === 'create') {
-      return aid ? `/memory?agent_id=${encodeURIComponent(aid)}&tab=passages` : null
+      return buildMemoryPath(aid, uid)
     }
     if (action.action === 'passages_list' && aid) {
-      return `/memory?agent_id=${encodeURIComponent(aid)}&tab=passages`
+      return buildMemoryPath(aid, uid)
     }
     return null
   }

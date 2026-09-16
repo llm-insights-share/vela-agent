@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 
 
 PHASE_DEFS = (
+    ("live_thinking", "实时思考"),
     ("understand", "理解任务"),
     ("gather", "收集信息"),
     ("act", "执行操作"),
@@ -97,6 +98,38 @@ class ExecutionStoryBuilder:
             phase["status"] = "error"
         elif status == "pending" and kind == "hitl":
             phase["status"] = "hitl"
+        return step
+
+    def set_live_thinking(self, text: str) -> Optional[Dict[str, Any]]:
+        """Upsert streaming live-thinking as its own top-level phase (peer of understand)."""
+        detail = (text or "").strip()
+        if not detail:
+            return None
+        phase = self.ensure_phase("live_thinking", active=True)
+        steps = phase.setdefault("steps", [])
+        for step in steps:
+            if step.get("kind") == "live_thinking":
+                step["detail"] = detail[:100_000]
+                step["title"] = "实时思考"
+                step["status"] = "ok"
+                if steps and steps[0] is not step:
+                    steps.remove(step)
+                    steps.insert(0, step)
+                phase["summary"] = (detail[:80] + "…") if len(detail) > 80 else detail
+                return step
+        step = {
+            "id": _new_id(),
+            "kind": "live_thinking",
+            "title": "实时思考",
+            "detail": detail[:100_000],
+            "tool_name": None,
+            "tool_call_id": None,
+            "status": "ok",
+            "evidence": None,
+            "duration_ms": None,
+        }
+        steps.insert(0, step)
+        phase["summary"] = (detail[:80] + "…") if len(detail) > 80 else detail
         return step
 
     def add_intent(self, text: str, *, skill: Optional[str] = None) -> None:

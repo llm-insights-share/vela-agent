@@ -4,6 +4,7 @@
  */
 
 const PHASE_META = [
+  { id: 'live_thinking', title: '实时思考', kinds: ['live_thinking'] },
   { id: 'understand', title: '理解任务', kinds: ['rewrite', 'intent', 'skill'] },
   { id: 'gather', title: '收集信息', kinds: ['memory', 'knowledge'] },
   { id: 'act', title: '执行操作', kinds: ['phase', 'thought', 'tool', 'code_exec', 'action', 'info', 'dispatch'] },

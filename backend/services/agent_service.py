@@ -1332,6 +1332,9 @@ class AgentLoop:
         from services.skill_budget import resolve_skill_budget, get_execution_hints
 
         self.story = ExecutionStoryBuilder()
+        self._live_thinking_buf = ""
+        self._live_thinking_turn = None
+        self._live_thinking_patch_at = 0.0
         self.skill_budget = resolve_skill_budget(active_skill_pack) if active_skill_name else resolve_skill_budget(None)
         self.execution_hints = get_execution_hints(active_skill_pack) if active_skill_name else None
         self._run_metrics: Dict[str, Any] = {
@@ -1975,6 +1978,31 @@ class AgentLoop:
         except Exception:
             pass
         publish_thinking_delta(sid, text=text, field=field, turn=turn)
+        # Persist streamed live thinking into execution_story (first understand step)
+        chunk = (text or "")
+        if not chunk:
+            return
+        try:
+            if (
+                turn is not None
+                and self._live_thinking_turn is not None
+                and turn != self._live_thinking_turn
+                and self._live_thinking_buf
+            ):
+                self._live_thinking_buf += "\n\n"
+            if turn is not None:
+                self._live_thinking_turn = turn
+            self._live_thinking_buf = (self._live_thinking_buf or "") + chunk
+            if hasattr(self.story, "set_live_thinking"):
+                self.story.set_live_thinking(self._live_thinking_buf)
+                # Throttle story_patch; buffer is always up to date for finalize.
+                import time as _time
+                now = _time.monotonic()
+                if now - (self._live_thinking_patch_at or 0) >= 0.35:
+                    self._live_thinking_patch_at = now
+                    self._publish_story_patch()
+        except Exception:
+            pass
 
     def _publish_story_patch(self) -> None:
         from services.session_events import publish_story_patch
