@@ -73,6 +73,7 @@ def _migrate_db():
         ("workflow_definition", "TEXT DEFAULT '{}'"),
         ("memory_enabled", "BOOLEAN DEFAULT 0"),
         ("query_rewrite_enabled", "BOOLEAN DEFAULT 0"),
+        ("aux_model_service_id", "VARCHAR"),
     ]
 
     for col_name, col_def in new_columns:

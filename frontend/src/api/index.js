@@ -244,6 +244,14 @@ export const sessionApi = {
   }),
   listAttachments: (id) => api.get(`/sessions/${id}/attachments`),
   deleteAttachment: (id, attachmentId) => api.delete(`/sessions/${id}/attachments/${attachmentId}`),
+  reparseAttachment: (id, attachmentId) => api.post(
+    `/sessions/${id}/attachments/${attachmentId}/reparse`,
+    {},
+    { timeout: 120000 },
+  ),
+  attachmentDownloadPath: (id, attachmentId) => (
+    `/api/v1/sessions/${id}/attachments/${attachmentId}/download`
+  ),
   listRunning: (params) => api.get('/sessions', { params: { ...params, status: 'RUNNING' } }),
   abort: (id) => api.post(`/sessions/${id}/abort`, {}, { timeout: 15000 }),
   llmCalls: (id) => api.get(`/sessions/${id}/llm-calls`),

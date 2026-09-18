@@ -141,6 +141,8 @@ class Agent(Base):
     name = Column(String(128), unique=True, nullable=False, index=True)
     description = Column(Text, default="")
     model_service_id = Column(String, ForeignKey("model_services.model_service_id"), nullable=False)
+    # Optional multimodal / fallback model when primary lacks required modalities
+    aux_model_service_id = Column(String, ForeignKey("model_services.model_service_id"), nullable=True)
     system_prompt = Column(Text, default="")
     dept_id = Column(String(128), default="")
     autonomy_level = Column(String(8), default="L2")

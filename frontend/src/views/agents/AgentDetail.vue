@@ -30,7 +30,26 @@
               <a-descriptions-item label="并发上限">{{ agent.max_concurrent_sessions }}</a-descriptions-item>
               <a-descriptions-item label="Token 预算">{{ agent.token_budget }}</a-descriptions-item>
               <a-descriptions-item label="供应商">{{ agent.provider_name || '-' }}</a-descriptions-item>
-              <a-descriptions-item label="模型">{{ agent.model_name }}</a-descriptions-item>
+              <a-descriptions-item label="模型">
+                <div class="model-with-modalities">
+                  <span>{{ agent.model_name || '-' }}</span>
+                  <ModelModalityIcons
+                    :capabilities="agent.model_capabilities || []"
+                    :model-name="agent.model_name || ''"
+                  />
+                </div>
+              </a-descriptions-item>
+              <a-descriptions-item label="附加供应商">{{ agent.aux_provider_name || '-' }}</a-descriptions-item>
+              <a-descriptions-item label="附加模型">
+                <div class="model-with-modalities">
+                  <span>{{ agent.aux_model_name || '-' }}</span>
+                  <ModelModalityIcons
+                    v-if="agent.aux_model_service_id"
+                    :capabilities="agent.aux_model_capabilities || []"
+                    :model-name="agent.aux_model_name || ''"
+                  />
+                </div>
+              </a-descriptions-item>
             </a-descriptions>
           </a-card>
         </a-col>
@@ -156,6 +175,7 @@ import { useRoute } from 'vue-router'
 import { agentApi, scheduleApi } from '../../api'
 import { message } from 'ant-design-vue'
 import { formatDateTime } from '../../utils/datetime'
+import ModelModalityIcons from '../../components/ModelModalityIcons.vue'
 
 const route = useRoute()
 const agentId = route.params.id
@@ -263,6 +283,15 @@ onMounted(fetchAgent)
 <style scoped>
 .page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
 .page-title { font-family: 'Noto Serif SC', serif; font-size: 22px; font-weight: 700; color: #1a1714; margin: 0; }
+.model-with-modalities {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+.model-with-modalities :deep(.modality-icons) {
+  margin-top: 2px;
+}
 .prompt-pre { white-space: pre-wrap; font-size: 12px; color: #3a342e; background: #f3f0e8; padding: 12px; border-radius: 6px; max-height: 200px; overflow-y: auto; }
 .binding-list { display: flex; flex-direction: column; gap: 10px; }
 .binding-row {

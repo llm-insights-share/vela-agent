@@ -48,10 +48,51 @@ class MaxIterationsExceededError(AgentLoopError):
 
 class HITLPendingError(AgentLoopError):
     """SGL-CFG-06 / MA-IMP-09: 工具调用或交付物需人工审批，循环挂起"""
+
     def __init__(self, approval_id: str, tool_name: str, message: str = ""):
         self.approval_id = approval_id
         self.tool_name = tool_name
         super().__init__(message or f"工具 [{tool_name}] 等待人工审批 (approval_id={approval_id})")
+
+
+def resolve_effective_model(
+    primary_provider: ModelProvider,
+    primary_model_svc: ModelService,
+    aux_provider: Optional[ModelProvider] = None,
+    aux_model_svc: Optional[ModelService] = None,
+    required_modalities: Optional[List[str]] = None,
+):
+    """Pick primary or aux model for this turn based on required input modalities.
+
+    Returns (provider, model_svc, reason) where reason is one of:
+      - "primary": primary supports all required modalities (or none beyond text)
+      - "aux": switched to auxiliary model for missing modalities
+      - "primary_ocr_fallback": primary lacks vision and aux unavailable/unsupported
+    """
+    from services.attachment_service import model_supports_vision
+
+    required = {str(m).lower() for m in (required_modalities or []) if m}
+    needs_vision = bool(required & {"vision", "image", "multimodal"})
+    if not needs_vision:
+        return primary_provider, primary_model_svc, "primary"
+
+    if model_supports_vision(
+        getattr(primary_model_svc, "capabilities", None),
+        model_name=getattr(primary_model_svc, "model_name", None),
+    ):
+        return primary_provider, primary_model_svc, "primary"
+
+    if (
+        aux_model_svc is not None
+        and aux_provider is not None
+        and model_supports_vision(
+            getattr(aux_model_svc, "capabilities", None),
+            model_name=getattr(aux_model_svc, "model_name", None),
+        )
+    ):
+        return aux_provider, aux_model_svc, "aux"
+
+    return primary_provider, primary_model_svc, "primary_ocr_fallback"
 
 
 class AgentService:
@@ -141,6 +182,7 @@ class AgentService:
             name=data.name,
             description=data.description,
             model_service_id=data.model_service_id,
+            aux_model_service_id=(getattr(data, "aux_model_service_id", None) or None),
             system_prompt=data.system_prompt,
             dept_id=data.dept_id,
             autonomy_level=data.autonomy_level,
@@ -168,6 +210,7 @@ class AgentService:
             "name": data.name,
             "description": data.description,
             "model_service_id": data.model_service_id,
+            "aux_model_service_id": getattr(data, "aux_model_service_id", None) or None,
             "system_prompt": data.system_prompt,
             "dept_id": data.dept_id,
             "autonomy_level": data.autonomy_level,
@@ -292,7 +335,8 @@ class AgentService:
         last_ver = last_version.version if last_version else "0.0.0"
 
         parts = last_ver.replace("-draft", "").split(".")
-        if data.model_service_id or data.autonomy_level:
+        aux_model_changed = "aux_model_service_id" in getattr(data, "model_fields_set", set())
+        if data.model_service_id or aux_model_changed or data.autonomy_level:
             change_type = ChangeType.MAJOR
             new_ver = f"{int(parts[0]) + 1}.0.0"
         elif data.system_prompt or data.skill_pack_ids or data.knowledge_base_ids:
@@ -309,6 +353,7 @@ class AgentService:
             "name": agent.name,
             "description": agent.description,
             "model_service_id": agent.model_service_id,
+            "aux_model_service_id": getattr(agent, "aux_model_service_id", None) or None,
             "system_prompt": agent.system_prompt,
             "dept_id": agent.dept_id,
             "autonomy_level": agent.autonomy_level,
@@ -455,7 +500,8 @@ class AgentService:
 
         if status == "completed" and not pending_approval_id:
             messages.append({"role": "assistant", "content": result.get("result", "")})
-            session.pending_context = {}
+            from services.attachment_service import set_pending_context
+            set_pending_context(session, {})
             session.status = SessionStatus.ACTIVE
         elif pending_approval_id:
             session.status = SessionStatus.HITL_WAIT
@@ -702,6 +748,7 @@ class AgentService:
         skip_history: bool = False,
         persist_user_message: bool = True,
         attachment_ids: Optional[List[str]] = None,
+        attachment_scope: str = "session",
     ) -> Dict[str, Any]:
         agent = db.query(Agent).filter(Agent.agent_id == agent_id).first()
         if not agent:
@@ -741,6 +788,18 @@ class AgentService:
                     provider = db.query(ModelProvider).filter(
                         ModelProvider.provider_id == model_svc.provider_id
                     ).first()
+
+        aux_model_svc = None
+        aux_provider = None
+        aux_id = (getattr(agent, "aux_model_service_id", None) or "").strip() or None
+        if aux_id:
+            aux_model_svc = db.query(ModelService).filter(
+                ModelService.model_service_id == aux_id
+            ).first()
+            if aux_model_svc:
+                aux_provider = db.query(ModelProvider).filter(
+                    ModelProvider.provider_id == aux_model_svc.provider_id
+                ).first()
 
         from services.session_abort import clear_abort
 
@@ -849,6 +908,11 @@ class AgentService:
 
             # WF: 工作流型 Agent
             if agent.agent_type == AgentType.WORKFLOW:
+                if attachment_ids:
+                    message = (
+                        (message or "").rstrip()
+                        + "\n\n[系统提示] 工作流模式暂不支持附件解析，附件内容未注入工作流。"
+                    )
                 from services.workflow_engine import WorkflowEngine
                 engine = WorkflowEngine(
                     db=db, agent=agent, session=session,
@@ -868,6 +932,18 @@ class AgentService:
             message = original_message
             attachment_metadata: List[Dict[str, str]] = []
             rewrite_meta = None
+
+            from services.attachment_service import attachment_service, model_supports_vision
+
+            all_attachment_ids, new_attachment_ids = attachment_service.resolve_turn_attachment_ids(
+                session, attachment_ids, scope=attachment_scope or "session",
+            )
+            if not original_message and all_attachment_ids and not attachment_ids:
+                original_message = "请分析附件"
+                message = original_message
+            if not original_message and not all_attachment_ids:
+                raise ValueError("消息和附件不能同时为空")
+
             if getattr(agent, "query_rewrite_enabled", False):
                 try:
                     from services.query_rewrite import QueryRewriteEngine
@@ -918,17 +994,80 @@ class AgentService:
                         "fallback_reason": f"engine_error:{e}",
                     }
 
-            if attachment_ids:
-                from services.attachment_service import attachment_service
+            if all_attachment_ids:
+                required_modalities = ["text"]
+                new_images = attachment_service.list_image_attachments(session, new_attachment_ids)
+                pending_visual = attachment_service.ids_needing_vision_ocr(
+                    session,
+                    all_attachment_ids,
+                    message=message if isinstance(message, str) else original_message,
+                    history=session.messages or [],
+                )
+                if new_images or pending_visual:
+                    required_modalities.append("vision")
+
+                provider, model_svc, model_route = resolve_effective_model(
+                    primary_provider=provider,
+                    primary_model_svc=model_svc,
+                    aux_provider=aux_provider,
+                    aux_model_svc=aux_model_svc,
+                    required_modalities=required_modalities,
+                )
+
+                vision_capable = model_supports_vision(
+                    model_svc.capabilities or [],
+                    model_name=getattr(model_svc, "model_name", None),
+                )
+                msg_for_ocr = message if isinstance(message, str) else original_message
+
+                # Transcribe pending units for text retrieval. When primary already
+                # has vision and will receive images this turn, still persist OCR
+                # so later text-only turns work — but do it after build when aux
+                # handles vision (parallel-safe: await before/after).
+                need_persist_ocr = bool(pending_visual)
+                if need_persist_ocr and model_route != "aux":
+                    # Skip redundant OCR only for pure layout page-lookups when
+                    # vision model will see the page image; still OCR for semantic/full.
+                    from services.attachment_retrieve import resolve_intent
+                    intent = resolve_intent(msg_for_ocr)
+                    skip_pre_ocr = (
+                        vision_capable
+                        and intent.kind == "page"
+                        and bool(new_images)
+                    )
+                    if not skip_pre_ocr:
+                        await attachment_service.transcribe_units(
+                            db,
+                            session,
+                            pending_visual,
+                            message=msg_for_ocr,
+                            history=session.messages or [],
+                        )
 
                 text_suffix, image_blocks, attachment_metadata = attachment_service.build_context(
                     session=session,
                     message=message,
-                    attachment_ids=attachment_ids,
+                    attachment_ids=all_attachment_ids,
                     history=session.messages or [],
                     model_capabilities=model_svc.capabilities or [],
+                    model_name=getattr(model_svc, "model_name", None),
+                    new_attachment_ids=new_attachment_ids,
                 )
                 message = attachment_service.build_user_content(message, text_suffix, image_blocks)
+
+                # Aux vision path: images go to aux model; still cache transcripts
+                # for subsequent text-only turns.
+                if need_persist_ocr and model_route == "aux":
+                    try:
+                        await attachment_service.transcribe_units(
+                            db,
+                            session,
+                            pending_visual,
+                            message=msg_for_ocr,
+                            history=session.messages or [],
+                        )
+                    except Exception as e:
+                        print(f"[AgentService] aux 路径附件转写落盘失败: {e}")
 
             knowledge_context = ""
             kb_bindings = db.query(AgentKnowledgeBinding).filter(
@@ -3183,13 +3322,14 @@ class AgentLoop:
         self.db.add(approval)
         # 挂起 session，记录上下文便于审批后恢复
         self.session.status = SessionStatus.HITL_WAIT
-        self.session.pending_context = {
+        from services.attachment_service import set_pending_context
+        set_pending_context(self.session, {
             "kind": pending_kind,
             "tool_name": tool_name,
             "tool_args": tool_args,
             "approval_id": approval.approval_id,
             "user_message": self.original_user_message,
-        }
+        })
         self.session.last_active_at = now_utc()
         self.db.commit()
         self.db.refresh(approval)
@@ -3913,7 +4053,9 @@ class AgentLoop:
             step_choices = step_completion.get("choices", [])
             if step_choices:
                 step_msg = step_choices[0].get("message", {})
-                step_content = step_msg.get("content", "")
+                # Models often return content=null when emitting tool_calls only;
+                # dict.get default does not apply when the key is present with null.
+                step_content = step_msg.get("content") or ""
 
                 tool_calls = self._parse_tool_calls(step_msg)
                 if tool_calls:

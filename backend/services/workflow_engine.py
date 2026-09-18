@@ -438,11 +438,12 @@ class WorkflowEngine:
         state.current_node_id = node_id
 
         self.session.status = SessionStatus.HITL_WAIT
-        self.session.pending_context = {
+        from services.attachment_service import set_pending_context
+        set_pending_context(self.session, {
             "kind": "workflow",
             "workflow_state": state.to_dict(),
             "approval_id": approval.approval_id,
-        }
+        })
         self.db.commit()
 
         record = NodeExecutionRecord(
@@ -543,13 +544,14 @@ class WorkflowEngine:
             approval_id = result.get("approval_id", "")
 
             self.session.status = SessionStatus.HITL_WAIT
-            self.session.pending_context = {
+            from services.attachment_service import set_pending_context
+            set_pending_context(self.session, {
                 "kind": "workflow",
                 "workflow_state": state.to_dict(),
                 "approval_id": approval_id,
                 "screenpilot_node_id": node_id,
                 "next_node_id": next_node_id,
-            }
+            })
             state.status = "hitl_wait"
             state.next_node_id = next_node_id
             state.current_node_id = node_id

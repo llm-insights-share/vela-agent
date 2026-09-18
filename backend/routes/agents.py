@@ -57,6 +57,17 @@ def create_agent(data: AgentCreate, db: Session = Depends(get_db)):
     if not model_svc:
         raise HTTPException(status_code=400, detail="模型服务不存在")
 
+    aux_id = (getattr(data, "aux_model_service_id", None) or "").strip() or None
+    if aux_id:
+        data.aux_model_service_id = aux_id
+        aux_svc = db.query(ModelService).filter(
+            ModelService.model_service_id == aux_id
+        ).first()
+        if not aux_svc:
+            raise HTTPException(status_code=400, detail="附加模型服务不存在")
+    else:
+        data.aux_model_service_id = None
+
     agent = agent_service.create_agent(db, data)
     return _agent_to_dict(agent, db)
 
@@ -78,6 +89,22 @@ def update_agent(agent_id: str, data: AgentUpdate, db: Session = Depends(get_db)
     if is_protected_agent_name(existing.name):
         if data.name is not None and data.name != existing.name:
             raise HTTPException(status_code=403, detail=f"内置智能体 {OPS_AGENT_NAME} 不可重命名")
+    if "aux_model_service_id" in data.model_fields_set:
+        aux_raw = data.aux_model_service_id
+        aux_id = (aux_raw or "").strip() or None
+        data.aux_model_service_id = aux_id
+        if aux_id:
+            aux_svc = db.query(ModelService).filter(
+                ModelService.model_service_id == aux_id
+            ).first()
+            if not aux_svc:
+                raise HTTPException(status_code=400, detail="附加模型服务不存在")
+    if data.model_service_id:
+        model_svc = db.query(ModelService).filter(
+            ModelService.model_service_id == data.model_service_id
+        ).first()
+        if not model_svc:
+            raise HTTPException(status_code=400, detail="模型服务不存在")
     agent = agent_service.update_agent(db, agent_id, data)
     if not agent:
         raise HTTPException(status_code=404, detail="Agent 不存在")
@@ -329,6 +356,7 @@ def _agent_to_dict(agent: Agent, db: Session) -> dict:
         ModelService.model_service_id == agent.model_service_id
     ).first()
     model_name = model_svc.display_name if model_svc else ""
+    model_capabilities = list(model_svc.capabilities or []) if model_svc else []
     provider_id = ""
     provider_name = ""
     provider_code = ""
@@ -340,6 +368,28 @@ def _agent_to_dict(agent: Agent, db: Session) -> dict:
             provider_id = provider.provider_id or ""
             provider_name = provider.display_name or ""
             provider_code = provider.provider_code or ""
+
+    aux_model_service_id = getattr(agent, "aux_model_service_id", None) or None
+    aux_model_name = ""
+    aux_model_capabilities: list = []
+    aux_provider_id = ""
+    aux_provider_name = ""
+    aux_provider_code = ""
+    if aux_model_service_id:
+        aux_svc = db.query(ModelService).filter(
+            ModelService.model_service_id == aux_model_service_id
+        ).first()
+        if aux_svc:
+            aux_model_name = aux_svc.display_name or ""
+            aux_model_capabilities = list(aux_svc.capabilities or [])
+            if aux_svc.provider_id:
+                aux_provider = db.query(ModelProvider).filter(
+                    ModelProvider.provider_id == aux_svc.provider_id
+                ).first()
+                if aux_provider:
+                    aux_provider_id = aux_provider.provider_id or ""
+                    aux_provider_name = aux_provider.display_name or ""
+                    aux_provider_code = aux_provider.provider_code or ""
 
     current_version = None
     if agent.current_version_id:
@@ -392,9 +442,16 @@ def _agent_to_dict(agent: Agent, db: Session) -> dict:
         "description": agent.description or "",
         "model_service_id": agent.model_service_id or "",
         "model_name": model_name,
+        "model_capabilities": model_capabilities,
         "provider_id": provider_id,
         "provider_name": provider_name,
         "provider_code": provider_code,
+        "aux_model_service_id": aux_model_service_id,
+        "aux_model_name": aux_model_name or None,
+        "aux_model_capabilities": aux_model_capabilities,
+        "aux_provider_id": aux_provider_id,
+        "aux_provider_name": aux_provider_name,
+        "aux_provider_code": aux_provider_code,
         "system_prompt": agent.system_prompt or "",
         "dept_id": agent.dept_id or "",
         "autonomy_level": agent.autonomy_level or "L2",

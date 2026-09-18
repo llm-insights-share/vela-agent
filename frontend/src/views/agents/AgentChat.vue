@@ -393,7 +393,13 @@
         </div>
 
         <div v-if="msg.attachments && msg.attachments.length" class="chat-attachments">
-          <a-tag v-for="att in msg.attachments" :key="att.id" color="blue">
+          <a-tag
+            v-for="att in msg.attachments"
+            :key="att.id"
+            color="blue"
+            class="att-chip-clickable"
+            @click="previewUserAttachment(att)"
+          >
             <PaperClipOutlined /> {{ att.filename }}
           </a-tag>
         </div>
@@ -461,25 +467,94 @@
       </div>
     </div>
 
-    <div class="chat-input-area">
+    <div
+      class="chat-input-area"
+      :class="{ 'drag-over': dragOver }"
+      @dragenter.prevent="onDragEnter"
+      @dragover.prevent="onDragOver"
+      @dragleave.prevent="onDragLeave"
+      @drop.prevent="onDropFiles"
+    >
       <div class="skill-bar" v-if="activeSkill">
         <a-tag color="orange" closable @close="clearSkill">
           <ThunderboltOutlined /> {{ activeSkill }}
         </a-tag>
       </div>
-      <div class="attachment-bar" v-if="pendingAttachments.length">
-        <a-tag
-          v-for="att in pendingAttachments"
-          :key="att.attachment_id || att.tempId"
-          :closable="!att.uploading"
-          color="blue"
-          @close="removeAttachment(att)"
-        >
-          <LoadingOutlined v-if="att.uploading" style="margin-right: 4px;" />
-          <PaperClipOutlined v-else style="margin-right: 4px;" />
-          {{ att.filename }}
-        </a-tag>
+
+      <div class="attachment-composer" v-if="composerAttachments.length || sessionLibraryAttachments.length">
+        <div class="attachment-bar" v-if="composerAttachments.length">
+          <div
+            v-for="att in composerAttachments"
+            :key="att.attachment_id || att.tempId"
+            class="att-chip"
+            :class="{
+              'att-chip--uploading': att.uploading,
+              'att-chip--error': !!att.error,
+              'att-chip--image': att.is_image && att.thumbUrl,
+            }"
+          >
+            <img v-if="att.thumbUrl" :src="att.thumbUrl" class="att-thumb" alt="" />
+            <LoadingOutlined v-else-if="att.uploading" class="att-chip-icon" />
+            <PaperClipOutlined v-else class="att-chip-icon" />
+            <div class="att-chip-body" @click="!att.uploading && !att.error && previewUserAttachment(att)">
+              <div class="att-chip-name">{{ att.filename }}</div>
+              <div class="att-chip-meta" v-if="att.error">{{ att.error }}</div>
+              <div class="att-chip-meta" v-else-if="formatAttMeta(att)">{{ formatAttMeta(att) }}</div>
+            </div>
+            <a-button
+              v-if="att.error && att._file"
+              type="link"
+              size="small"
+              class="att-chip-action"
+              @click="retryUpload(att)"
+            >重试</a-button>
+            <a-button
+              v-else-if="att.attachment_id && (att.units_ready || 0) < (att.units_total || 0)"
+              type="link"
+              size="small"
+              class="att-chip-action"
+              :loading="att.reparsing"
+              @click="reparseAttachment(att)"
+            >解析</a-button>
+            <CloseOutlined
+              v-if="!att.uploading"
+              class="att-chip-close"
+              @click="removeAttachment(att)"
+            />
+          </div>
+        </div>
+
+        <div class="session-files" v-if="sessionLibraryAttachments.length">
+          <button type="button" class="session-files-toggle" @click="sessionFilesExpanded = !sessionFilesExpanded">
+            会话文件 ({{ sessionLibraryAttachments.length }})
+            <span class="session-files-caret">{{ sessionFilesExpanded ? '▾' : '▸' }}</span>
+          </button>
+          <div v-if="sessionFilesExpanded" class="attachment-bar session-files-list">
+            <div
+              v-for="att in sessionLibraryAttachments"
+              :key="att.attachment_id"
+              class="att-chip att-chip--session"
+            >
+              <PaperClipOutlined class="att-chip-icon" />
+              <div class="att-chip-body" @click="previewUserAttachment(att)">
+                <div class="att-chip-name">{{ att.filename }}</div>
+                <div class="att-chip-meta" v-if="formatAttMeta(att)">{{ formatAttMeta(att) }}</div>
+              </div>
+              <a-button
+                v-if="(att.units_ready || 0) < (att.units_total || 0)"
+                type="link"
+                size="small"
+                class="att-chip-action"
+                :loading="att.reparsing"
+                @click="reparseAttachment(att)"
+              >解析</a-button>
+              <CloseOutlined class="att-chip-close" @click="removeAttachment(att)" />
+            </div>
+          </div>
+        </div>
       </div>
+
+      <div class="attach-hint">单文件 10MB · 单次最多 5 · 会话最多 20 · 支持拖拽/粘贴图片</div>
       <div class="chat-input-row">
         <div class="chat-input-wrapper" ref="inputWrapper">
           <a-button
@@ -501,10 +576,11 @@
           <a-textarea
             ref="inputRef"
             v-model:value="inputText"
-            placeholder="输入消息... 输入 / 选择 Skill"
+            placeholder="输入消息... 输入 / 选择 Skill；可拖拽或粘贴附件"
             :auto-size="{ minRows: 1, maxRows: 4 }"
             @pressEnter="onEnter"
             @input="onInput"
+            @paste="onPaste"
             :disabled="isSending"
           />
           <a-button
@@ -522,7 +598,7 @@
             v-else
             type="primary"
             :loading="isSending"
-            :disabled="(!inputText.trim() && !readyAttachments.length) || isSending || hasUploadingAttachments"
+            :disabled="(!inputText.trim() && !readyNewAttachments.length) || isSending || hasUploadingAttachments"
             @click="sendMessage"
             class="send-btn"
           >
@@ -532,6 +608,13 @@
         <div class="chat-timeout-setting">
           <a-checkbox v-model:checked="skipHistory" :disabled="isSending" style="white-space: nowrap; font-size: 12px;">
             不引用历史
+          </a-checkbox>
+          <a-checkbox
+            v-model:checked="attachmentScopeMessageOnly"
+            :disabled="isSending"
+            style="white-space: nowrap; font-size: 12px;"
+          >
+            仅本消息附件
           </a-checkbox>
           <span class="timeout-label">超时</span>
           <a-input-number
@@ -866,7 +949,7 @@ import {
   FileOutlined, CloseOutlined, LoadingOutlined, StopOutlined, PaperClipOutlined,
   CopyOutlined, EditOutlined, RedoOutlined, DeleteOutlined, CheckOutlined,
 } from '@ant-design/icons-vue'
-import { agentApi, sessionApi, hitlApi, skillApi, inboxApi, monitorApi } from '../../api'
+import { agentApi, sessionApi, hitlApi, skillApi, inboxApi, monitorApi, getToken } from '../../api'
 import { useAuthStore } from '../../stores/auth'
 import { message } from 'ant-design-vue'
 import { marked } from 'marked'
@@ -936,16 +1019,54 @@ const inputWrapper = ref(null)
 const skillMenuRef = ref(null)
 const fileInput = ref(null)
 
-const ACCEPT_TYPES = '.pdf,.docx,.doc,.txt,.md,.markdown,.xlsx,.xls,.png,.jpg,.jpeg,.webp,.gif'
-const pendingAttachments = ref([])
+const ACCEPT_TYPES = '.pdf,.docx,.txt,.md,.markdown,.xlsx,.xls,.csv,.html,.htm,.png,.jpg,.jpeg,.webp,.gif'
+const MAX_FILE_SIZE_MB = 10
+const MAX_SESSION_ATTACHMENTS = 20
+const MAX_MESSAGE_ATTACHMENTS = 5
+/** Persisted session attachments (survive across turns / reload). */
+const sessionAttachments = ref([])
+/** In-progress uploads only (temp chips). */
+const pendingUploads = ref([])
+/** Attachment ids uploaded since last send — sent as this-turn new_ids. */
+const newThisTurnIds = ref([])
 const uploadingAttachment = ref(false)
+const sessionFilesExpanded = ref(false)
+const attachmentScopeMessageOnly = ref(false)
+const dragOver = ref(false)
+let dragDepth = 0
+let previewObjectUrl = null
 
-const readyAttachments = computed(() =>
-  pendingAttachments.value.filter(a => a.attachment_id && !a.uploading)
+const composerAttachments = computed(() => {
+  const ids = new Set(newThisTurnIds.value)
+  const fromSession = sessionAttachments.value.filter(a => a.attachment_id && ids.has(a.attachment_id))
+  return [...pendingUploads.value, ...fromSession]
+})
+
+const sessionLibraryAttachments = computed(() => {
+  const ids = new Set(newThisTurnIds.value)
+  return sessionAttachments.value.filter(a => a.attachment_id && !ids.has(a.attachment_id))
+})
+
+const readyNewAttachments = computed(() =>
+  sessionAttachments.value.filter(
+    a => a.attachment_id && newThisTurnIds.value.includes(a.attachment_id) && !a.error
+  )
 )
 const hasUploadingAttachments = computed(() =>
-  pendingAttachments.value.some(a => a.uploading)
+  pendingUploads.value.some(a => a.uploading)
 )
+
+function formatAttMeta(att) {
+  const parts = []
+  if (att.size_bytes) {
+    const kb = att.size_bytes / 1024
+    parts.push(kb >= 1024 ? `${(kb / 1024).toFixed(1)}MB` : `${Math.max(1, Math.round(kb))}KB`)
+  }
+  if (att.units_total > 0) {
+    parts.push(`已解析 ${att.units_ready || 0}/${att.units_total}`)
+  }
+  return parts.join(' · ')
+}
 
 const skills = ref([])
 const activeSkill = ref(null)
@@ -2082,8 +2203,35 @@ async function loadSessionById(id) {
   hoveredUserMsgKey.value = null
   editingUserMsgKey.value = null
   editDraft.value = ''
+  pendingUploads.value = []
+  newThisTurnIds.value = []
+  await refreshSessionAttachments(id)
   await nextTick()
   scrollToBottom({ force: true })
+}
+
+async function refreshSessionAttachments(id) {
+  const sid = id || sessionId.value
+  if (!sid) {
+    sessionAttachments.value = []
+    return
+  }
+  try {
+    const res = await sessionApi.listAttachments(sid)
+    sessionAttachments.value = (res.attachments || []).map(a => ({
+      attachment_id: a.attachment_id,
+      filename: a.filename,
+      is_image: a.is_image,
+      mime_type: a.mime_type,
+      size_bytes: a.size_bytes,
+      units_ready: a.units_ready || 0,
+      units_total: a.units_total || 0,
+      uploading: false,
+      reparsing: false,
+    }))
+  } catch (e) {
+    console.error('加载会话附件失败:', e)
+  }
 }
 
 function enrichMessagesWithSessionLlmCalls(session) {
@@ -2264,7 +2412,8 @@ async function switchSession(s) {
   activeSkill.value = null
   activeSkillId.value = null
   skipHistory.value = false
-  pendingAttachments.value = []
+  pendingUploads.value = []
+  newThisTurnIds.value = []
   try {
     await loadSessionById(s.session_id)
     startSessionPollIfNeeded()
@@ -2317,7 +2466,9 @@ async function createNewSession() {
     activeSkill.value = null
     activeSkillId.value = null
     skipHistory.value = false
-    pendingAttachments.value = []
+    pendingUploads.value = []
+    sessionAttachments.value = []
+    newThisTurnIds.value = []
     await fetchSessions()
     message.success('新会话已创建')
   } catch (e) {
@@ -2511,6 +2662,10 @@ function closePreview() {
   previewType.value = ''
   previewContent.value = ''
   csvData.value = []
+  if (previewObjectUrl) {
+    URL.revokeObjectURL(previewObjectUrl)
+    previewObjectUrl = null
+  }
 }
 
 function startResize(e) {
@@ -2550,7 +2705,7 @@ onUnmounted(() => {
 
 async function sendMessage() {
   const text = inputText.value.trim()
-  const attachmentIds = readyAttachments.value.map(a => a.attachment_id)
+  const attachmentIds = [...newThisTurnIds.value]
   if ((!text && !attachmentIds.length) || isSending.value) return
   if (hasUploadingAttachments.value) {
     message.warning('附件上传中，请稍候')
@@ -2560,13 +2715,14 @@ async function sendMessage() {
   const skillPackId = activeSkillId.value
   const skillName = activeSkill.value
   const displayText = text || '请分析附件'
-  const attachmentMeta = readyAttachments.value.map(a => ({
+  const attachmentMeta = readyNewAttachments.value.map(a => ({
     id: a.attachment_id,
     filename: a.filename,
   }))
 
   inputText.value = ''
-  pendingAttachments.value = []
+  pendingUploads.value = []
+  newThisTurnIds.value = []
   showSkillMenu.value = false
   activeSkill.value = null
   activeSkillId.value = null
@@ -2590,6 +2746,7 @@ async function sendMessage() {
     const payload = {
       message: text,
       attachment_ids: attachmentIds,
+      attachment_scope: attachmentScopeMessageOnly.value ? 'message' : 'session',
       timeout_seconds: timeoutSeconds.value,
       execution_mode: executionMode.value,
       skip_history: skipHistory.value,
@@ -2612,20 +2769,66 @@ async function sendMessage() {
   }
 }
 
-async function triggerUpload() {
-  try {
-    await ensureSession()
-  } catch (e) {
-    message.error(e.message || '创建会话失败')
+function triggerUpload() {
+  // Must open the file picker synchronously inside the user gesture.
+  if (!fileInput.value) {
+    message.error('文件选择组件未就绪')
     return
   }
-  fileInput.value?.click()
+  fileInput.value.click()
+}
+
+function onDragEnter() {
+  dragDepth += 1
+  dragOver.value = true
+}
+function onDragOver() {
+  dragOver.value = true
+}
+function onDragLeave() {
+  dragDepth = Math.max(0, dragDepth - 1)
+  if (dragDepth === 0) dragOver.value = false
+}
+async function onDropFiles(event) {
+  dragDepth = 0
+  dragOver.value = false
+  const files = Array.from(event.dataTransfer?.files || [])
+  if (files.length) await uploadFiles(files)
+}
+
+async function onPaste(event) {
+  const items = Array.from(event.clipboardData?.items || [])
+  const files = []
+  for (const item of items) {
+    if (item.kind === 'file') {
+      const f = item.getAsFile()
+      if (f) files.push(f)
+    }
+  }
+  if (!files.length) return
+  event.preventDefault()
+  await uploadFiles(files)
 }
 
 async function onFilesSelected(event) {
   const files = Array.from(event.target.files || [])
   event.target.value = ''
   if (!files.length) return
+  await uploadFiles(files)
+}
+
+function isAcceptedFile(file) {
+  const name = (file.name || '').toLowerCase()
+  const dot = name.lastIndexOf('.')
+  const ext = dot >= 0 ? name.slice(dot) : ''
+  const accepted = ACCEPT_TYPES.split(',').map(s => s.trim().toLowerCase())
+  if (ext && accepted.includes(ext)) return true
+  // pasted images may lack extension
+  if ((file.type || '').startsWith('image/')) return true
+  return false
+}
+
+async function uploadFiles(files) {
   try {
     await ensureSession()
   } catch (e) {
@@ -2637,48 +2840,167 @@ async function onFilesSelected(event) {
   uploadingAttachment.value = true
   try {
     for (const file of files) {
-      if (readyAttachments.value.length >= 5) {
-        message.warning('单条消息最多 5 个附件')
+      if (sessionAttachments.value.length + pendingUploads.value.filter(a => a.uploading).length >= MAX_SESSION_ATTACHMENTS) {
+        message.warning(`会话附件数量已达上限 (${MAX_SESSION_ATTACHMENTS})`)
         break
+      }
+      if (newThisTurnIds.value.length >= MAX_MESSAGE_ATTACHMENTS) {
+        message.warning(`单条消息最多 ${MAX_MESSAGE_ATTACHMENTS} 个新附件`)
+        break
+      }
+      if (file.size > MAX_FILE_SIZE_MB * 1024 * 1024) {
+        message.warning(`${file.name} 超过 ${MAX_FILE_SIZE_MB}MB 限制`)
+        continue
+      }
+      if (!isAcceptedFile(file)) {
+        message.warning(`不支持的文件格式: ${file.name}`)
+        continue
+      }
+
+      let uploadName = file.name || 'paste.png'
+      if (!uploadName.includes('.') && (file.type || '').startsWith('image/')) {
+        const sub = (file.type.split('/')[1] || 'png').replace('jpeg', 'jpg')
+        uploadName = `paste.${sub}`
       }
 
       const tempId = `pending_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
-      pendingAttachments.value.push({
+      const thumbUrl = (file.type || '').startsWith('image/') ? URL.createObjectURL(file) : null
+      pendingUploads.value.push({
         tempId,
-        filename: file.name,
+        filename: uploadName,
         uploading: true,
+        error: null,
+        _file: file,
+        thumbUrl,
+        is_image: !!(file.type || '').startsWith('image/'),
+        size_bytes: file.size,
       })
 
-      try {
-        const formData = new FormData()
-        formData.append('file', file, file.name)
-        const res = await sessionApi.uploadAttachment(sessionId.value, formData)
-        const idx = pendingAttachments.value.findIndex(a => a.tempId === tempId)
-        if (idx >= 0) {
-          pendingAttachments.value[idx] = {
-            attachment_id: res.attachment_id,
-            filename: res.filename,
-            is_image: res.is_image,
-            uploading: false,
-          }
-        }
-      } catch (e) {
-        pendingAttachments.value = pendingAttachments.value.filter(a => a.tempId !== tempId)
-        message.error(`上传失败 ${file.name}: ${e.message}`)
-      }
+      await uploadOnePending(tempId, file, uploadName)
     }
   } finally {
     uploadingAttachment.value = false
   }
 }
 
-function removeAttachment(att) {
-  pendingAttachments.value = pendingAttachments.value.filter(a => {
-    if (att.tempId) return a.tempId !== att.tempId
-    return a.attachment_id !== att.attachment_id
+async function uploadOnePending(tempId, file, uploadName) {
+  try {
+    const formData = new FormData()
+    formData.append('file', file, uploadName)
+    const res = await sessionApi.uploadAttachment(sessionId.value, formData)
+    const pending = pendingUploads.value.find(a => a.tempId === tempId)
+    const thumbUrl = pending?.thumbUrl
+    pendingUploads.value = pendingUploads.value.filter(a => a.tempId !== tempId)
+    if (res.attachment_id) {
+      if (!newThisTurnIds.value.includes(res.attachment_id)) {
+        newThisTurnIds.value = [...newThisTurnIds.value, res.attachment_id]
+      }
+      const exists = sessionAttachments.value.some(a => a.attachment_id === res.attachment_id)
+      if (!exists) {
+        sessionAttachments.value = [
+          {
+            attachment_id: res.attachment_id,
+            filename: res.filename,
+            is_image: res.is_image,
+            mime_type: res.mime_type,
+            size_bytes: res.size_bytes,
+            units_ready: res.units_ready || 0,
+            units_total: res.units_total || 0,
+            uploading: false,
+            reparsing: false,
+            thumbUrl,
+          },
+          ...sessionAttachments.value,
+        ]
+      }
+    } else if (thumbUrl) {
+      URL.revokeObjectURL(thumbUrl)
+    }
+  } catch (e) {
+    pendingUploads.value = pendingUploads.value.map(a => {
+      if (a.tempId !== tempId) return a
+      return { ...a, uploading: false, error: e.message || '上传失败' }
+    })
+  }
+}
+
+async function retryUpload(att) {
+  if (!att?._file || !att.tempId) return
+  pendingUploads.value = pendingUploads.value.map(a => {
+    if (a.tempId !== att.tempId) return a
+    return { ...a, uploading: true, error: null }
   })
-  if (att.attachment_id && sessionId.value) {
-    sessionApi.deleteAttachment(sessionId.value, att.attachment_id).catch(() => {})
+  uploadingAttachment.value = true
+  try {
+    await uploadOnePending(att.tempId, att._file, att.filename)
+  } finally {
+    uploadingAttachment.value = false
+  }
+}
+
+async function reparseAttachment(att) {
+  if (!att?.attachment_id || !sessionId.value) return
+  const mark = (reparsing) => {
+    sessionAttachments.value = sessionAttachments.value.map(a =>
+      a.attachment_id === att.attachment_id ? { ...a, reparsing } : a
+    )
+  }
+  mark(true)
+  try {
+    const res = await sessionApi.reparseAttachment(sessionId.value, att.attachment_id)
+    sessionAttachments.value = sessionAttachments.value.map(a =>
+      a.attachment_id === att.attachment_id
+        ? {
+            ...a,
+            units_ready: res.units_ready || 0,
+            units_total: res.units_total || 0,
+            text_length: res.text_length,
+            reparsing: false,
+          }
+        : a
+    )
+    message.success(`已重新解析 ${att.filename}`)
+  } catch (e) {
+    mark(false)
+    message.error(e.message || '重新解析失败')
+  }
+}
+
+function removeAttachment(att) {
+  if (att.tempId) {
+    const pending = pendingUploads.value.find(a => a.tempId === att.tempId)
+    if (pending?.thumbUrl) URL.revokeObjectURL(pending.thumbUrl)
+    pendingUploads.value = pendingUploads.value.filter(a => a.tempId !== att.tempId)
+  }
+  const aid = att.attachment_id
+  if (aid) {
+    const existing = sessionAttachments.value.find(a => a.attachment_id === aid)
+    if (existing?.thumbUrl) URL.revokeObjectURL(existing.thumbUrl)
+    sessionAttachments.value = sessionAttachments.value.filter(a => a.attachment_id !== aid)
+    newThisTurnIds.value = newThisTurnIds.value.filter(id => id !== aid)
+    pendingUploads.value = pendingUploads.value.filter(a => a.attachment_id !== aid)
+    if (sessionId.value) {
+      sessionApi.deleteAttachment(sessionId.value, aid).catch(() => {})
+    }
+  }
+}
+
+async function previewUserAttachment(att) {
+  const aid = att.id || att.attachment_id
+  const filename = att.filename || att.name || 'attachment'
+  if (!aid || !sessionId.value) return
+  try {
+    const path = sessionApi.attachmentDownloadPath(sessionId.value, aid)
+    const resp = await fetch(path, {
+      headers: { Authorization: `Bearer ${getToken()}` },
+    })
+    if (!resp.ok) throw new Error('加载附件失败')
+    const blob = await resp.blob()
+    if (previewObjectUrl) URL.revokeObjectURL(previewObjectUrl)
+    previewObjectUrl = URL.createObjectURL(blob)
+    await previewFile({ name: filename, url: previewObjectUrl })
+  } catch (e) {
+    message.error(e.message || '预览失败')
   }
 }
 
@@ -3541,11 +3863,97 @@ function renderMarkdown(text) {
 .skill-bar {
   margin-bottom: 8px;
 }
+.attachment-composer {
+  margin-bottom: 6px;
+}
 .attachment-bar {
-  margin-bottom: 8px;
+  margin-bottom: 6px;
   display: flex;
   flex-wrap: wrap;
+  gap: 8px;
+}
+.attach-hint {
+  font-size: 11px;
+  color: #9e9590;
+  margin-bottom: 6px;
+}
+.chat-input-area.drag-over {
+  outline: 2px dashed #c2410c;
+  outline-offset: -4px;
+  background: #fffaf5;
+}
+.att-chip {
+  display: inline-flex;
+  align-items: center;
   gap: 6px;
+  max-width: 260px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  background: #f5f2eb;
+  border: 1px solid #ddd8ce;
+  font-size: 12px;
+}
+.att-chip--error {
+  border-color: #e07a5f;
+  background: #fff5f2;
+}
+.att-chip--session {
+  opacity: 0.9;
+}
+.att-thumb {
+  width: 28px;
+  height: 28px;
+  object-fit: cover;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+.att-chip-icon {
+  color: #9e9590;
+  flex-shrink: 0;
+}
+.att-chip-body {
+  min-width: 0;
+  cursor: pointer;
+  flex: 1;
+}
+.att-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #3d3833;
+}
+.att-chip-meta {
+  font-size: 10px;
+  color: #9e9590;
+  margin-top: 1px;
+}
+.att-chip-action {
+  padding: 0 4px;
+  height: auto;
+  font-size: 11px;
+}
+.att-chip-close {
+  color: #9e9590;
+  cursor: pointer;
+  font-size: 10px;
+  flex-shrink: 0;
+}
+.att-chip-close:hover {
+  color: #c2410c;
+}
+.att-chip-clickable {
+  cursor: pointer;
+}
+.session-files-toggle {
+  border: none;
+  background: transparent;
+  color: #6b635c;
+  font-size: 12px;
+  padding: 0 0 4px;
+  cursor: pointer;
+}
+.session-files-caret {
+  margin-left: 4px;
 }
 .chat-attachments {
   margin-top: 8px;

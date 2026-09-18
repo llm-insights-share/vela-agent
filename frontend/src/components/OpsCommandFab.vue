@@ -30,20 +30,21 @@ const open = ref(false)
   width: 64px;
   height: 64px;
   border-radius: 16px;
-  border: 1px solid #ddd8ce;
-  background: #1a1714;
-  color: #faf8f4;
+  border: 1px solid rgba(22, 119, 255, 0.35);
+  background: rgba(22, 119, 255, 0.5);
+  color: #fff;
   cursor: pointer;
   z-index: 900;
   display: flex;
   align-items: center;
   justify-content: center;
-  box-shadow: 0 8px 24px rgba(26, 23, 20, 0.22);
-  transition: transform 0.15s ease, background 0.15s ease;
+  box-shadow: 0 8px 24px rgba(22, 119, 255, 0.18);
+  transition: transform 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
 }
 .ops-fab:hover {
-  background: #c2410c;
+  background: rgba(22, 119, 255, 1);
   transform: translateY(-2px);
+  box-shadow: 0 8px 24px rgba(22, 119, 255, 0.35);
 }
 .ops-fab-icon {
   font-size: 28px;

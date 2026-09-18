@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 from typing import Optional
 from database import get_db
@@ -144,8 +145,9 @@ async def sync_models(provider_id: str, db: Session = Depends(get_db)):
 def list_model_services(
     provider_id: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
+    model_name: Optional[str] = Query(None, description="模型名称/显示名称模糊查询"),
     page: int = Query(1, ge=1),
-    page_size: int = Query(50, ge=1, le=100),
+    page_size: int = Query(50, ge=1, le=1000),
     db: Session = Depends(get_db),
 ):
     query = db.query(ModelService)
@@ -153,6 +155,15 @@ def list_model_services(
         query = query.filter(ModelService.provider_id == provider_id)
     if status:
         query = query.filter(ModelService.status == status)
+    keyword = (model_name or "").strip()
+    if keyword:
+        pattern = f"%{keyword}%"
+        query = query.filter(
+            or_(
+                ModelService.model_name.ilike(pattern),
+                ModelService.display_name.ilike(pattern),
+            )
+        )
     total = query.count()
     services = query.order_by(ModelService.created_at.desc()).offset(
         (page - 1) * page_size

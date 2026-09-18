@@ -15,6 +15,7 @@ from sqlalchemy.orm.attributes import flag_modified
 from database import get_db
 from models import HITLApproval, Session as AgentSession, SessionStatus, now_utc
 from schemas import HITLApprovalResponse, HITLReview
+from services.attachment_service import set_pending_context
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/sessions", tags=["hitl"])
@@ -226,7 +227,7 @@ async def approve_action(
                 m.pop("approvalFinalResult", None)
             session.messages = messages
             flag_modified(session, "messages")
-            session.pending_context = {}
+            set_pending_context(session, {})
             flag_modified(session, "pending_context")
         result_data["final_result"] = final_result
         result_data["kind"] = "delivery"
@@ -256,7 +257,8 @@ async def approve_action(
             })
             session.messages = messages
             flag_modified(session, "messages")
-            session.pending_context = {}
+            set_pending_context(session, {})
+            flag_modified(session, "pending_context")
         if session and (session.caller_type or "").upper() == "SCHEDULE":
             from services.schedule.runner import sync_schedule_run_from_session
             sync_schedule_run_from_session(db, session.session_id)
@@ -309,7 +311,8 @@ async def approve_action(
             })
             session.messages = messages
             flag_modified(session, "messages")
-            session.pending_context = {}
+            set_pending_context(session, {})
+            flag_modified(session, "pending_context")
         if session and (session.caller_type or "").upper() == "SCHEDULE":
             from services.schedule.runner import sync_schedule_run_from_session
             sync_schedule_run_from_session(db, session.session_id)
@@ -361,7 +364,8 @@ async def approve_action(
             })
             session.messages = messages
             flag_modified(session, "messages")
-            session.pending_context = {}
+            set_pending_context(session, {})
+            flag_modified(session, "pending_context")
 
         # Close duplicate PENDING tickets for the same skill step.
         if (tool_args.get("skill_id") or tool_args.get("step_id")) and session_id:
@@ -424,7 +428,8 @@ async def approve_action(
             "meta": {"approved": True, "approval_id": approval_id},
         })
         session.messages = messages
-        session.pending_context = {}
+        set_pending_context(session, {})
+        flag_modified(session, "pending_context")
 
     db.commit()
     if session and (session.caller_type or "").upper() == "SCHEDULE":
@@ -494,7 +499,7 @@ def reject_action(
         from sqlalchemy.orm.attributes import flag_modified
         session.messages = messages
         flag_modified(session, "messages")
-        session.pending_context = {}
+        set_pending_context(session, {})
         flag_modified(session, "pending_context")
 
     db.commit()

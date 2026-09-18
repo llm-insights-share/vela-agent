@@ -32,11 +32,12 @@ class ModelProviderService:
                     model_id = m.get("id", m.get("model", ""))
                     if not model_id:
                         continue
+                    from services.attachment_service import infer_model_capabilities
                     models.append({
                         "model_name": model_id,
                         "display_name": model_id,
                         "max_tokens": m.get("max_tokens", 4096),
-                        "capabilities": ["text"],
+                        "capabilities": infer_model_capabilities(model_id, ["text"]),
                     })
                 return models
             except Exception as e:

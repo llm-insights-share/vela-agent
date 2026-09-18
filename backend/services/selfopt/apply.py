@@ -9,6 +9,7 @@ from models import Agent, AgentVersion
 _SNAPSHOT_FIELDS = (
     "system_prompt",
     "model_service_id",
+    "aux_model_service_id",
     "max_iterations",
     "step_timeout_seconds",
     "timeout_seconds",
@@ -31,6 +32,11 @@ def apply_version_snapshot_in_memory(agent: Agent, version: Optional[AgentVersio
         return agent
     snap: Dict[str, Any] = version.snapshot
     for field in _SNAPSHOT_FIELDS:
-        if field in snap and snap[field] is not None:
+        if field not in snap:
+            continue
+        # aux_model_service_id may be explicitly cleared (null) in a snapshot
+        if field == "aux_model_service_id":
+            setattr(agent, field, snap[field] or None)
+        elif snap[field] is not None:
             setattr(agent, field, snap[field])
     return agent

@@ -233,12 +233,13 @@ class CoordinatorEngine:
             )
             self.db.add(approval)
             self.session.status = SessionStatus.HITL_WAIT
-            self.session.pending_context = {
+            from services.attachment_service import set_pending_context
+            set_pending_context(self.session, {
                 "kind": "delivery",
                 "approval_id": approval.approval_id,
                 "final_result": final_result,
                 "user_message": user_message,
-            }
+            })
             self.session.last_active_at = datetime.now(timezone.utc)
             self.db.commit()
             self.db.refresh(approval)

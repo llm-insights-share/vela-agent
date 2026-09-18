@@ -41,10 +41,49 @@
             option-filter-prop="label"
             :disabled="!selectedProviderId"
           >
-            <a-select-option v-for="s in filteredServices" :key="s.model_service_id" :value="s.model_service_id" :label="s.display_name">
+            <a-select-option v-for="s in filteredServices" :key="s.model_service_id" :value="s.model_service_id" :label="`${s.display_name} ${s.model_name}`">
               {{ s.display_name }} ({{ s.model_name }})
             </a-select-option>
           </a-select>
+          <ModelModalityIcons
+            v-if="selectedPrimaryService"
+            :capabilities="selectedPrimaryService.capabilities"
+            :model-name="selectedPrimaryService.model_name"
+          />
+        </a-form-item>
+        <a-form-item label="附加模型供应商">
+          <a-select
+            v-model:value="selectedAuxProviderId"
+            placeholder="可选：选择附加模型供应商"
+            allow-clear
+            show-search
+            option-filter-prop="label"
+            @change="onAuxProviderChange"
+          >
+            <a-select-option v-for="p in providers" :key="p.provider_id" :value="p.provider_id" :label="p.display_name">
+              {{ p.display_name }}
+            </a-select-option>
+          </a-select>
+          <span class="form-hint">主模型缺少多模态能力时，可选用附加模型处理图像等输入</span>
+        </a-form-item>
+        <a-form-item label="附加模型服务" name="aux_model_service_id">
+          <a-select
+            v-model:value="form.aux_model_service_id"
+            placeholder="可选：选择附加模型服务"
+            allow-clear
+            show-search
+            option-filter-prop="label"
+            :disabled="!selectedAuxProviderId"
+          >
+            <a-select-option v-for="s in filteredAuxServices" :key="s.model_service_id" :value="s.model_service_id" :label="`${s.display_name} ${s.model_name}`">
+              {{ s.display_name }} ({{ s.model_name }})
+            </a-select-option>
+          </a-select>
+          <ModelModalityIcons
+            v-if="selectedAuxService"
+            :capabilities="selectedAuxService.capabilities"
+            :model-name="selectedAuxService.model_name"
+          />
         </a-form-item>
         <a-form-item label="System Prompt" name="system_prompt">
           <a-textarea v-model:value="form.system_prompt" placeholder="System Prompt" :rows="6" />
@@ -241,12 +280,14 @@ import { reactive, ref, computed, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { agentApi, providerApi, serviceApi, skillApi, knowledgeApi, toolApi, connectorApi, mcpServerApi } from '../../api'
 import { message } from 'ant-design-vue'
+import ModelModalityIcons from '../../components/ModelModalityIcons.vue'
 
 const router = useRouter()
 const route = useRoute()
 const submitting = ref(false)
 const providers = ref([])
 const services = ref([])
+const auxServices = ref([])
 const skills = ref([])
 const knowledgeBases = ref([])
 const toolList = ref([])
@@ -255,6 +296,7 @@ const connectorOptions = ref([])
 const selectedCatalogKeys = ref([])
 const connectorPolicies = reactive({})
 const selectedProviderId = ref('')
+const selectedAuxProviderId = ref('')
 const toolLoadingEnabled = ref(false)
 const toolLoadingMode = ref('deferred')
 
@@ -437,6 +479,26 @@ const filteredServices = computed(() => {
   if (!selectedProviderId.value) return []
   return services.value.filter((s) => s.provider_id === selectedProviderId.value)
 })
+const filteredAuxServices = computed(() => {
+  if (!selectedAuxProviderId.value) return []
+  return auxServices.value.filter((s) => s.provider_id === selectedAuxProviderId.value)
+})
+const selectedPrimaryService = computed(() => {
+  if (!form.model_service_id) return null
+  return (
+    services.value.find((s) => s.model_service_id === form.model_service_id) ||
+    filteredServices.value.find((s) => s.model_service_id === form.model_service_id) ||
+    null
+  )
+})
+const selectedAuxService = computed(() => {
+  if (!form.aux_model_service_id) return null
+  return (
+    auxServices.value.find((s) => s.model_service_id === form.aux_model_service_id) ||
+    filteredAuxServices.value.find((s) => s.model_service_id === form.aux_model_service_id) ||
+    null
+  )
+})
 
 const isEdit = computed(() => !!route.params.id)
 const agentId = computed(() => route.params.id)
@@ -445,6 +507,7 @@ const form = reactive({
   name: '',
   description: '',
   model_service_id: '',
+  aux_model_service_id: undefined,
   system_prompt: '',
   dept_id: '',
   autonomy_level: 'L2',
@@ -493,18 +556,62 @@ function onToolSelectionChange() {
   syncToolBindingsFromForm()
 }
 
+async function loadAllModelServices(providerId) {
+  if (!providerId) return []
+  const pageSize = 500
+  let page = 1
+  let all = []
+  let total = Infinity
+  while (all.length < total) {
+    const res = await serviceApi.list({
+      provider_id: providerId,
+      page,
+      page_size: pageSize,
+    })
+    const items = res.items || []
+    total = typeof res.total === 'number' ? res.total : items.length
+    all = all.concat(items)
+    if (!items.length || items.length < pageSize) break
+    page += 1
+    // safety cap
+    if (page > 50) break
+  }
+  return all
+}
+
 async function loadModelServices(providerId) {
   if (!providerId) {
     services.value = []
     return
   }
-  const res = await serviceApi.list({ provider_id: providerId, page_size: 100 })
-  services.value = res.items || []
+  services.value = await loadAllModelServices(providerId)
+  // keep aux list in sync when same provider already selected
+  if (selectedAuxProviderId.value && selectedAuxProviderId.value === providerId) {
+    auxServices.value = [...services.value]
+  }
+}
+
+async function loadAuxModelServices(providerId) {
+  if (!providerId) {
+    auxServices.value = []
+    return
+  }
+  // same catalog as primary when provider matches
+  if (providerId === selectedProviderId.value && services.value.length) {
+    auxServices.value = [...services.value]
+    return
+  }
+  auxServices.value = await loadAllModelServices(providerId)
 }
 
 async function onProviderChange() {
   form.model_service_id = ''
   await loadModelServices(selectedProviderId.value)
+}
+
+async function onAuxProviderChange() {
+  form.aux_model_service_id = undefined
+  await loadAuxModelServices(selectedAuxProviderId.value)
 }
 
 function ensureCurrentModelService(agent) {
@@ -516,6 +623,22 @@ function ensureCurrentModelService(agent) {
       display_name: agent.model_name || agent.model_service_id,
       model_name: agent.model_name || '',
       provider_id: selectedProviderId.value || agent.provider_id || '',
+      capabilities: agent.model_capabilities || ['text'],
+    })
+  }
+  return exists
+}
+
+function ensureCurrentAuxModelService(agent) {
+  if (!agent?.aux_model_service_id) return false
+  const exists = auxServices.value.some((s) => s.model_service_id === agent.aux_model_service_id)
+  if (!exists) {
+    auxServices.value.unshift({
+      model_service_id: agent.aux_model_service_id,
+      display_name: agent.aux_model_name || agent.aux_model_service_id,
+      model_name: agent.aux_model_name || '',
+      provider_id: selectedAuxProviderId.value || agent.aux_provider_id || '',
+      capabilities: agent.aux_model_capabilities || ['text'],
     })
   }
   return exists
@@ -544,10 +667,18 @@ onMounted(async () => {
       selectedProviderId.value = agent.provider_id || ''
       await loadModelServices(selectedProviderId.value)
       ensureCurrentModelService(agent)
+      selectedAuxProviderId.value = agent.aux_provider_id || ''
+      if (selectedAuxProviderId.value) {
+        await loadAuxModelServices(selectedAuxProviderId.value)
+        ensureCurrentAuxModelService(agent)
+      } else {
+        auxServices.value = []
+      }
       Object.assign(form, {
         name: agent.name,
         description: agent.description,
         model_service_id: agent.model_service_id,
+        aux_model_service_id: agent.aux_model_service_id || undefined,
         system_prompt: agent.system_prompt,
         dept_id: agent.dept_id,
         autonomy_level: agent.autonomy_level,
@@ -606,6 +737,7 @@ async function onSubmit() {
   try {
     // SGL-CFG-06: 提交时合并 tool_ids + require_approval 为 tool_bindings
     const payload = { ...form }
+    payload.aux_model_service_id = form.aux_model_service_id || null
     if (toolLoadingEnabled.value) {
       payload.composition_config = {
         ...(form.composition_config || {}),

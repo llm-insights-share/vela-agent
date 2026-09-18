@@ -131,6 +131,7 @@ def promote_experiment(
     for field in (
         "system_prompt",
         "model_service_id",
+        "aux_model_service_id",
         "max_iterations",
         "step_timeout_seconds",
         "timeout_seconds",
@@ -147,7 +148,11 @@ def promote_experiment(
         "description",
         "tags",
     ):
-        if field in snap and snap[field] is not None:
+        if field not in snap:
+            continue
+        if field == "aux_model_service_id":
+            setattr(agent, field, snap[field] or None)
+        elif snap[field] is not None:
             setattr(agent, field, snap[field])
 
     if agent.current_version_id and agent.current_version_id != treatment.version_id:

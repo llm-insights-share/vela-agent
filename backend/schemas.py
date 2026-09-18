@@ -77,6 +77,7 @@ class AgentCreate(BaseModel):
     name: str = Field(..., min_length=2, max_length=128)
     description: str = Field(default="", max_length=2048)
     model_service_id: str = Field(...)
+    aux_model_service_id: Optional[str] = None
     system_prompt: str = Field(default="", max_length=32000)
     dept_id: str = Field(default="")
     autonomy_level: str = Field(default="L2", pattern="^(L1|L2|L3)$")
@@ -108,6 +109,7 @@ class AgentUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     model_service_id: Optional[str] = None
+    aux_model_service_id: Optional[str] = None
     system_prompt: Optional[str] = None
     dept_id: Optional[str] = None
     autonomy_level: Optional[str] = None
@@ -259,9 +261,16 @@ class AgentResponse(BaseModel):
     description: str = ""
     model_service_id: str = ""
     model_name: Optional[str] = None
+    model_capabilities: List[str] = []
     provider_id: str = ""
     provider_name: str = ""
     provider_code: str = ""
+    aux_model_service_id: Optional[str] = None
+    aux_model_name: Optional[str] = None
+    aux_model_capabilities: List[str] = []
+    aux_provider_id: str = ""
+    aux_provider_name: str = ""
+    aux_provider_code: str = ""
     system_prompt: str = ""
     dept_id: str = ""
     autonomy_level: str = "L2"
@@ -507,6 +516,8 @@ class SessionMessage(BaseModel):
 class SessionChatRequest(BaseModel):
     message: str = Field(default="", max_length=32000)
     attachment_ids: List[str] = Field(default_factory=list)
+    # session = inject all session attachments; message = only attachment_ids this turn
+    attachment_scope: str = Field(default="session", pattern="^(session|message)$")
     skill_pack_id: Optional[str] = None
     timeout_seconds: Optional[int] = None
     execution_mode: Optional[str] = Field(default="auto", pattern="^(auto|react|plan_and_execute|direct)$")
@@ -518,6 +529,8 @@ class SessionChatRequest(BaseModel):
     def message_or_attachments(self):
         if not self.message.strip() and not self.attachment_ids:
             raise ValueError("消息和附件不能同时为空")
+        if len(self.attachment_ids) > 5:
+            raise ValueError("单条消息最多 5 个新附件")
         return self
 
 
@@ -535,6 +548,8 @@ class SessionAttachmentResponse(BaseModel):
     text_length: int = 0
     is_image: bool = False
     uploaded_at: Optional[str] = None
+    units_ready: int = 0
+    units_total: int = 0
 
 
 class SessionAttachmentListResponse(BaseModel):

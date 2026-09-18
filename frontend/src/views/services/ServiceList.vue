@@ -20,6 +20,16 @@
             {{ p.display_name }}
           </a-select-option>
         </a-select>
+        <span class="filter-label" style="margin-left: 16px">模型名称：</span>
+        <a-input
+          v-model:value="filterModelName"
+          style="width: 240px"
+          placeholder="输入模型名称模糊查询"
+          allow-clear
+          @pressEnter="onFilterChange"
+          @change="onModelNameClear"
+        />
+        <a-button type="primary" style="margin-left: 8px" @click="onFilterChange">查询</a-button>
       </div>
       <a-table
         :columns="columns"
@@ -93,6 +103,7 @@ const testingId = ref('')
 const services = ref([])
 const providers = ref([])
 const filterProviderId = ref('')
+const filterModelName = ref('')
 const modalOpen = ref(false)
 const editing = ref(null)
 const saving = ref(false)
@@ -127,6 +138,10 @@ async function fetchServices() {
     if (filterProviderId.value) {
       params.provider_id = filterProviderId.value
     }
+    const nameQ = (filterModelName.value || '').trim()
+    if (nameQ) {
+      params.model_name = nameQ
+    }
     const res = await serviceApi.list(params)
     services.value = res.items || []
     pagination.total = res.total || 0
@@ -146,6 +161,13 @@ function onTableChange(pag) {
 function onFilterChange() {
   pagination.current = 1
   fetchServices()
+}
+
+function onModelNameClear(e) {
+  // allow-clear 清空时立即刷新；输入过程中不自动查询，避免频繁请求
+  if (!e?.target?.value) {
+    onFilterChange()
+  }
 }
 
 onMounted(async () => {
