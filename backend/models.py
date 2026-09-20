@@ -72,6 +72,17 @@ class KnowledgeBaseStatus(str, enum.Enum):
     ARCHIVED = "ARCHIVED"
 
 
+class ProjectStatus(str, enum.Enum):
+    ACTIVE = "ACTIVE"
+    ARCHIVED = "ARCHIVED"
+
+
+class ProjectMemberRole(str, enum.Enum):
+    OWNER = "owner"
+    EDITOR = "editor"
+    VIEWER = "viewer"
+
+
 class SessionStatus(str, enum.Enum):
     ACTIVE = "ACTIVE"
     RUNNING = "RUNNING"
@@ -202,6 +213,31 @@ class AgentVersion(Base):
     agent = relationship("Agent", back_populates="versions", foreign_keys=[agent_id])
 
 
+class AgentContextBlock(Base):
+    """Per-agent × execution-mode context block overrides (system defaults live in code)."""
+    __tablename__ = "agent_context_blocks"
+    __table_args__ = (
+        UniqueConstraint(
+            "agent_id", "execution_mode", "block_key",
+            name="uq_agent_context_block",
+        ),
+    )
+
+    block_id = Column(String, primary_key=True, default=gen_uuid)
+    agent_id = Column(String, ForeignKey("agents.agent_id"), nullable=False, index=True)
+    execution_mode = Column(String(32), nullable=False, default="auto")
+    block_key = Column(String(64), nullable=False)
+    title = Column(String(128), default="")
+    placement = Column(String(32), default="system")  # system | user_suffix | mode_inject
+    source = Column(String(32), default="static")  # static | dynamic | builtin_template
+    content = Column(Text, default="")
+    enabled = Column(Boolean, default=True)
+    sort_order = Column(Integer, default=0)
+    deletable = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=now_utc)
+    updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)
+
+
 class SkillPack(Base):
     __tablename__ = "skill_packs"
 
@@ -256,11 +292,49 @@ class AgentKnowledgeBinding(Base):
     created_at = Column(DateTime, default=now_utc)
 
 
+class Project(Base):
+    """Claude-style workspace: instructions + knowledge + sessions across agents."""
+    __tablename__ = "projects"
+
+    project_id = Column(String, primary_key=True, default=gen_uuid)
+    name = Column(String(128), nullable=False, index=True)
+    description = Column(Text, default="")
+    instructions = Column(Text, default="")
+    owner_id = Column(String, ForeignKey("users.user_id"), nullable=False, index=True)
+    kb_id = Column(String, ForeignKey("knowledge_bases.kb_id"), nullable=True)
+    status = Column(SAEnum(ProjectStatus), default=ProjectStatus.ACTIVE)
+    last_agent_id = Column(String, ForeignKey("agents.agent_id"), nullable=True)
+    created_at = Column(DateTime, default=now_utc)
+    updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)
+
+
+class ProjectMember(Base):
+    __tablename__ = "project_members"
+    __table_args__ = (UniqueConstraint("project_id", "user_id", name="uq_project_member"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    project_id = Column(String, ForeignKey("projects.project_id"), nullable=False, index=True)
+    user_id = Column(String, ForeignKey("users.user_id"), nullable=False, index=True)
+    role = Column(SAEnum(ProjectMemberRole), default=ProjectMemberRole.VIEWER, nullable=False)
+    created_at = Column(DateTime, default=now_utc)
+
+
+class ProjectStar(Base):
+    __tablename__ = "project_stars"
+    __table_args__ = (UniqueConstraint("project_id", "user_id", name="uq_project_star"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    project_id = Column(String, ForeignKey("projects.project_id"), nullable=False, index=True)
+    user_id = Column(String, ForeignKey("users.user_id"), nullable=False, index=True)
+    created_at = Column(DateTime, default=now_utc)
+
+
 class Session(Base):
     __tablename__ = "sessions"
 
     session_id = Column(String, primary_key=True, default=gen_uuid)
     agent_id = Column(String, ForeignKey("agents.agent_id"), nullable=False)
+    project_id = Column(String, ForeignKey("projects.project_id"), nullable=True, index=True)
     version_id = Column(String, ForeignKey("agent_versions.version_id"), nullable=True)
     caller_type = Column(String(32), default="USER")
     caller_id = Column(String(128), default="")

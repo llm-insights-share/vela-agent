@@ -37,10 +37,14 @@
 
     <div style="flex: 1; display: flex; flex-direction: column; min-width: 0;">
       <div class="chat-header">
-        <a-button type="text" @click="$router.back()">
+        <a-button type="text" @click="goBack">
           <ArrowLeftOutlined /> 返回
         </a-button>
-        <span class="chat-title">{{ agent.name }} - 对话测试</span>
+        <span class="chat-title">
+          <template v-if="isProjectMode">{{ projectName || '项目' }} · {{ agent.name || '对话' }}</template>
+          <template v-else>{{ agent.name }} - 对话测试</template>
+        </span>
+        <a-tag v-if="isProjectMode && !canWriteSession" color="default">只读</a-tag>
         <div v-if="sessionId" class="session-id-wrap">
           <a-tag color="green">会话: {{ sessionId.substring(0, 8) }}...</a-tag>
           <a-tooltip title="复制完整会话 ID">
@@ -66,6 +70,13 @@
             style="width: 160px"
             :options="executionModeOptions"
           />
+          <a-button
+            v-if="agent.agent_type === 'SINGLE'"
+            size="small"
+            @click="contextConfigOpen = true"
+          >
+            上下文配置
+          </a-button>
           <a-button size="small" @click="openDebugDrawer">调试</a-button>
         </div>
       </div>
@@ -581,14 +592,14 @@
             @pressEnter="onEnter"
             @input="onInput"
             @paste="onPaste"
-            :disabled="isSending"
+            :disabled="isSending || !canWriteSession"
           />
           <a-button
             v-if="canAbort"
             type="primary"
             danger
             :loading="aborting"
-            :disabled="aborting"
+            :disabled="aborting || !canWriteSession"
             @click="abortCurrentSession"
             class="send-btn"
           >
@@ -598,7 +609,7 @@
             v-else
             type="primary"
             :loading="isSending"
-            :disabled="(!inputText.trim() && !readyNewAttachments.length) || isSending || hasUploadingAttachments"
+            :disabled="(!inputText.trim() && !readyNewAttachments.length) || isSending || hasUploadingAttachments || !canWriteSession"
             @click="sendMessage"
             class="send-btn"
           >
@@ -739,6 +750,13 @@
         </div>
       </div>
     </Teleport>
+
+    <ContextConfigDrawer
+      v-model:open="contextConfigOpen"
+      :agent-id="agentId"
+      :agent-name="agent.name"
+      v-model:execution-mode="executionMode"
+    />
 
     <a-drawer
       v-model:open="debugOpen"
@@ -942,14 +960,15 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import {
   ArrowLeftOutlined, CaretRightOutlined, CaretDownOutlined,
   ThunderboltOutlined, SendOutlined, PlusOutlined, DownloadOutlined,
   FileOutlined, CloseOutlined, LoadingOutlined, StopOutlined, PaperClipOutlined,
   CopyOutlined, EditOutlined, RedoOutlined, DeleteOutlined, CheckOutlined,
 } from '@ant-design/icons-vue'
-import { agentApi, sessionApi, hitlApi, skillApi, inboxApi, monitorApi, getToken } from '../../api'
+import { agentApi, sessionApi, hitlApi, skillApi, inboxApi, monitorApi, projectApi, getToken } from '../../api'
+import ContextConfigDrawer from '../../components/ContextConfigDrawer.vue'
 import { useAuthStore } from '../../stores/auth'
 import { message } from 'ant-design-vue'
 import { marked } from 'marked'
@@ -1000,8 +1019,17 @@ marked.setOptions({
 })
 
 const route = useRoute()
+const router = useRouter()
 const auth = useAuthStore()
-const agentId = route.params.id
+const isProjectMode = computed(() => route.name === 'ProjectChat')
+const projectId = computed(() => (isProjectMode.value ? String(route.params.id) : null))
+const projectName = ref('')
+const canWriteSession = ref(true)
+const agentId = ref(
+  route.name === 'ProjectChat'
+    ? String(route.query.agent_id || '')
+    : String(route.params.id)
+)
 const agent = reactive({})
 const sessionId = ref('')
 const messages = ref([])
@@ -1142,7 +1170,7 @@ async function rerunFromLastUser(content) {
     append_user_message: false,
   })
   currentSessionStatus.value = 'RUNNING'
-  watchBackgroundSession(sessionId.value, agentId, agent.name)
+  watchBackgroundSession(sessionId.value, agentId.value, agent.name)
   startSessionEvents(sessionId.value)
   startSessionPollIfNeeded()
   await fetchSessions()
@@ -1206,6 +1234,7 @@ const aborting = ref(false)
 let sessionPollTimer = null
 
 const debugOpen = ref(false)
+const contextConfigOpen = ref(false)
 const llmCalls = ref([])
 const loadingLlmCalls = ref(false)
 let debugPollTimer = null
@@ -2190,6 +2219,16 @@ function mapSessionMessages(msgs) {
 async function loadSessionById(id) {
   const s = await sessionApi.get(id)
   currentSessionStatus.value = s.status
+  canWriteSession.value = s.can_write !== false
+  if (isProjectMode.value && s.agent_id) {
+    agentId.value = s.agent_id
+    if (!agent.name || agent.agent_id !== s.agent_id) {
+      try {
+        const a = await agentApi.get(s.agent_id)
+        Object.assign(agent, a)
+      } catch (_) { /* keep */ }
+    }
+  }
   messages.value = mapSessionMessages(s.messages)
   enrichMessagesWithSessionLlmCalls(s)
   liveTurnsPreview.value = s.pending_context?.llm_turns || []
@@ -2287,7 +2326,7 @@ async function refreshCurrentSession() {
         stopSessionPoll()
       }
     } else if (prevStatus === 'HITL_WAIT' && s.status === 'RUNNING') {
-      watchBackgroundSession(sessionId.value, agentId, agent.name)
+      watchBackgroundSession(sessionId.value, agentId.value, agent.name)
       liveThinkingText.value = ''
       liveStoryPatch.value = null
       startSessionEvents(sessionId.value)
@@ -2362,9 +2401,30 @@ function onMsgContainerScroll() {
   stickToBottom.value = dist <= SCROLL_STICK_THRESHOLD_PX
 }
 
+function goBack() {
+  if (isProjectMode.value && projectId.value) {
+    router.push(`/projects/${projectId.value}`)
+  } else {
+    router.back()
+  }
+}
+
 onMounted(async () => {
   try {
-    const a = await agentApi.get(agentId)
+    if (isProjectMode.value) {
+      const p = await projectApi.get(projectId.value)
+      projectName.value = p.name || ''
+      if (!agentId.value && p.last_agent_id) {
+        agentId.value = p.last_agent_id
+      }
+      if (!agentId.value) {
+        message.warning('请先在项目页选择智能体')
+        router.replace(`/projects/${projectId.value}`)
+        return
+      }
+    }
+
+    const a = await agentApi.get(agentId.value)
     Object.assign(agent, a)
     if (a.timeout_seconds) {
       timeoutSeconds.value = a.timeout_seconds
@@ -2381,9 +2441,10 @@ onMounted(async () => {
       sessionId.value = null
       messages.value = []
       currentSessionStatus.value = 'ACTIVE'
+      canWriteSession.value = true
     }
 
-    setActiveViewing(sessionId.value, agentId)
+    setActiveViewing(sessionId.value, agentId.value)
     await fetchSessions()
     startSessionPollIfNeeded()
   } catch (e) {
@@ -2394,7 +2455,12 @@ onMounted(async () => {
 async function fetchSessions() {
   loadingSessions.value = true
   try {
-    const res = await sessionApi.list({ agent_id: agentId, page_size: 50 })
+    let res
+    if (isProjectMode.value && projectId.value) {
+      res = await projectApi.listSessions(projectId.value, { page_size: 50 })
+    } else {
+      res = await sessionApi.list({ agent_id: agentId.value, page_size: 50 })
+    }
     sessions.value = (res.items || []).filter(
       s => (s.messages || []).length > 0 || s.status === 'RUNNING'
     )
@@ -2408,7 +2474,7 @@ async function fetchSessions() {
 async function switchSession(s) {
   if (s.session_id === sessionId.value) return
   sessionId.value = s.session_id
-  setActiveViewing(sessionId.value, agentId)
+  setActiveViewing(sessionId.value, agentId.value)
   activeSkill.value = null
   activeSkillId.value = null
   skipHistory.value = false
@@ -2431,14 +2497,19 @@ async function ensureSession() {
   if (sessionId.value) return sessionId.value
   creatingSession.value = true
   try {
-    const session = await sessionApi.create({
-      agent_id: agentId,
+    const payload = {
+      agent_id: agentId.value,
       caller_type: 'web_playground',
       caller_id: auth.user?.user_id || '',
-    })
+    }
+    if (isProjectMode.value && projectId.value) {
+      payload.project_id = projectId.value
+    }
+    const session = await sessionApi.create(payload)
     sessionId.value = session.session_id
     currentSessionStatus.value = session.status || 'ACTIVE'
-    setActiveViewing(sessionId.value, agentId)
+    canWriteSession.value = true
+    setActiveViewing(sessionId.value, agentId.value)
     return session.session_id
   } finally {
     creatingSession.value = false
@@ -2453,15 +2524,20 @@ async function createNewSession() {
   }
   try {
     creatingSession.value = true
-    const session = await sessionApi.create({
-      agent_id: agentId,
+    const payload = {
+      agent_id: agentId.value,
       caller_type: 'web_playground',
       caller_id: auth.user?.user_id || '',
-    })
+    }
+    if (isProjectMode.value && projectId.value) {
+      payload.project_id = projectId.value
+    }
+    const session = await sessionApi.create(payload)
     sessionId.value = session.session_id
     messages.value = []
     currentSessionStatus.value = session.status || 'ACTIVE'
-    setActiveViewing(sessionId.value, agentId)
+    canWriteSession.value = true
+    setActiveViewing(sessionId.value, agentId.value)
     stopSessionPoll()
     activeSkill.value = null
     activeSkillId.value = null
@@ -2758,7 +2834,7 @@ async function sendMessage() {
     await ensureSession()
     await sessionApi.chatAsync(sessionId.value, payload)
     currentSessionStatus.value = 'RUNNING'
-    watchBackgroundSession(sessionId.value, agentId, agent.name)
+    watchBackgroundSession(sessionId.value, agentId.value, agent.name)
     startSessionEvents(sessionId.value)
     startSessionPollIfNeeded()
     await fetchSessions()
@@ -3069,13 +3145,13 @@ async function afterHitlApproved(msg, res) {
     currentSessionStatus.value = 'HITL_WAIT'
   } else if (res?.session_status === 'RUNNING') {
     currentSessionStatus.value = 'RUNNING'
-    watchBackgroundSession(sessionId.value, agentId, agent.name)
+    watchBackgroundSession(sessionId.value, agentId.value, agent.name)
     startSessionEvents(sessionId.value)
     startSessionPollIfNeeded()
   }
   await refreshCurrentSession()
   if (currentSessionStatus.value === 'RUNNING') {
-    watchBackgroundSession(sessionId.value, agentId, agent.name)
+    watchBackgroundSession(sessionId.value, agentId.value, agent.name)
     startSessionEvents(sessionId.value)
     startSessionPollIfNeeded()
   }

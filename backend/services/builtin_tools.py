@@ -1475,6 +1475,10 @@ async def _execute_kb_search(args: Dict[str, Any]) -> Dict[str, Any]:
         from models import KnowledgeBase, KnowledgeBaseStatus
         from services.knowledge_service import knowledge_service as ks
         from services.knowledge.tag_extractor import suggest_tag_filters
+        from services.tool_runtime_context import get_allowed_kb_ids, get_exclude_project_kbs
+
+        allowed_ids = get_allowed_kb_ids()
+        exclude_project = get_exclude_project_kbs()
 
         db = SessionLocal()
         try:
@@ -1486,17 +1490,36 @@ async def _execute_kb_search(args: Dict[str, Any]) -> Dict[str, Any]:
                 ).all()
                 if not kbs:
                     return {"success": False, "error": f"知识库不存在或未激活: {kb_id}"}
+                if allowed_ids is not None and kb_id not in allowed_ids:
+                    return {"success": False, "error": f"无权检索该知识库: {kb_id}"}
+                if exclude_project and (kbs[0].scope or "") == "project":
+                    if allowed_ids is None or kb_id not in (allowed_ids or []):
+                        return {"success": False, "error": f"无权检索项目知识库: {kb_id}"}
             elif kb_name:
                 kbs = db.query(KnowledgeBase).filter(
                     KnowledgeBase.name.ilike(f"%{kb_name}%"),
                     KnowledgeBase.status == KnowledgeBaseStatus.ACTIVE,
                 ).all()
+                if exclude_project and allowed_ids is None:
+                    kbs = [k for k in kbs if (k.scope or "") != "project"]
+                if allowed_ids is not None:
+                    allow = set(allowed_ids)
+                    kbs = [k for k in kbs if k.kb_id in allow]
                 if not kbs:
                     return {"success": False, "error": f"未找到匹配的知识库: {kb_name}"}
             else:
-                kbs = db.query(KnowledgeBase).filter(
-                    KnowledgeBase.status == KnowledgeBaseStatus.ACTIVE,
-                ).all()
+                if allowed_ids is not None:
+                    kbs = db.query(KnowledgeBase).filter(
+                        KnowledgeBase.kb_id.in_(allowed_ids),
+                        KnowledgeBase.status == KnowledgeBaseStatus.ACTIVE,
+                    ).all()
+                else:
+                    q = db.query(KnowledgeBase).filter(
+                        KnowledgeBase.status == KnowledgeBaseStatus.ACTIVE,
+                    )
+                    if exclude_project:
+                        q = q.filter(KnowledgeBase.scope != "project")
+                    kbs = q.all()
                 if not kbs:
                     return {"success": False, "error": "当前没有可用的知识库"}
 

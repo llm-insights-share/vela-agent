@@ -72,10 +72,37 @@ export const authApi = {
 
 export const userApi = {
   list: () => api.get('/users'),
+  search: (q, limit = 10) => api.get('/users/search', { params: { q, limit } }),
   create: (data) => api.post('/users', data),
   setActive: (id, is_active) => api.patch(`/users/${id}/active`, { is_active }),
   setRoles: (id, roles) => api.patch(`/users/${id}/roles`, { roles }),
   remove: (id) => api.delete(`/users/${id}`),
+}
+
+export const projectApi = {
+  list: (params) => api.get('/projects', { params }),
+  create: (data) => api.post('/projects', data),
+  get: (id) => api.get(`/projects/${id}`),
+  update: (id, data) => api.patch(`/projects/${id}`, data),
+  remove: (id) => api.delete(`/projects/${id}`),
+  star: (id) => api.post(`/projects/${id}/star`),
+  unstar: (id) => api.delete(`/projects/${id}/star`),
+  listMembers: (id) => api.get(`/projects/${id}/members`),
+  addMember: (id, data) => api.post(`/projects/${id}/members`, data),
+  updateMember: (id, userId, data) => api.patch(`/projects/${id}/members/${userId}`, data),
+  removeMember: (id, userId) => api.delete(`/projects/${id}/members/${userId}`),
+  listFiles: (id) => api.get(`/projects/${id}/files`),
+  uploadFile: (id, file, filename) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    if (filename) formData.append('filename', filename)
+    return api.post(`/projects/${id}/files`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 300000,
+    })
+  },
+  deleteFile: (id, docId) => api.delete(`/projects/${id}/files/${docId}`),
+  listSessions: (id, params) => api.get(`/projects/${id}/sessions`, { params }),
 }
 
 export const agentApi = {
@@ -96,6 +123,23 @@ export const agentApi = {
   bindKnowledgeBases: (id, kbIds) => api.put(`/agents/${id}/knowledge-bases`, kbIds),
   getTools: (id) => api.get(`/agents/${id}/tools`),
   bindTools: (id, toolIds) => api.put(`/agents/${id}/tools`, toolIds),
+}
+
+export const agentContextApi = {
+  defaults: (executionMode) =>
+    api.get('/context-blocks/defaults', { params: { execution_mode: executionMode } }),
+  list: (agentId, executionMode) =>
+    api.get(`/agents/${agentId}/context-blocks`, { params: { execution_mode: executionMode } }),
+  replace: (agentId, executionMode, data) =>
+    api.put(`/agents/${agentId}/context-blocks`, data, {
+      params: { execution_mode: executionMode },
+    }),
+  restoreDefaults: (agentId, executionMode) =>
+    api.post(`/agents/${agentId}/context-blocks/restore-defaults`, null, {
+      params: { execution_mode: executionMode },
+    }),
+  preview: (agentId, data) =>
+    api.post(`/agents/${agentId}/context-blocks/preview`, data),
 }
 
 export const providerApi = {

@@ -16,6 +16,10 @@
           <DashboardOutlined />
           <span>仪表盘</span>
         </a-menu-item>
+        <a-menu-item key="/projects">
+          <FolderOutlined />
+          <span>项目</span>
+        </a-menu-item>
         <a-sub-menu key="agents">
           <template #icon><RobotOutlined /></template>
           <template #title>Agent 管理</template>
@@ -138,6 +142,7 @@ import { ref, watch, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import {
   DashboardOutlined,
+  FolderOutlined,
   RobotOutlined,
   ApiOutlined,
   ThunderboltOutlined,

@@ -21,6 +21,21 @@ const routes = [
     component: () => import('../views/Dashboard.vue'),
   },
   {
+    path: '/projects',
+    name: 'ProjectList',
+    component: () => import('../views/projects/ProjectList.vue'),
+  },
+  {
+    path: '/projects/:id',
+    name: 'ProjectHome',
+    component: () => import('../views/projects/ProjectHome.vue'),
+  },
+  {
+    path: '/projects/:id/chat',
+    name: 'ProjectChat',
+    component: () => import('../views/agents/AgentChat.vue'),
+  },
+  {
     path: '/agents',
     name: 'AgentList',
     component: () => import('../views/agents/AgentList.vue'),

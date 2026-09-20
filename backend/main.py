@@ -46,6 +46,8 @@ from routes.connectors import router as connectors_router
 from routes.monitor import router as monitor_router
 from routes.eval import router as eval_router
 from routes.selfopt import router as selfopt_router
+from routes.projects import router as projects_router
+from routes.agent_context_blocks import router as agent_context_blocks_router
 
 app = FastAPI(
     title="Vela Agent Playground API",
@@ -92,6 +94,8 @@ app.include_router(connectors_router, dependencies=_auth_deps)
 app.include_router(monitor_router, dependencies=_auth_deps)
 app.include_router(eval_router, dependencies=_auth_deps)
 app.include_router(selfopt_router, dependencies=_auth_deps)
+app.include_router(projects_router, dependencies=_auth_deps)
+app.include_router(agent_context_blocks_router, dependencies=_auth_deps)
 app.include_router(oauth_callback_router)
 
 AVATAR_DIR.mkdir(parents=True, exist_ok=True)

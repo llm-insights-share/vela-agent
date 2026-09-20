@@ -1081,6 +1081,8 @@ class AgentService:
                     ).first()
                     if not kb:
                         continue
+                    if (kb.scope or "") == "project":
+                        continue
                     desc = (kb.description or "").strip()
                     if desc:
                         kb_lines.append(f"- {kb.name}: {desc}")
@@ -1088,6 +1090,30 @@ class AgentService:
                         kb_lines.append(f"- {kb.name}")
                 if kb_lines:
                     knowledge_context = "\n\n可用知识库：\n" + "\n".join(kb_lines)
+
+            project_context = ""
+            allowed_kb_ids = None
+            project_id = getattr(session, "project_id", None) or None
+            if project_id:
+                from models import Project
+                from services import project_service as ps
+
+                project = db.query(Project).filter(Project.project_id == project_id).first()
+                if project:
+                    project_context = ps.build_project_prompt_context(db, project)
+                    allowed_kb_ids, project_kb_id = ps.resolve_allowed_kb_ids(
+                        db, agent_id=agent_id, project_id=project_id
+                    )
+                    if project_kb_id:
+                        pk = db.query(KnowledgeBase).filter(
+                            KnowledgeBase.kb_id == project_kb_id
+                        ).first()
+                        label = (pk.name if pk else project_kb_id)
+                        extra = f"- {label} (项目知识, kb_id={project_kb_id})"
+                        if knowledge_context:
+                            knowledge_context += "\n" + extra
+                        else:
+                            knowledge_context = "\n\n可用知识库：\n" + extra
 
             skill_context = ""
             active_skill_name = None
@@ -1242,10 +1268,12 @@ class AgentService:
                 skill_context=skill_context,
                 skip_history=skip_history,
                 attachment_metadata=attachment_metadata,
-                has_kb=bool(kb_bindings),
+                has_kb=bool(kb_bindings) or bool(project_context),
                 connector_context=connector_context,
                 connector_tool_names=connector_tool_names,
                 connector_approval_by_tool_id=connector_approval_by_tool_id,
+                project_context=project_context,
+                allowed_kb_ids=allowed_kb_ids,
             )
             if rewrite_meta:
                 loop.thinking_log.append(
@@ -1378,6 +1406,8 @@ class AgentService:
 class AgentLoop:
     MAX_CONTEXT_MESSAGES = 50
     SKILL_MAX_CHARS = 8000
+    DIGEST_PREVIEW_CHARS = 100
+    DIGEST_MAX_CHARS = 2000
 
     @staticmethod
     def _content_to_str(content: Any) -> str:
@@ -1437,6 +1467,8 @@ class AgentLoop:
         connector_context: str = "",
         connector_tool_names: Optional[List[str]] = None,
         connector_approval_by_tool_id: Optional[Dict[str, bool]] = None,
+        project_context: str = "",
+        allowed_kb_ids: Optional[List[str]] = None,
     ):
         self.db = db
         self.agent = agent
@@ -1460,6 +1492,8 @@ class AgentLoop:
         self.knowledge_context = knowledge_context
         self.skill_context = skill_context
         self.connector_context = connector_context or ""
+        self.project_context = project_context or ""
+        self.allowed_kb_ids = allowed_kb_ids
         self.skip_history = skip_history
         self.thinking_log: List[str] = []
         self.total_tokens_used = 0
@@ -1533,6 +1567,7 @@ class AgentLoop:
         self.memory_enabled = bool(getattr(agent, "memory_enabled", False))
         self._memory_context = ""
         self._memory_load_pending = self.memory_enabled
+        self._context_blocks: List[Dict[str, Any]] = []
 
         self.output_dir = os.path.join(
             os.path.dirname(os.path.dirname(__file__)), "data", "outputs", session.session_id
@@ -1601,26 +1636,32 @@ class AgentLoop:
             loop = asyncio.get_running_loop()
             self._memory_context = await loop.run_in_executor(None, self._sync_load_memory)
             if self._memory_context:
-                mem_pin = self._memory_context.strip()
-                if len(mem_pin) > 2500:
-                    mem_pin = mem_pin[:2500] + "\n…(记忆已截断)"
-                base_um = self._content_to_str(self.user_message)
-                self.user_message = (
-                    f"{base_um}\n\n"
-                    "---\n"
-                    "【系统附注·长期记忆·必须遵从】\n"
-                    "下面是已为你检索到的长期记忆。若其中包含回答本问题所需的代号、组名、格式或事实，"
-                    "你必须原样采用；禁止回答「无法确认/不知道」，禁止编造其他代号。\n"
-                    f"{mem_pin}"
-                )
-                self.thinking_log.append(
-                    f"[Memory] 已注入长期记忆 {len(self._memory_context)} 字"
-                    + ("（含归档召回）" if "相关归档" in self._memory_context else "（仅核心 blocks）")
-                )
-                self.story.add_memory(
-                    f"已注入长期记忆 {len(self._memory_context)} 字",
-                    hit=True,
-                )
+                if not self._ctx_enabled("memory_suffix", default=True):
+                    self.thinking_log.append("[Memory] 已召回但上下文块 memory_suffix 已关闭，跳过注入")
+                    self.story.add_memory("记忆已召回但未注入（块已关闭）", hit=True)
+                else:
+                    mem_pin = self._memory_context.strip()
+                    if len(mem_pin) > 2500:
+                        mem_pin = mem_pin[:2500] + "\n…(记忆已截断)"
+                    base_um = self._content_to_str(self.user_message)
+                    block = self._ctx_block("memory_suffix")
+                    template = (block or {}).get("content") or (
+                        "---\n"
+                        "【系统附注·长期记忆·必须遵从】\n"
+                        "下面是已为你检索到的长期记忆。若其中包含回答本问题所需的代号、组名、格式或事实，"
+                        "你必须原样采用；禁止回答「无法确认/不知道」，禁止编造其他代号。\n"
+                        "{body}"
+                    )
+                    filled = self._fill_template(template, body=mem_pin).strip()
+                    self.user_message = f"{base_um}\n\n{filled}" if filled else base_um
+                    self.thinking_log.append(
+                        f"[Memory] 已注入长期记忆 {len(self._memory_context)} 字"
+                        + ("（含归档召回）" if "相关归档" in self._memory_context else "（仅核心 blocks）")
+                    )
+                    self.story.add_memory(
+                        f"已注入长期记忆 {len(self._memory_context)} 字",
+                        hit=True,
+                    )
             else:
                 self.thinking_log.append("[Memory] 未召回到可用长期记忆")
                 self.story.add_memory("未召回到可用长期记忆", hit=False)
@@ -1638,6 +1679,7 @@ class AgentLoop:
 
         self._current_mode = mode
         self._run_metrics["execution_mode"] = mode
+        self._load_context_blocks(mode)
         intent_text = self._content_to_str(self.original_user_message or self.user_message)
         run_id = gen_uuid()
         start_turn_context(
@@ -1766,117 +1808,206 @@ class AgentLoop:
         else:
             return await self._run_direct()
 
+    def _load_context_blocks(self, mode: str) -> None:
+        try:
+            from services.context_block_service import get_effective_blocks_for_runtime
+
+            self._context_blocks = get_effective_blocks_for_runtime(
+                self.db,
+                getattr(self.agent, "agent_id", "") or "",
+                mode or "auto",
+                system_prompt=getattr(self.agent, "system_prompt", "") or "",
+            )
+        except Exception as e:
+            print(f"[AgentLoop] load context blocks failed, using empty: {e}")
+            self._context_blocks = []
+
+    def _ctx_block(self, block_key: str) -> Optional[Dict[str, Any]]:
+        from services.context_block_service import get_block
+
+        return get_block(getattr(self, "_context_blocks", None) or [], block_key)
+
+    def _ctx_enabled(self, block_key: str, default: bool = True) -> bool:
+        from services.context_block_service import block_enabled
+
+        if not getattr(self, "_context_blocks", None):
+            return default
+        return block_enabled(self._context_blocks, block_key, default=default)
+
+    def _fill_template(self, template: str, **kwargs: str) -> str:
+        text = template or ""
+        for k, v in kwargs.items():
+            text = text.replace("{" + k + "}", v if v is not None else "")
+        return text
+
+    def _cu_systems_text(self) -> str:
+        try:
+            from models import ScreenSystem
+
+            active_systems = (
+                self.db.query(ScreenSystem)
+                .filter(ScreenSystem.status == "ACTIVE")
+                .order_by(ScreenSystem.name.asc())
+                .all()
+            )
+            if not active_systems:
+                return ""
+            return "\n".join(
+                f"- name={s.name}; system_id={s.system_id}; entry_url={s.entry_url or ''}"
+                for s in active_systems
+            )
+        except Exception:
+            return ""
+
     def _build_system_prompt(self) -> str:
-        system_prompt = self.agent.system_prompt or "你是一个智能助手。"
-        # 注入当前日期，避免模型将「今天」误判为错误年份
+        """Build KV-cache-friendly system prompt from effective context blocks."""
+        blocks = getattr(self, "_context_blocks", None) or []
+        if not blocks:
+            # Fallback: pure defaults without DB (tests / load failure)
+            from services.context_block_defaults import get_system_default_specs
+            from services.context_block_service import _spec_to_dict
+
+            mode = getattr(self, "_current_mode", None) or "auto"
+            blocks = [
+                _spec_to_dict(s, agent_id=getattr(self.agent, "agent_id", "") or "", mode=mode)
+                for s in get_system_default_specs(
+                    mode, system_prompt=getattr(self.agent, "system_prompt", "") or ""
+                )
+            ]
+
+        has_cu = any(
+            (getattr(t, "name", "") or "").startswith("cu_")
+            for t in (self.available_tools or [])
+        )
+        has_code_exec = any(
+            (getattr(t, "name", "") or "") == "execute_code"
+            for t in (self.available_tools or [])
+        )
+        deferred_ok = bool(
+            self.tool_loading_cfg.is_deferred() and self._deferred_tool_names()
+        )
+        sid = getattr(self.session, "session_id", "") or ""
+        ws_rel = f"workspaces/{sid}/" if sid else "workspaces/<session_id>/"
+
         from datetime import datetime
+
         today = datetime.now().strftime("%Y-%m-%d")
         weekday_map = ["一", "二", "三", "四", "五", "六", "日"]
         weekday = weekday_map[datetime.now().weekday()]
-        system_prompt += (
-            f"\n\n当前日期：{today}（星期{weekday}）。"
-            "理解「今天/本周/本月/今年」时必须以该日期为准；"
-            "搜索新闻或时效信息时，查询关键词应使用正确的公历年份，不要使用过时年份。"
+
+        parts: List[str] = []
+        for b in sorted(blocks, key=lambda x: (int(x.get("sort_order") or 0), x.get("block_key") or "")):
+            if not b.get("enabled", True):
+                continue
+            if (b.get("placement") or "system") != "system":
+                continue
+            key = b.get("block_key") or ""
+            content = b.get("content") or ""
+            text = ""
+
+            if key == "system_base":
+                text = content or getattr(self.agent, "system_prompt", None) or "你是一个智能助手。"
+            elif key == "connector":
+                body = (self.connector_context or "").strip()
+                if not body:
+                    continue
+                text = self._fill_template(content or "## 连接器\n{body}", body=body)
+            elif key == "cu_norms":
+                if not has_cu:
+                    continue
+                systems = self._cu_systems_text()
+                text = self._fill_template(content, systems=systems or "(暂无已注册系统)")
+            elif key == "code_norms":
+                if not has_code_exec:
+                    continue
+                text = self._fill_template(content, workspace=ws_rel)
+            elif key == "tool_search_norms":
+                if not deferred_ok:
+                    continue
+                text = content
+            elif key == "knowledge":
+                body = (self.knowledge_context or "").strip()
+                if not body:
+                    continue
+                text = self._fill_template(content or "{body}", body=body)
+            elif key == "project":
+                body = (self.project_context or "").strip()
+                if not body:
+                    continue
+                text = self._fill_template(content or "{body}", body=body)
+            elif key == "date":
+                text = self._fill_template(content, today=today, weekday=weekday)
+            elif key.startswith("custom_") or key not in (
+                "memory_suffix", "skill_suffix", "plan_prompt",
+            ):
+                # Custom / unknown static system blocks
+                text = content.strip()
+            else:
+                continue
+
+            if text and text.strip():
+                parts.append(text.strip())
+
+        return "\n\n".join(parts) if parts else (
+            getattr(self.agent, "system_prompt", None) or "你是一个智能助手。"
         )
-        if self.knowledge_context:
-            system_prompt += self.knowledge_context
+
+    def _skill_user_suffix(self) -> str:
+        """Skill body + efficiency hints for current-turn user message only."""
+        if not self._ctx_enabled("skill_suffix", default=True):
+            return ""
+        parts: List[str] = []
         if self.skill_context:
             truncated = self.skill_context
             if len(truncated) > self.SKILL_MAX_CHARS:
                 truncated = truncated[:self.SKILL_MAX_CHARS] + "\n\n[Skill 内容过长，已截断，请关注核心指令]"
-            system_prompt += truncated
+            parts.append(truncated.strip())
         if self.active_skill_name:
             if self.execution_hints:
-                system_prompt += f"\n\n## Skill 执行效率\n{self.execution_hints}"
+                parts.append(f"## Skill 执行效率\n{self.execution_hints}")
             else:
                 search_tool = get_active_web_search_tool_name()
-                system_prompt += (
-                    "\n\n## Skill 执行效率\n"
+                parts.append(
+                    "## Skill 执行效率\n"
                     "已匹配 Skill，请在 3 轮工具调用内完成信息采集并输出最终结果。"
                     "A股实时行情优先用 web_extract 抓取 qt.gtimg.cn 或 eastmoney 行情接口；"
                     f"{search_tool} 最多 2 次，避免重复搜索。"
                     "信息足够后立即输出报告，不要继续调用工具。"
                 )
-        if self._memory_context:
-            system_prompt += (
-                "\n\n## 长期记忆使用要求\n"
-                "系统已注入你的长期记忆（核心偏好与/或归档召回）。"
-                "当用户问题能被这些记忆回答时，你必须优先使用记忆中的事实与代号，"
-                "不得声称「无法确认」或编造冲突信息。"
-            )
-            system_prompt += self._memory_context
-        if self.connector_context:
-            system_prompt += f"\n\n## 连接器\n{self.connector_context}"
-        has_cu = any(
-            (getattr(t, "name", "") or "").startswith("cu_")
-            for t in (self.available_tools or [])
+        if not parts:
+            return ""
+        body = "\n\n".join(parts)
+        block = self._ctx_block("skill_suffix")
+        template = (block or {}).get("content") or (
+            "---\n【系统附注·Skill·必须遵从】\n{body}"
         )
-        if has_cu:
-            try:
-                from models import ScreenSystem
+        filled = self._fill_template(template, body=body).strip()
+        return ("\n\n" + filled) if filled else ""
 
-                active_systems = (
-                    self.db.query(ScreenSystem)
-                    .filter(ScreenSystem.status == "ACTIVE")
-                    .order_by(ScreenSystem.name.asc())
-                    .all()
-                )
-                if active_systems:
-                    lines = []
-                    for s in active_systems:
-                        lines.append(
-                            f"- name={s.name}; system_id={s.system_id}; entry_url={s.entry_url or ''}"
-                        )
-                    system_prompt += (
-                        "\n\n【驭屏已注册系统】调用 cu_navigate / cu_run_task 时，"
-                        "system_id 必须使用下列 name 或 UUID（也可使用 entry_url 中的域名词，如 asiainfo）；"
-                        "优先省略 url，使用 entry_url，勿猜测官网域名。\n"
-                        + "\n".join(lines)
-                    )
-            except Exception:
-                pass
-            has_skill_tools = any(
-                (getattr(t, "name", "") or "") in (
-                    "cu_search_skills", "cu_replay_skill", "cu_run_task",
-                    "ui_search_skills", "ui_replay_skill",
-                )
-                for t in (self.available_tools or [])
-            )
-            if has_skill_tools:
-                system_prompt += (
-                    "\n\n【驭屏 UI 技能优先】执行浏览器/驭屏任务时：\n"
-                    "1. 必须先 cu_search_skills(query=用户任务) 或直接 cu_run_task(system_id, goal=用户任务)；\n"
-                    "2. 若检索命中 ACTIVE 技能，必须 cu_navigate 拿到 screen_session_id 后调用 "
-                    "cu_replay_skill(skill_id, screen_session_id)，按技能库步骤执行；\n"
-                    "3. 禁止在未检索技能库的情况下直接逐步 cu_act 完成可通过技能重放的任务；"
-                    "仅当检索无命中或 cu_replay_skill 返回 needs_replan 时，才允许 cu_observe/cu_act 临时操作。\n"
-                )
-        has_code_exec = any(
-            (getattr(t, "name", "") or "") == "execute_code"
-            for t in (self.available_tools or [])
-        )
-        if has_code_exec:
-            ws_hint = os.path.join(
-                os.path.dirname(os.path.dirname(__file__)),
-                "data", "workspaces", self.session.session_id,
-            )
-            system_prompt += (
-                "\n\n【Code Interpreter 使用规范】\n"
-                "1. 涉及数值计算、统计分析、数据处理时，必须写代码执行，禁止心算。\n"
-                "2. 使用 execute_code 工具执行 Python；同一会话内变量与文件跨调用保留。\n"
-                f"3. 工作区路径: {ws_hint}；产物保存到 outputs/ 子目录或使用 plt.show() 自动出图。\n"
-                "4. 代码报错时阅读 traceback，修正后重试；连续失败 3 次应换思路。\n"
-                "5. 缺少依赖时用 install_packages 安装白名单内的包。\n"
-            )
-        if self.tool_loading_cfg.is_deferred() and self._deferred_tool_names():
-            system_prompt += (
-                "\n\n【工具延迟加载 / Tool Search】\n"
-                "平台内置工具已全部出现在可用工具列表中，可直接调用，无需 tool_search。\n"
-                "tool_search 仅用于查找并激活用户安装（MCP/自定义）且尚未加载的工具。"
-                "不要猜测未激活工具的名称；若无命中请换关键词。\n"
-                "已激活的工具会在下一轮对话中出现在可用工具列表中。\n"
-            )
-        return system_prompt
+    @staticmethod
+    def _append_text_to_user_content(content: Any, suffix: str) -> Any:
+        if not suffix:
+            return content
+        if isinstance(content, list):
+            blocks = list(content)
+            for i, block in enumerate(blocks):
+                if isinstance(block, dict) and block.get("type") == "text":
+                    blocks[i] = {
+                        **block,
+                        "text": (block.get("text") or "") + suffix,
+                    }
+                    return blocks
+            return [{"type": "text", "text": suffix.strip()}] + blocks
+        base = content if isinstance(content, str) else (str(content) if content else "")
+        return (base + suffix) if base else suffix.strip()
+
+    def _llm_user_content_for_turn(self) -> Any:
+        """Current-turn user content for the LLM (may include memory + skill)."""
+        content = self.user_message
+        skill_suffix = self._skill_user_suffix()
+        if skill_suffix:
+            content = self._append_text_to_user_content(content, skill_suffix)
+        return content
 
     def _session_msg_to_llm(self, msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         role = msg.get("role")
@@ -1925,13 +2056,25 @@ class AgentLoop:
 
     def _build_initial_messages(self) -> List[Dict[str, Any]]:
         messages = [{"role": "system", "content": self._build_system_prompt()}]
+        turn_user = self._llm_user_content_for_turn()
 
         if not self.skip_history:
             history = self.session.messages or []
-            for msg in history[-self.MAX_CONTEXT_MESSAGES:]:
+            mapped: List[Dict[str, Any]] = []
+            for msg in history:
                 llm_msg = self._session_msg_to_llm(msg)
                 if llm_msg:
-                    messages.append(llm_msg)
+                    mapped.append(llm_msg)
+            # Digest + tail when history exceeds the window (KV-stable sliding window).
+            if len(mapped) > self.MAX_CONTEXT_MESSAGES:
+                dropped = mapped[: -self.MAX_CONTEXT_MESSAGES]
+                kept = mapped[-self.MAX_CONTEXT_MESSAGES :]
+                digest = self._build_history_digest(dropped)
+                if digest:
+                    messages.append(digest)
+                messages.extend(kept)
+            else:
+                messages.extend(mapped)
 
         last_stored = (self.session.messages or [])[-1] if self.session.messages else None
         already_has_user = (
@@ -1941,11 +2084,11 @@ class AgentLoop:
         )
         if already_has_user:
             if messages and messages[-1].get("role") == "user":
-                messages[-1] = {"role": "user", "content": self.user_message}
+                messages[-1] = {"role": "user", "content": turn_user}
             else:
-                messages.append({"role": "user", "content": self.user_message})
+                messages.append({"role": "user", "content": turn_user})
         else:
-            messages.append({"role": "user", "content": self.user_message})
+            messages.append({"role": "user", "content": turn_user})
         return self._sanitize_messages_for_llm(messages)
 
     def _build_user_history_entry(self) -> Dict[str, Any]:
@@ -1967,12 +2110,75 @@ class AgentLoop:
             history.append(self._build_user_history_entry())
         return history + extra_messages
 
+    def _message_preview_for_digest(self, msg: Dict[str, Any]) -> str:
+        role = msg.get("role") or "unknown"
+        if role == "tool":
+            preview = self._content_to_str(msg.get("content", ""))[: self.DIGEST_PREVIEW_CHARS]
+            tcid = (msg.get("tool_call_id") or "")[:12]
+            return f"- tool({tcid}): {preview}"
+        if role == "assistant" and msg.get("tool_calls"):
+            names = []
+            for tc in msg.get("tool_calls") or []:
+                names.append((tc.get("function") or {}).get("name") or "?")
+            preview = self._content_to_str(msg.get("content", ""))[: self.DIGEST_PREVIEW_CHARS]
+            tools_s = ",".join(names)[:80]
+            return f"- assistant[tools={tools_s}]: {preview}"
+        preview = self._content_to_str(msg.get("content", ""))[: self.DIGEST_PREVIEW_CHARS]
+        return f"- {role}: {preview}"
+
+    def _build_history_digest(self, dropped: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if not dropped:
+            return None
+        lines = ["【上下文摘要·已截断较早回合】"]
+        for msg in dropped:
+            lines.append(self._message_preview_for_digest(msg))
+        text = "\n".join(lines)
+        if len(text) > self.DIGEST_MAX_CHARS:
+            text = text[: self.DIGEST_MAX_CHARS] + "\n…"
+        return {"role": "user", "content": text}
+
+    def _is_context_digest(self, msg: Dict[str, Any]) -> bool:
+        content = msg.get("content") or ""
+        return (
+            msg.get("role") == "user"
+            and isinstance(content, str)
+            and content.startswith("【上下文摘要·已截断较早回合】")
+        )
+
     def _truncate_context(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        if len(messages) <= self.MAX_CONTEXT_MESSAGES + 1:
+        """Keep system + optional digest of dropped prefix + recent tail (KV-friendly)."""
+        if not messages:
             return messages
 
         system_msg = messages[0]
-        recent = messages[-(self.MAX_CONTEXT_MESSAGES):]
+        body = messages[1:]
+        prior_digests: List[Dict[str, Any]] = []
+        rest: List[Dict[str, Any]] = []
+        for msg in body:
+            if self._is_context_digest(msg):
+                prior_digests.append(msg)
+            else:
+                rest.append(msg)
+
+        if len(rest) <= self.MAX_CONTEXT_MESSAGES:
+            if not prior_digests:
+                return messages
+            # Normalize to a single digest + tail (drop duplicate digests).
+            out = [system_msg, prior_digests[-1]] + rest
+            return self._sanitize_messages_for_llm(out)
+
+        dropped = rest[: -self.MAX_CONTEXT_MESSAGES]
+        recent = rest[-self.MAX_CONTEXT_MESSAGES :]
+
+        to_digest: List[Dict[str, Any]] = []
+        # Fold prior digest text forward so early-turn previews are not lost.
+        for d in prior_digests:
+            to_digest.append({
+                "role": "user",
+                "content": AgentLoop._content_to_str(d.get("content", ""))[: self.DIGEST_PREVIEW_CHARS * 4],
+            })
+        to_digest.extend(dropped)
+        digest_msg = self._build_history_digest(to_digest)
 
         tool_ids_seen = set()
         orphan_tool_messages = []
@@ -1988,8 +2194,12 @@ class AgentLoop:
                             "content": "[工具结果已截断]",
                         })
 
-        truncated = [system_msg] + orphan_tool_messages + recent
-        return truncated
+        truncated = [system_msg]
+        if digest_msg:
+            truncated.append(digest_msg)
+        truncated.extend(orphan_tool_messages)
+        truncated.extend(recent)
+        return self._sanitize_messages_for_llm(truncated)
 
     def _check_token_budget(self, estimated_tokens: int):
         current = self.session.token_used or 0
@@ -2090,6 +2300,9 @@ class AgentLoop:
 
         usage = completion.get("usage", {})
         self.total_tokens_used += usage.get("total_tokens", 0)
+        cached = self._extract_cached_tokens(usage)
+        if cached is not None:
+            self.thinking_log.append(f"[KV] cached_tokens={cached}")
         try:
             self._flush_llm_turns_preview()
         except Exception:
@@ -2099,6 +2312,23 @@ class AgentLoop:
         except Exception:
             pass
         return completion
+
+    @staticmethod
+    def _extract_cached_tokens(usage: Dict[str, Any]) -> Optional[int]:
+        """Best-effort cached/prefix token count from OpenAI-compatible usage blobs."""
+        if not usage or not isinstance(usage, dict):
+            return None
+        for key in ("cache_read_input_tokens", "cached_tokens"):
+            val = usage.get(key)
+            if isinstance(val, (int, float)):
+                return int(val)
+        details = usage.get("prompt_tokens_details") or usage.get("input_tokens_details")
+        if isinstance(details, dict):
+            for key in ("cached_tokens", "cache_read_input_tokens"):
+                val = details.get(key)
+                if isinstance(val, (int, float)):
+                    return int(val)
+        return None
 
     def _on_llm_delta(self, kind: str, text: str) -> None:
         from services.session_events import publish_thinking_delta
@@ -3050,7 +3280,14 @@ class AgentLoop:
                 attrs_for_tool(tool_name=tool.name, parameters=args),
             ) as span:
                 try:
-                    result = await execute_builtin_tool(tool.name, args, self.output_dir)
+                    from services.tool_runtime_context import tool_auth_context
+                    with tool_auth_context(
+                        None,
+                        None,
+                        allowed_kb_ids=self.allowed_kb_ids,
+                        exclude_project_kbs=True,
+                    ):
+                        result = await execute_builtin_tool(tool.name, args, self.output_dir)
                 except Exception as e:
                     result = {"success": False, "error": f"内置工具执行失败: {str(e)}"}
                 set_span_attrs(
@@ -3087,7 +3324,12 @@ class AgentLoop:
         last_error = None
         for attempt in range(self.tool_retry_count + 1):
             try:
-                with tool_auth_context(api_token, caller_id):
+                with tool_auth_context(
+                    api_token,
+                    caller_id,
+                    allowed_kb_ids=self.allowed_kb_ids,
+                    exclude_project_kbs=True,
+                ):
                     result = await tool_execution_service.execute_tool(
                         tool, args, timeout_seconds=self.step_timeout
                     )
@@ -3508,14 +3750,28 @@ class AgentLoop:
     def _build_tool_defs(available_tools: list) -> list:
         from services.tool_service import tool_execution_service
 
+        # Stable name order reduces JSON byte jitter for prefix/KV cache.
+        ordered = sorted(
+            available_tools or [],
+            key=lambda t: (getattr(t, "name", None) or ""),
+        )
         defs = []
-        for t in available_tools:
+        for t in ordered:
             if isinstance(t, BuiltinTool):
                 defs.append(build_builtin_openai_tool_def(t))
             else:
                 defs.append(tool_execution_service.build_openai_tool_def(t))
         return defs
 
+    @staticmethod
+    def _tools_fingerprint(openai_tools: Optional[List[Dict[str, Any]]]) -> str:
+        if not openai_tools:
+            return ""
+        names = []
+        for td in openai_tools:
+            fn = (td.get("function") or {}) if isinstance(td, dict) else {}
+            names.append(fn.get("name") or "")
+        return "|".join(names)
     def _abort_if_requested(self) -> Optional[Dict[str, Any]]:
         from services.session_abort import is_aborted
 
@@ -3723,6 +3979,7 @@ class AgentLoop:
         self._abort_mode = "react"
         llm_tools = self._tools_active_for_llm()
         openai_tools = self._build_tool_defs(llm_tools)
+        tools_fp = self._tools_fingerprint(openai_tools)
 
         if self.tool_loading_cfg.is_deferred():
             self.thinking_log.append(
@@ -3749,8 +4006,16 @@ class AgentLoop:
             self.story.mark_iteration(iteration, self.max_iterations)
             tavily_this_iter = 0
 
+            # Only rebuild tools when the active set changes (e.g. tool_search activation).
             llm_tools = self._tools_active_for_llm()
-            openai_tools = self._build_tool_defs(llm_tools) if llm_tools else None
+            next_tools = self._build_tool_defs(llm_tools) if llm_tools else None
+            next_fp = self._tools_fingerprint(next_tools)
+            if next_fp != tools_fp:
+                openai_tools = next_tools
+                tools_fp = next_fp
+                self.thinking_log.append(
+                    f"[ReAct] tools 集合更新: {len(llm_tools) if llm_tools else 0} 个"
+                )
 
             completion = await self._call_llm(messages, tools=openai_tools)
 
@@ -3979,13 +4244,21 @@ class AgentLoop:
         messages = self._build_initial_messages()
         messages = self._truncate_context(messages)
 
-        plan_prompt = (
-            "请先制定一个执行计划。列出需要执行的步骤，每步一行，格式为：\n"
-            "- 步骤N: 描述 [可选: 工具名称]\n"
-            "然后给出最终答案。"
-        )
+        plan_block = self._ctx_block("plan_prompt")
+        if plan_block and not plan_block.get("enabled", True):
+            plan_prompt = ""
+        else:
+            plan_prompt = (
+                (plan_block or {}).get("content")
+                or (
+                    "请先制定一个执行计划。列出需要执行的步骤，每步一行，格式为：\n"
+                    "- 步骤N: 描述 [可选: 工具名称]\n"
+                    "然后给出最终答案。"
+                )
+            ).strip()
         plan_messages = list(messages)
-        plan_messages.append({"role": "user", "content": plan_prompt})
+        if plan_prompt:
+            plan_messages.append({"role": "user", "content": plan_prompt})
 
         plan_completion = await self._call_llm(plan_messages)
 

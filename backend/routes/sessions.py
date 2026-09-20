@@ -32,13 +32,34 @@ from deps import CurrentUser
 router = APIRouter(prefix="/api/v1/sessions", tags=["sessions"])
 
 
-def _get_owned_session(db: Session, user_id: str, session_id: str) -> SessionModel:
+def _get_session_or_404(db: Session, session_id: str) -> SessionModel:
     session = db.query(SessionModel).filter(SessionModel.session_id == session_id).first()
     if not session:
         raise HTTPException(status_code=404, detail="会话不存在")
-    if (session.caller_id or "") != user_id:
+    return session
+
+
+def _require_session_read(db: Session, user_id: str, session_id: str) -> SessionModel:
+    from services import project_service as ps
+
+    session = _get_session_or_404(db, session_id)
+    if not ps.can_read_session(db, session, user_id):
         raise HTTPException(status_code=403, detail="无权访问该会话")
     return session
+
+
+def _require_session_write(db: Session, user_id: str, session_id: str) -> SessionModel:
+    from services import project_service as ps
+
+    session = _get_session_or_404(db, session_id)
+    if not ps.can_write_session(db, session, user_id):
+        raise HTTPException(status_code=403, detail="无权操作该会话")
+    return session
+
+
+def _get_owned_session(db: Session, user_id: str, session_id: str) -> SessionModel:
+    """Backward-compatible alias: write access (own session or project editor)."""
+    return _require_session_write(db, user_id, session_id)
 
 
 def _run_memory_process(session_id: str):
@@ -156,15 +177,23 @@ async def _run_session_chat_background(session_id: str, request_data: Dict[str, 
 
 @router.get("", response_model=PaginatedResponse)
 def list_sessions(
+    user: CurrentUser,
     agent_id: Optional[str] = Query(None),
+    project_id: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
 ):
+    if project_id:
+        from services import project_service as ps
+        ps.require_membership(db, project_id, user.user_id, min_role="viewer")
+
     query = db.query(SessionModel)
     if agent_id:
         query = query.filter(SessionModel.agent_id == agent_id)
+    if project_id:
+        query = query.filter(SessionModel.project_id == project_id)
     if status:
         query = query.filter(SessionModel.status == status)
     total = query.count()
@@ -187,13 +216,21 @@ def create_session(
     user: CurrentUser,
     db: Session = Depends(get_db),
 ):
-    from models import Agent
+    from models import Agent, Project, ProjectStatus
     from services.selfopt.ab_router import assign_for_new_session
+    from services import project_service as ps
 
     caller_id = (data.caller_id or "").strip() or user.user_id
     version_id = data.version_id
     ab_experiment_id = None
     ab_arm = None
+    project_id = (data.project_id or "").strip() or None
+
+    if project_id:
+        project, _ = ps.require_membership(db, project_id, user.user_id, min_role="viewer")
+        status_val = project.status.value if hasattr(project.status, "value") else str(project.status)
+        if status_val == ProjectStatus.ARCHIVED.value:
+            raise HTTPException(status_code=400, detail="已归档项目不能新建会话")
 
     # Only auto-assign when client did not pin a version
     if not version_id:
@@ -207,6 +244,7 @@ def create_session(
     session = SessionModel(
         session_id=gen_uuid(),
         agent_id=data.agent_id,
+        project_id=project_id,
         version_id=version_id,
         caller_type=data.caller_type,
         caller_id=caller_id,
@@ -220,9 +258,14 @@ def create_session(
         ab_arm=ab_arm,
     )
     db.add(session)
+
+    if project_id:
+        project = db.query(Project).filter(Project.project_id == project_id).first()
+        if project:
+            ps.touch_project(db, project, last_agent_id=data.agent_id)
+
     db.commit()
     db.refresh(session)
-
 
     # Connector enablement is resolved at chat time from Agent connector_bindings
     # ∩ user CONNECTED connectors (catalog_key). Session toggles are no longer used.
@@ -281,7 +324,7 @@ def list_session_attachments(
     user: CurrentUser,
     db: Session = Depends(get_db),
 ):
-    session = _get_owned_session(db, user.user_id, session_id)
+    session = _require_session_read(db, user.user_id, session_id)
     items = attachment_service.list_attachments(session)
     attachments = [SessionAttachmentResponse.model_validate(i) for i in items]
     return SessionAttachmentListResponse(attachments=attachments, total=len(attachments))
@@ -311,7 +354,7 @@ def download_session_attachment(
     user: CurrentUser,
     db: Session = Depends(get_db),
 ):
-    session = _get_owned_session(db, user.user_id, session_id)
+    session = _require_session_read(db, user.user_id, session_id)
 
     meta = attachment_service.get_attachment(session, attachment_id)
     if not meta:
@@ -385,27 +428,27 @@ def list_session_llm_calls(session_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/{session_id}", response_model=SessionResponse)
-def get_session(session_id: str, db: Session = Depends(get_db)):
-    session = db.query(SessionModel).filter(
-        SessionModel.session_id == session_id
-    ).first()
-    if not session:
-        raise HTTPException(status_code=404, detail="会话不存在")
+def get_session(session_id: str, user: CurrentUser, db: Session = Depends(get_db)):
+    session = _require_session_read(db, user.user_id, session_id)
+    from services import project_service as ps
     _ensure_files_for_session(session, db)
     ensure_session_title(session)
     session.last_active_at = now_utc()
     db.commit()
-    return SessionResponse.model_validate(session)
+    resp = SessionResponse.model_validate(session)
+    resp.can_write = ps.can_write_session(db, session, user.user_id)
+    return resp
 
 
 @router.get("/{session_id}/events")
-async def session_events(session_id: str, request: Request, db: Session = Depends(get_db)):
+async def session_events(
+    session_id: str,
+    request: Request,
+    user: CurrentUser,
+    db: Session = Depends(get_db),
+):
     """SSE stream of thinking deltas / status for a running session."""
-    session = db.query(SessionModel).filter(
-        SessionModel.session_id == session_id
-    ).first()
-    if not session:
-        raise HTTPException(status_code=404, detail="会话不存在")
+    _require_session_read(db, user.user_id, session_id)
 
     async def _gen():
         async for chunk in sse_event_stream(session_id):
@@ -428,14 +471,11 @@ async def session_events(session_id: str, request: Request, db: Session = Depend
 def mutate_session_messages(
     session_id: str,
     data: SessionMessagesMutateRequest,
+    user: CurrentUser,
     db: Session = Depends(get_db),
 ):
     """Truncate/rewrite session messages for edit / redo / delete of a user turn."""
-    session = db.query(SessionModel).filter(
-        SessionModel.session_id == session_id
-    ).first()
-    if not session:
-        raise HTTPException(status_code=404, detail="会话不存在")
+    session = _require_session_write(db, user.user_id, session_id)
     if session.status == SessionStatus.CLOSED:
         raise HTTPException(status_code=400, detail="会话已关闭")
     if session.status in (SessionStatus.RUNNING, SessionStatus.HITL_WAIT):
@@ -481,12 +521,13 @@ def mutate_session_messages(
 
 
 @router.post("/{session_id}/chat")
-async def chat(session_id: str, data: SessionChatRequest, db: Session = Depends(get_db)):
-    session = db.query(SessionModel).filter(
-        SessionModel.session_id == session_id
-    ).first()
-    if not session:
-        raise HTTPException(status_code=404, detail="会话不存在")
+async def chat(
+    session_id: str,
+    data: SessionChatRequest,
+    user: CurrentUser,
+    db: Session = Depends(get_db),
+):
+    session = _require_session_write(db, user.user_id, session_id)
 
     if session.status == SessionStatus.CLOSED:
         raise HTTPException(status_code=400, detail="会话已关闭")
@@ -519,13 +560,10 @@ async def chat(session_id: str, data: SessionChatRequest, db: Session = Depends(
 async def chat_async(
     session_id: str,
     data: SessionChatRequest,
+    user: CurrentUser,
     db: Session = Depends(get_db),
 ):
-    session = db.query(SessionModel).filter(
-        SessionModel.session_id == session_id
-    ).first()
-    if not session:
-        raise HTTPException(status_code=404, detail="会话不存在")
+    session = _require_session_write(db, user.user_id, session_id)
 
 
     if session.status == SessionStatus.CLOSED:
@@ -631,13 +669,9 @@ async def _close_linked_screenpilot_sessions(db: Session, vela_session_id: str) 
 
 
 @router.post("/{session_id}/abort", response_model=SessionAbortResponse)
-async def abort_session(session_id: str, db: Session = Depends(get_db)):
+async def abort_session(session_id: str, user: CurrentUser, db: Session = Depends(get_db)):
     """Cooperatively abort a RUNNING (or HITL_WAIT) session for any Agent."""
-    session = db.query(SessionModel).filter(
-        SessionModel.session_id == session_id
-    ).first()
-    if not session:
-        raise HTTPException(status_code=404, detail="会话不存在")
+    session = _require_session_write(db, user.user_id, session_id)
 
     if session.status not in (SessionStatus.RUNNING, SessionStatus.HITL_WAIT):
         raise HTTPException(
@@ -731,13 +765,10 @@ async def abort_session(session_id: str, db: Session = Depends(get_db)):
 def close_session(
     session_id: str,
     background_tasks: BackgroundTasks,
+    user: CurrentUser,
     db: Session = Depends(get_db),
 ):
-    session = db.query(SessionModel).filter(
-        SessionModel.session_id == session_id
-    ).first()
-    if not session:
-        raise HTTPException(status_code=404, detail="会话不存在")
+    session = _require_session_write(db, user.user_id, session_id)
     session.status = SessionStatus.CLOSED
     db.commit()
 
@@ -791,12 +822,8 @@ def update_session_connectors(
 
 
 @router.delete("/{session_id}")
-def delete_session(session_id: str, db: Session = Depends(get_db)):
-    session = db.query(SessionModel).filter(
-        SessionModel.session_id == session_id
-    ).first()
-    if not session:
-        raise HTTPException(status_code=404, detail="会话不存在")
+def delete_session(session_id: str, user: CurrentUser, db: Session = Depends(get_db)):
+    session = _require_session_write(db, user.user_id, session_id)
     attachment_service.cleanup_session(session_id)
     db.delete(session)
     db.commit()

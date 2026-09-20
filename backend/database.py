@@ -43,6 +43,7 @@ def init_db():
         ScreenSystem, ScreenCredential, ScreenSession, UiAuditLog, UiSkill, UiSkillStep,
         AgentRun, AgentSpan, AgentScore, AgentFeedback, MonitorAlert,
         EvalDataset, EvalCase, EvalJob, EvalJobResult,
+        Project, ProjectMember, ProjectStar,
     )
     Base.metadata.create_all(bind=engine)
     _migrate_db()
@@ -519,6 +520,11 @@ def _migrate_db():
             cursor.execute("ALTER TABLE sessions ADD COLUMN ab_experiment_id VARCHAR")
         if "ab_arm" not in sess_cols:
             cursor.execute("ALTER TABLE sessions ADD COLUMN ab_arm VARCHAR(16)")
+        if "project_id" not in sess_cols:
+            cursor.execute("ALTER TABLE sessions ADD COLUMN project_id VARCHAR")
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS ix_sessions_project_id ON sessions(project_id)"
+            )
 
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='agent_runs'")
     if cursor.fetchone():
@@ -566,6 +572,32 @@ def _migrate_db():
                 "UPDATE selfopt_jobs SET job_label = ? WHERE job_id = ?",
                 (label, job_id),
             )
+
+    # Agent context blocks (Agent × execution_mode overrides)
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS agent_context_blocks (
+            block_id VARCHAR PRIMARY KEY,
+            agent_id VARCHAR NOT NULL,
+            execution_mode VARCHAR(32) NOT NULL,
+            block_key VARCHAR(64) NOT NULL,
+            title VARCHAR(128) DEFAULT '',
+            placement VARCHAR(32) DEFAULT 'system',
+            source VARCHAR(32) DEFAULT 'static',
+            content TEXT DEFAULT '',
+            enabled BOOLEAN DEFAULT 1,
+            sort_order INTEGER DEFAULT 0,
+            deletable BOOLEAN DEFAULT 0,
+            created_at DATETIME,
+            updated_at DATETIME,
+            UNIQUE (agent_id, execution_mode, block_key)
+        )
+        """
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS ix_agent_context_blocks_agent_id "
+        "ON agent_context_blocks (agent_id)"
+    )
 
     conn.commit()
     conn.close()

@@ -52,6 +52,9 @@ def list_knowledge_bases(
     query = db.query(KnowledgeBase)
     if scope:
         query = query.filter(KnowledgeBase.scope == scope)
+    else:
+        # Hide project-scoped KBs from the platform knowledge UI by default
+        query = query.filter(KnowledgeBase.scope != "project")
     if status:
         query = query.filter(KnowledgeBase.status == status)
     total = query.count()

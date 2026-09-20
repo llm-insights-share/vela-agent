@@ -500,6 +500,7 @@ class KnowledgeChunkListResponse(BaseModel):
 
 class SessionCreate(BaseModel):
     agent_id: str
+    project_id: Optional[str] = None
     version_id: Optional[str] = None
     caller_type: str = Field(default="USER")
     caller_id: str = Field(default="")
@@ -573,6 +574,7 @@ class SessionAbortResponse(BaseModel):
 class SessionResponse(BaseModel):
     session_id: str
     agent_id: str
+    project_id: Optional[str] = None
     version_id: Optional[str] = None
     caller_type: str = "USER"
     caller_id: str = ""
@@ -588,8 +590,70 @@ class SessionResponse(BaseModel):
     ab_arm: Optional[str] = None
     created_at: Optional[datetime] = None
     last_active_at: Optional[datetime] = None
+    # Optional enrichments (project session list)
+    agent_name: Optional[str] = None
+    caller_display_name: Optional[str] = None
+    can_write: Optional[bool] = None
 
     model_config = {"from_attributes": True}
+
+
+# ─── Projects (Claude-style workspace) ───────────────────────────────────────
+
+class ProjectCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=128)
+    description: str = Field(default="", max_length=4096)
+
+
+class ProjectUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=128)
+    description: Optional[str] = Field(default=None, max_length=4096)
+    instructions: Optional[str] = None
+    status: Optional[str] = Field(default=None, pattern="^(ACTIVE|ARCHIVED)$")
+    last_agent_id: Optional[str] = None
+
+
+class ProjectMemberAdd(BaseModel):
+    username: str = Field(..., min_length=1, max_length=64)
+    role: str = Field(default="viewer", pattern="^(owner|editor|viewer)$")
+
+
+class ProjectMemberUpdate(BaseModel):
+    role: str = Field(..., pattern="^(owner|editor|viewer)$")
+
+
+class ProjectMemberOut(BaseModel):
+    user_id: str
+    username: str = ""
+    display_name: str = ""
+    role: str
+    created_at: Optional[datetime] = None
+
+
+class ProjectResponse(BaseModel):
+    project_id: str
+    name: str
+    description: str = ""
+    instructions: str = ""
+    owner_id: str
+    kb_id: Optional[str] = None
+    status: str = "ACTIVE"
+    last_agent_id: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    my_role: Optional[str] = None
+    starred: bool = False
+    file_count: int = 0
+    session_count: int = 0
+    member_count: int = 0
+
+    model_config = {"from_attributes": True}
+
+
+class UserSearchHit(BaseModel):
+    user_id: str
+    username: str
+    display_name: str = ""
 
 
 class ScheduleCreate(BaseModel):
@@ -1496,3 +1560,46 @@ class CodeExecConfigUpdate(BaseModel):
     allow_install: Optional[bool] = None
     package_allowlist: Optional[List[str]] = None
     state_persist: Optional[bool] = None
+
+
+# ── Agent context blocks (Agent × execution mode) ───────────────────────────
+
+class ContextBlockItem(BaseModel):
+    block_id: Optional[str] = None
+    agent_id: Optional[str] = None
+    execution_mode: Optional[str] = None
+    block_key: str
+    title: str = ""
+    placement: str = Field(default="system", pattern="^(system|user_suffix|mode_inject)$")
+    source: str = Field(default="static", pattern="^(static|dynamic|builtin_template)$")
+    content: str = ""
+    enabled: bool = True
+    sort_order: int = 0
+    deletable: bool = False
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class ContextBlockListResponse(BaseModel):
+    execution_mode: str
+    items: List[ContextBlockItem] = Field(default_factory=list)
+
+
+class ContextBlockReplaceRequest(BaseModel):
+    items: List[ContextBlockItem] = Field(default_factory=list)
+
+
+class ContextBlockPreviewRequest(BaseModel):
+    execution_mode: str = Field(default="auto", pattern="^(auto|react|plan_and_execute|direct)$")
+    sample_user: Optional[str] = None
+    connector_context: Optional[str] = None
+    knowledge_context: Optional[str] = None
+    project_context: Optional[str] = None
+
+
+class ContextBlockPreviewResponse(BaseModel):
+    execution_mode: str
+    system: str = ""
+    user_suffix: str = ""
+    mode_inject: str = ""
+    blocks: List[ContextBlockItem] = Field(default_factory=list)
