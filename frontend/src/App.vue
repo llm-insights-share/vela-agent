@@ -78,7 +78,7 @@
     </a-layout-sider>
     <a-layout>
       <a-layout-header class="header">
-        <span class="header-title">Agent Playground</span>
+        <span class="header-title">Agent Playground <span class="header-ver">{{ appVersion }}</span></span>
         <div class="header-user">
           <a-popover
             v-model:open="inboxOpen"
@@ -160,10 +160,12 @@ import { useAuthStore } from './stores/auth'
 import { inboxApi } from './api'
 import { formatDateTimeShort } from './utils/datetime'
 import OpsCommandFab from './components/OpsCommandFab.vue'
+import { APP_VERSION } from './version'
 
 const router = useRouter()
 const route = useRoute()
 const auth = useAuthStore()
+const appVersion = APP_VERSION
 const collapsed = ref(false)
 const selectedKeys = ref(['/'])
 const inboxUnread = ref(0)
@@ -315,6 +317,11 @@ function onUserMenuClick({ key }) {
   font-size: 11px;
   color: rgba(255, 255, 255, 0.5);
   letter-spacing: 0.1em;
+}
+.header-ver {
+  margin-left: 8px;
+  color: rgba(255, 255, 255, 0.28);
+  letter-spacing: 0.06em;
 }
 .header-user {
   display: flex;

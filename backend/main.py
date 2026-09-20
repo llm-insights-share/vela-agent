@@ -7,6 +7,7 @@ os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
+from version import __version__
 from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -50,7 +51,7 @@ from routes.selfopt import router as selfopt_router
 app = FastAPI(
     title="Vela Agent Playground API",
     description="Agent Playground — Agent 管理与编排平台",
-    version="1.0.0",
+    version=__version__,
 )
 
 app.add_middleware(
@@ -118,21 +119,6 @@ def seed_admin() -> None:
     finally:
         db.close()
 
-# #region agent log
-try:
-    import json as _json, time as _time
-    with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-66b153.log", "a") as _f:
-        _f.write(_json.dumps({
-            "sessionId": "66b153", "runId": "startup", "hypothesisId": "H1",
-            "location": "main.py:import",
-            "message": "main app imported successfully",
-            "data": {"title": app.title, "version": app.version},
-            "timestamp": int(_time.time() * 1000),
-        }, ensure_ascii=False) + "\n")
-except Exception:
-    pass
-# #endregion
-
 
 def _recover_stale_running_sessions():
     """服务重启后，在途后台任务已丢失，将 RUNNING 会话标记为 ERROR。"""
@@ -145,26 +131,6 @@ def _recover_stale_running_sessions():
         running_sessions = db.query(SessionModel).filter(
             SessionModel.status == SessionStatus.RUNNING
         ).all()
-        # #region agent log
-        try:
-            import json as _json, time as _time
-            with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-0e582a.log", "a") as _f:
-                _f.write(_json.dumps({
-                    "sessionId": "0e582a",
-                    "runId": "startup-recover",
-                    "hypothesisId": "H1",
-                    "location": "main.py:_recover_stale_running_sessions",
-                    "message": "recover stale RUNNING sessions on startup",
-                    "data": {
-                        "count": len(running_sessions),
-                        "session_ids": [s.session_id for s in running_sessions][:20],
-                        "titles": [(s.title or "")[:40] for s in running_sessions][:10],
-                    },
-                    "timestamp": int(_time.time() * 1000),
-                }, ensure_ascii=False) + "\n")
-        except Exception:
-            pass
-        # #endregion
         for session in running_sessions:
             messages = list(session.messages or [])
             messages.append({
@@ -287,7 +253,7 @@ async def on_shutdown():
 
 @app.get("/api/v1/health")
 def health_check():
-    return {"status": "ok", "service": "Vela Agent Playground"}
+    return {"status": "ok", "service": "Vela Agent Playground", "version": app.version}
 
 
 MIME_TYPES = {

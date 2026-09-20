@@ -5,7 +5,7 @@
         <div class="logo-dot"></div>
         <div>
           <div class="login-title">Vela · 织帆</div>
-          <div class="login-sub">Agent Playground</div>
+          <div class="login-sub">Agent Playground · {{ appVersion }}</div>
         </div>
       </div>
       <a-form :model="formState" layout="vertical" @finish="onSubmit">
@@ -36,10 +36,12 @@ import { reactive, ref } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { message } from 'ant-design-vue'
 import { useAuthStore } from '../../stores/auth'
+import { APP_VERSION } from '../../version'
 
 const auth = useAuthStore()
 const router = useRouter()
 const route = useRoute()
+const appVersion = APP_VERSION
 const formState = reactive({
   username: 'admin',
   password: 'admin123',
