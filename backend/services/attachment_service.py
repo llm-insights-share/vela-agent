@@ -771,6 +771,26 @@ class AttachmentService:
         content_blocks.extend(image_blocks)
         return content_blocks
 
+    @staticmethod
+    def flatten_user_content(content: Union[str, List[Dict[str, Any]], None]) -> str:
+        """Flatten multimodal user content to a string for text-only engines (WF/MA)."""
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: List[str] = []
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type")
+                if btype == "text":
+                    parts.append(block.get("text") or "")
+                elif btype == "image_url":
+                    parts.append("[图像附件]")
+            return "\n".join(p for p in parts if p).strip()
+        return str(content)
+
     def list_image_attachments(
         self,
         session,

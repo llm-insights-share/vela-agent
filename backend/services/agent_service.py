@@ -483,17 +483,186 @@ class AgentService:
         return agent
 
     @staticmethod
+    def _user_turn_entry(
+        original_message: str,
+        attachment_metadata: Optional[List[Dict[str, str]]] = None,
+    ) -> Dict[str, Any]:
+        entry: Dict[str, Any] = {"role": "user", "content": original_message}
+        if attachment_metadata:
+            entry["attachments"] = attachment_metadata
+        return entry
+
+    @staticmethod
+    async def _prepare_attachment_turn(
+        db: Session,
+        session: SessionModel,
+        message: str,
+        attachment_ids: Optional[List[str]],
+        attachment_scope: str,
+        provider: ModelProvider,
+        model_svc: ModelService,
+        aux_provider: Optional[ModelProvider] = None,
+        aux_model_svc: Optional[ModelService] = None,
+        *,
+        original_message: Optional[str] = None,
+        text_only: bool = False,
+    ) -> Dict[str, Any]:
+        """Resolve session attachments, OCR pending units, and build turn context.
+
+        text_only=True (workflow / multi-agent) always transcribes visuals and
+        returns a string. SINGLE keeps multimodal blocks + aux model routing.
+        """
+        from services.attachment_service import attachment_service, model_supports_vision
+
+        original = (original_message if original_message is not None else (message or "")).strip()
+        retrieval_message = (message or "").strip() or original
+        if not original and attachment_ids:
+            original = "请分析附件"
+            retrieval_message = original
+        if not retrieval_message and attachment_ids:
+            retrieval_message = "请分析附件"
+
+        all_attachment_ids, new_attachment_ids = attachment_service.resolve_turn_attachment_ids(
+            session, attachment_ids, scope=attachment_scope or "session",
+        )
+        if not original and all_attachment_ids and not attachment_ids:
+            original = "请分析附件"
+            if not retrieval_message:
+                retrieval_message = original
+
+        prepared: Any = retrieval_message or original
+        attachment_metadata: List[Dict[str, str]] = []
+        model_route = "primary"
+
+        if not all_attachment_ids:
+            return {
+                "original_message": original,
+                "prepared_message": prepared,
+                "attachment_metadata": attachment_metadata,
+                "all_attachment_ids": all_attachment_ids,
+                "new_attachment_ids": new_attachment_ids,
+                "provider": provider,
+                "model_svc": model_svc,
+                "model_route": model_route,
+            }
+
+        required_modalities = ["text"]
+        new_images = attachment_service.list_image_attachments(session, new_attachment_ids)
+        pending_visual = attachment_service.ids_needing_vision_ocr(
+            session,
+            all_attachment_ids,
+            message=retrieval_message,
+            history=session.messages or [],
+        )
+        if new_images or pending_visual:
+            required_modalities.append("vision")
+
+        if not text_only:
+            provider, model_svc, model_route = resolve_effective_model(
+                primary_provider=provider,
+                primary_model_svc=model_svc,
+                aux_provider=aux_provider,
+                aux_model_svc=aux_model_svc,
+                required_modalities=required_modalities,
+            )
+
+        vision_capable = model_supports_vision(
+            model_svc.capabilities or [],
+            model_name=getattr(model_svc, "model_name", None),
+        )
+        need_persist_ocr = bool(pending_visual)
+        if text_only:
+            if need_persist_ocr:
+                try:
+                    await attachment_service.transcribe_units(
+                        db,
+                        session,
+                        pending_visual,
+                        message=retrieval_message,
+                        history=session.messages or [],
+                    )
+                except Exception as e:
+                    print(f"[AgentService] text-only 路径附件转写失败: {e}")
+            text_suffix, _image_blocks, attachment_metadata = attachment_service.build_context(
+                session=session,
+                message=retrieval_message,
+                attachment_ids=all_attachment_ids,
+                history=session.messages or [],
+                model_capabilities=[],
+                model_name="",
+                new_attachment_ids=new_attachment_ids,
+            )
+            prepared = attachment_service.flatten_user_content(
+                attachment_service.build_user_content(retrieval_message, text_suffix, None)
+            )
+        else:
+            if need_persist_ocr and model_route != "aux":
+                from services.attachment_retrieve import resolve_intent
+                intent = resolve_intent(retrieval_message)
+                skip_pre_ocr = (
+                    vision_capable
+                    and intent.kind == "page"
+                    and bool(new_images)
+                )
+                if not skip_pre_ocr:
+                    await attachment_service.transcribe_units(
+                        db,
+                        session,
+                        pending_visual,
+                        message=retrieval_message,
+                        history=session.messages or [],
+                    )
+
+            text_suffix, image_blocks, attachment_metadata = attachment_service.build_context(
+                session=session,
+                message=retrieval_message,
+                attachment_ids=all_attachment_ids,
+                history=session.messages or [],
+                model_capabilities=model_svc.capabilities or [],
+                model_name=getattr(model_svc, "model_name", None),
+                new_attachment_ids=new_attachment_ids,
+            )
+            prepared = attachment_service.build_user_content(
+                retrieval_message, text_suffix, image_blocks
+            )
+            if need_persist_ocr and model_route == "aux":
+                try:
+                    await attachment_service.transcribe_units(
+                        db,
+                        session,
+                        pending_visual,
+                        message=retrieval_message,
+                        history=session.messages or [],
+                    )
+                except Exception as e:
+                    print(f"[AgentService] aux 路径附件转写落盘失败: {e}")
+
+        return {
+            "original_message": original,
+            "prepared_message": prepared,
+            "attachment_metadata": attachment_metadata,
+            "all_attachment_ids": all_attachment_ids,
+            "new_attachment_ids": new_attachment_ids,
+            "provider": provider,
+            "model_svc": model_svc,
+            "model_route": model_route,
+        }
+
+    @staticmethod
     async def _finalize_workflow_chat(
         db: Session,
         session: SessionModel,
         message: str,
         result: Dict[str, Any],
         persist_user_message: bool = True,
+        original_message: Optional[str] = None,
+        attachment_metadata: Optional[List[Dict[str, str]]] = None,
     ) -> Dict[str, Any]:
         """WF: 统一处理工作流 chat 响应与 session 写入"""
         messages = session.messages or []
-        if persist_user_message and message and message.strip():
-            messages.append({"role": "user", "content": message})
+        persist_content = (original_message if original_message is not None else message) or ""
+        if persist_user_message and persist_content.strip():
+            messages.append(AgentService._user_turn_entry(persist_content, attachment_metadata))
 
         pending_approval_id = result.get("pending_approval_id")
         status = result.get("status", "")
@@ -833,6 +1002,11 @@ class AgentService:
 
             # MA: 如果是 COMPOSITE 类型，走 CoordinatorEngine
             if agent.agent_type == AgentType.COMPOSITE:
+                prep = await AgentService._prepare_attachment_turn(
+                    db, session, message, attachment_ids, attachment_scope,
+                    provider, model_svc, aux_provider, aux_model_svc,
+                    text_only=True,
+                )
                 from services.coordinator_service import CoordinatorEngine
                 coordinator = CoordinatorEngine(
                     db=db,
@@ -847,14 +1021,19 @@ class AgentService:
                 # Multi-agent runs sub-agents sequentially across rounds; 1x agent timeout is too short
                 coord_timeout = min(max(base_to, base_to * rounds), 1800.0)
                 result = await asyncio.wait_for(
-                    coordinator.run(message),
+                    coordinator.run(prep["prepared_message"]),
                     timeout=coord_timeout,
                 )
                 # 写入 session 消息历史（HITL 挂起时不写 final_result，留待审批通过后再写）
                 from sqlalchemy.orm.attributes import flag_modified
                 messages = list(session.messages or [])
                 if persist_user_message:
-                    messages.append({"role": "user", "content": message})
+                    persist_content = prep["original_message"] or message or "请分析附件"
+                    messages.append(
+                        AgentService._user_turn_entry(
+                            persist_content, prep["attachment_metadata"]
+                        )
+                    )
                 pending_approval_id = result.get("pending_approval_id")
                 if not pending_approval_id:
                     messages.append({
@@ -908,22 +1087,25 @@ class AgentService:
 
             # WF: 工作流型 Agent
             if agent.agent_type == AgentType.WORKFLOW:
-                if attachment_ids:
-                    message = (
-                        (message or "").rstrip()
-                        + "\n\n[系统提示] 工作流模式暂不支持附件解析，附件内容未注入工作流。"
-                    )
+                prep = await AgentService._prepare_attachment_turn(
+                    db, session, message, attachment_ids, attachment_scope,
+                    provider, model_svc, aux_provider, aux_model_svc,
+                    text_only=True,
+                )
                 from services.workflow_engine import WorkflowEngine
                 engine = WorkflowEngine(
                     db=db, agent=agent, session=session,
                     provider=provider, model_svc=model_svc,
                 )
                 result = await asyncio.wait_for(
-                    engine.run(message),
+                    engine.run(prep["prepared_message"]),
                     timeout=float(timeout_seconds) if timeout_seconds else 300.0,
                 )
                 return await AgentService._finalize_workflow_chat(
-                    db, session, message, result, persist_user_message=persist_user_message
+                    db, session, message, result,
+                    persist_user_message=persist_user_message,
+                    original_message=prep["original_message"] or message,
+                    attachment_metadata=prep["attachment_metadata"],
                 )
 
             original_message = message.strip() if message else ""
@@ -933,9 +1115,9 @@ class AgentService:
             attachment_metadata: List[Dict[str, str]] = []
             rewrite_meta = None
 
-            from services.attachment_service import attachment_service, model_supports_vision
+            from services.attachment_service import attachment_service
 
-            all_attachment_ids, new_attachment_ids = attachment_service.resolve_turn_attachment_ids(
+            all_attachment_ids, _new_attachment_ids = attachment_service.resolve_turn_attachment_ids(
                 session, attachment_ids, scope=attachment_scope or "session",
             )
             if not original_message and all_attachment_ids and not attachment_ids:
@@ -994,80 +1176,17 @@ class AgentService:
                         "fallback_reason": f"engine_error:{e}",
                     }
 
-            if all_attachment_ids:
-                required_modalities = ["text"]
-                new_images = attachment_service.list_image_attachments(session, new_attachment_ids)
-                pending_visual = attachment_service.ids_needing_vision_ocr(
-                    session,
-                    all_attachment_ids,
-                    message=message if isinstance(message, str) else original_message,
-                    history=session.messages or [],
-                )
-                if new_images or pending_visual:
-                    required_modalities.append("vision")
-
-                provider, model_svc, model_route = resolve_effective_model(
-                    primary_provider=provider,
-                    primary_model_svc=model_svc,
-                    aux_provider=aux_provider,
-                    aux_model_svc=aux_model_svc,
-                    required_modalities=required_modalities,
-                )
-
-                vision_capable = model_supports_vision(
-                    model_svc.capabilities or [],
-                    model_name=getattr(model_svc, "model_name", None),
-                )
-                msg_for_ocr = message if isinstance(message, str) else original_message
-
-                # Transcribe pending units for text retrieval. When primary already
-                # has vision and will receive images this turn, still persist OCR
-                # so later text-only turns work — but do it after build when aux
-                # handles vision (parallel-safe: await before/after).
-                need_persist_ocr = bool(pending_visual)
-                if need_persist_ocr and model_route != "aux":
-                    # Skip redundant OCR only for pure layout page-lookups when
-                    # vision model will see the page image; still OCR for semantic/full.
-                    from services.attachment_retrieve import resolve_intent
-                    intent = resolve_intent(msg_for_ocr)
-                    skip_pre_ocr = (
-                        vision_capable
-                        and intent.kind == "page"
-                        and bool(new_images)
-                    )
-                    if not skip_pre_ocr:
-                        await attachment_service.transcribe_units(
-                            db,
-                            session,
-                            pending_visual,
-                            message=msg_for_ocr,
-                            history=session.messages or [],
-                        )
-
-                text_suffix, image_blocks, attachment_metadata = attachment_service.build_context(
-                    session=session,
-                    message=message,
-                    attachment_ids=all_attachment_ids,
-                    history=session.messages or [],
-                    model_capabilities=model_svc.capabilities or [],
-                    model_name=getattr(model_svc, "model_name", None),
-                    new_attachment_ids=new_attachment_ids,
-                )
-                message = attachment_service.build_user_content(message, text_suffix, image_blocks)
-
-                # Aux vision path: images go to aux model; still cache transcripts
-                # for subsequent text-only turns.
-                if need_persist_ocr and model_route == "aux":
-                    try:
-                        await attachment_service.transcribe_units(
-                            db,
-                            session,
-                            pending_visual,
-                            message=msg_for_ocr,
-                            history=session.messages or [],
-                        )
-                    except Exception as e:
-                        print(f"[AgentService] aux 路径附件转写落盘失败: {e}")
+            prep = await AgentService._prepare_attachment_turn(
+                db, session, message, attachment_ids, attachment_scope,
+                provider, model_svc, aux_provider, aux_model_svc,
+                original_message=original_message,
+                text_only=False,
+            )
+            original_message = prep["original_message"] or original_message
+            message = prep["prepared_message"]
+            attachment_metadata = prep["attachment_metadata"]
+            provider = prep["provider"]
+            model_svc = prep["model_svc"]
 
             knowledge_context = ""
             kb_bindings = db.query(AgentKnowledgeBinding).filter(
@@ -2092,10 +2211,9 @@ class AgentLoop:
         return self._sanitize_messages_for_llm(messages)
 
     def _build_user_history_entry(self) -> Dict[str, Any]:
-        entry: Dict[str, Any] = {"role": "user", "content": self.original_user_message}
-        if self.attachment_metadata:
-            entry["attachments"] = self.attachment_metadata
-        return entry
+        return AgentService._user_turn_entry(
+            self.original_user_message, self.attachment_metadata
+        )
 
     def _llm_content(self, msg: Dict[str, Any]) -> Any:
         return msg.get("content", "")

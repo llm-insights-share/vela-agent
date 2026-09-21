@@ -365,3 +365,99 @@ def test_parse_csv_and_reject_doc():
 
 def test_message_attachment_limit_constant():
     assert MAX_ATTACHMENTS_PER_MESSAGE == 5
+
+
+def test_product_version_is_1_06():
+    from version import __version__
+    assert __version__ == "1.06"
+
+
+def test_flatten_user_content_text_and_images():
+    assert AttachmentService.flatten_user_content("hello") == "hello"
+    assert AttachmentService.flatten_user_content(None) == ""
+    flat = AttachmentService.flatten_user_content([
+        {"type": "text", "text": "请看图"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,xx"}},
+        {"type": "text", "text": "第二段"},
+    ])
+    assert "请看图" in flat
+    assert "[图像附件]" in flat
+    assert "第二段" in flat
+
+
+@pytest.mark.asyncio
+async def test_prepare_text_only_injects_parsed_attachment():
+    from types import SimpleNamespace
+    from services.agent_service import AgentService
+
+    s = _FakeSession({
+        "attachments": {
+            "att_1": {
+                "filename": "policy.txt",
+                "parsed_text": "差旅报销需提供发票",
+                "units": [{
+                    "unit_index": 1,
+                    "text": "差旅报销需提供发票",
+                    "status": "ready",
+                    "source": "parse",
+                }],
+            }
+        }
+    })
+    s.messages = []
+    provider = SimpleNamespace(provider_id="p1", provider_code="p")
+    model_svc = SimpleNamespace(
+        capabilities=["text"],
+        model_name="deepseek-chat",
+        model_service_id="ms-1",
+    )
+    prep = await AgentService._prepare_attachment_turn(
+        db=None,
+        session=s,
+        message="根据附件检查",
+        attachment_ids=["att_1"],
+        attachment_scope="session",
+        provider=provider,
+        model_svc=model_svc,
+        text_only=True,
+    )
+    assert prep["original_message"] == "根据附件检查"
+    assert "差旅报销" in prep["prepared_message"]
+    assert isinstance(prep["prepared_message"], str)
+    assert prep["attachment_metadata"][0]["filename"] == "policy.txt"
+    assert "暂不支持附件解析" not in prep["prepared_message"]
+
+
+@pytest.mark.asyncio
+async def test_finalize_workflow_persists_original_not_injected():
+    from unittest.mock import MagicMock
+    from services.agent_service import AgentService
+
+    session = MagicMock()
+    session.messages = []
+    session.token_used = 0
+    session.pending_context = {}
+    session.status = None
+    db = MagicMock()
+    result = {
+        "status": "completed",
+        "result": "已根据发票完成核对",
+        "total_tokens": 3,
+        "thinking_log": [],
+        "execution_trace": [],
+        "trace": [],
+    }
+    out = await AgentService._finalize_workflow_chat(
+        db,
+        session,
+        "INJECTED HUGE TEXT with 差旅政策全文",
+        result,
+        persist_user_message=True,
+        original_message="请看附件",
+        attachment_metadata=[{"id": "att_1", "filename": "a.pdf"}],
+    )
+    user = session.messages[0]
+    assert user["content"] == "请看附件"
+    assert user["attachments"][0]["filename"] == "a.pdf"
+    assert session.messages[1]["content"] == "已根据发票完成核对"
+    assert out["execution_mode"] == "workflow"

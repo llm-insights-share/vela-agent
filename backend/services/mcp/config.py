@@ -15,7 +15,7 @@ AUTH_OAUTH = "oauth"
 SUPPORTED_TRANSPORTS = (TRANSPORT_STDIO, TRANSPORT_SSE, TRANSPORT_STREAMABLE_HTTP)
 PREFERRED_PROTOCOL = "2025-03-26"
 FALLBACK_PROTOCOL = "2024-11-05"
-CLIENT_INFO = {"name": "vela-agent", "version": "1.0.0"}
+CLIENT_INFO = {"name": "vela-agent", "version": "1.06"}
 
 
 @dataclass

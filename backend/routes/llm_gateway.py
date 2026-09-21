@@ -164,16 +164,8 @@ async def chat_completions(
     # Forward the model name the upstream provider expects
     forward_body = dict(body)
     forward_body["model"] = svc.model_name
-    msgs, patched_n = _ensure_reasoning_content(forward_body.get("messages") or [])
+    msgs, _ = _ensure_reasoning_content(forward_body.get("messages") or [])
     forward_body["messages"] = msgs
-    # #region agent log
-    try:
-        import json as _j, time as _t
-        with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-5cb12e.log", "a") as _f:
-            _f.write(_j.dumps({"sessionId":"5cb12e","runId":"post-fix","hypothesisId":"H2","location":"llm_gateway.py:chat_completions","message":"sanitized reasoning_content","data":{"model":forward_body.get("model"),"n_messages":len(msgs),"patched":patched_n},"timestamp":int(_t.time()*1000)},ensure_ascii=False)+"\n")
-    except Exception:
-        pass
-    # #endregion
 
     headers = {
         "Authorization": f"Bearer {provider.api_key}",
@@ -208,17 +200,6 @@ async def chat_completions(
         try:
             resp = await client.post(url, headers=headers, json=forward_body)
             if resp.status_code >= 400:
-                # #region agent log
-                try:
-                    import json as _j, time as _t
-                    msgs = forward_body.get("messages") or []
-                    roles = [m.get("role") for m in msgs if isinstance(m, dict)]
-                    has_rc = any(isinstance(m, dict) and m.get("reasoning_content") for m in msgs)
-                    with open("/Users/zhangjr/apps/LlmDemo/vibe-project/vela-agent/.cursor/debug-5cb12e.log", "a") as _f:
-                        _f.write(_j.dumps({"sessionId":"5cb12e","runId":"pre-fix","hypothesisId":"H2","location":"llm_gateway.py:chat_completions","message":"upstream 400","data":{"status":resp.status_code,"model":forward_body.get("model"),"n_messages":len(msgs),"roles":roles[-6:],"has_reasoning_content":has_rc,"err":(resp.text or "")[:220]},"timestamp":int(_t.time()*1000)},ensure_ascii=False)+"\n")
-                except Exception:
-                    pass
-                # #endregion
                 return JSONResponse(
                     status_code=resp.status_code,
                     content={"error": {"message": resp.text[:1000], "type": "upstream_error"}},
